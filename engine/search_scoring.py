@@ -34,6 +34,7 @@ _MUSIC_SOURCE_MULTIPLIERS = {
     "bandcamp": 0.90,
 }
 _MUSIC_WEAK_ALBUM_METADATA_SOURCES = {"youtube_music", "youtube", "soundcloud"}
+_MUSIC_ALL_GATES_PASS_BONUS = 0.03
 
 _MUSIC_REJECT_PATTERNS = (
     (
@@ -541,7 +542,8 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
         )
         multiplier = _music_source_multiplier(candidate.get("source"))
         final_score_100 = max(0.0, min(100.0, raw_score_100 * multiplier))
-        final_score = final_score_100 / 100.0
+        gate_pass_bonus = _MUSIC_ALL_GATES_PASS_BONUS if not rejection_reason else 0.0
+        final_score = min(1.0, (final_score_100 / 100.0) + gate_pass_bonus)
 
         return {
             "score_artist": artist_overlap,
@@ -569,6 +571,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
                 "source_multiplier": multiplier,
                 "raw_score_100": raw_score_100,
                 "final_score_100": final_score_100,
+                "gate_pass_bonus": gate_pass_bonus,
                 "penalty_reasons": penalty_reasons,
             },
         }

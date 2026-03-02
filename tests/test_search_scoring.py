@@ -303,6 +303,48 @@ class SearchScoringTests(unittest.TestCase):
         scored = score_candidate(expected, candidate, source_modifier=1.0)
         self.assertEqual(scored.get("rejection_reason"), "low_album_similarity")
 
+    def test_music_track_applies_gate_pass_bonus_when_hard_gates_pass(self):
+        expected = {
+            "artist": "Artist",
+            "track": "Song",
+            "duration_hint_sec": 200,
+            "media_intent": "music_track",
+            "query": '"Artist" "Song"',
+        }
+        candidate = {
+            "source": "youtube_music",
+            "title": "Artist - Song",
+            "uploader": "Artist - Topic",
+            "artist_detected": "Artist",
+            "track_detected": "Song",
+            "duration_sec": 200,
+            "official": True,
+        }
+        scored = score_candidate(expected, candidate, source_modifier=1.0)
+        self.assertIsNone(scored.get("rejection_reason"))
+        self.assertAlmostEqual(float((scored.get("score_breakdown") or {}).get("gate_pass_bonus") or 0.0), 0.03)
+
+    def test_music_track_does_not_apply_gate_pass_bonus_when_hard_gate_fails(self):
+        expected = {
+            "artist": "Artist",
+            "track": "Song",
+            "duration_hint_sec": 200,
+            "media_intent": "music_track",
+            "query": '"Artist" "Song"',
+        }
+        candidate = {
+            "source": "youtube_music",
+            "title": "Artist - Song (Live)",
+            "uploader": "Artist - Topic",
+            "artist_detected": "Artist",
+            "track_detected": "Song",
+            "duration_sec": 200,
+            "official": True,
+        }
+        scored = score_candidate(expected, candidate, source_modifier=1.0)
+        self.assertEqual(scored.get("rejection_reason"), "disallowed_variant")
+        self.assertAlmostEqual(float((scored.get("score_breakdown") or {}).get("gate_pass_bonus") or 0.0), 0.0)
+
     def test_classify_music_title_variants_representative_tokens(self):
         tags = classify_music_title_variants(
             "Artist - Song (Official Audio) [Lyric Video] (Remastered 2020) (Radio Edit) (Extended Cut) [Sped Up] [Nightcore] [8D]"

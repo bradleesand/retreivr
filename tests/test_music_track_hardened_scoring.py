@@ -308,7 +308,9 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         )
         matched_score = self.scoring.score_candidate(expected, matched, source_modifier=1.0)
         mismatch_score = self.scoring.score_candidate(expected, mismatch, source_modifier=1.0)
-        self.assertGreater(float(matched_score["final_score"]), float(mismatch_score["final_score"]))
+        matched_raw = float((matched_score.get("score_breakdown") or {}).get("raw_score_100") or 0.0)
+        mismatch_raw = float((mismatch_score.get("score_breakdown") or {}).get("raw_score_100") or 0.0)
+        self.assertGreater(matched_raw, mismatch_raw)
 
     def test_youtube_music_missing_album_can_still_match_with_strong_signals(self):
         service = self._service(
@@ -1253,7 +1255,7 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
             search_db_path=self.search_db,
             queue_db_path=self.queue_db,
             adapters={"youtube": adapter},
-            config={"debug_music_scoring": True},
+            config={"debug_music_scoring": True, "music_source_match_threshold": 0.81},
             paths=None,
             canonical_resolver=_StubCanonicalResolver(),
         )
@@ -1343,7 +1345,7 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
             search_db_path=self.search_db,
             queue_db_path=self.queue_db,
             adapters={"youtube": adapter},
-            config={},
+            config={"music_source_match_threshold": 0.81},
             paths=None,
             canonical_resolver=_StubCanonicalResolver(),
         )
