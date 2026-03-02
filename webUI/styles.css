@@ -362,7 +362,7 @@ body.home-page .home-results {
   gap: 10px;
 }
 
-.topbar .button.small {
+.topbar .button.small:not(.nav-toggle) {
   height: 36px;
   min-height: 36px;
   display: inline-flex;
