@@ -24,6 +24,12 @@ All notable changes to this project will be documented here.
   - deterministic title-based variant tagging surfaced in summaries
   - benchmark failure motif rollups and hard-negative fixture stub mining workflow (review-only generation).
 - MusicBrainz transient retry behavior and yt-dlp metadata probe noise handling refined for stability.
+- Status/Info UI layout and queue usability refreshed:
+  - `Operations Status` and `Download Queue` are now full-width sections on Status
+  - queue table is scrollable with wider readable columns
+  - queue first column now shows user-facing title (not internal job id)
+  - failed queue rows can be cleared from UI (`Clear Failed`)
+  - `Metrics` panel moved to Info page.
 
 ### Fixed
 - Album metadata search now includes EP release groups alongside albums (`primarytype:album OR ep`) for artist+album and album-only flows.
@@ -32,6 +38,9 @@ All notable changes to this project will be documented here.
 - MusicBrainz include-contract failures in album metadata fetch (`genres` include misuse).
 - MP4 post-processing regression where incompatible audio streams could survive final output.
 - Home/header UI consistency regressions after navigation/action layout refinements.
+- Worker retry-loop regression causing repeated duplicate downloads after successful writes:
+  - fixed adapter store wiring in worker runtime
+  - removed post-download `YouTubeAdapter.store` attribute crash path that retried completed artifacts.
 
 ## v0.9.5 — Music Mode Hardening + Playlist File Import
 
