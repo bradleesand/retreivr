@@ -15,6 +15,8 @@ All notable changes to this project will be documented here.
 - Music search pipeline hardened without relaxing gates: deterministic multi-rung fallback, bounded duration expansion, and cleaner retry escalation.
 - EP album runs now use a bounded EP-only retrieval refinement rung (`{artist} - {track} audio topic`) with no scoring/threshold changes.
 - Search normalization/parenthetical handling consolidated into shared scoring utilities (search influence only; canonical metadata unchanged).
+- Music track artist scoring now handles featured credits more robustly (`feat/ft/featuring`): primary-artist and `album_artist` variants are considered for artist similarity and channel-authority matching.
+- Album gating is now source-aware for weak-metadata adapters (`youtube_music`, `youtube`, `soundcloud`): missing album metadata is neutral, while explicit mismatches are still penalized.
 - Explicit retrieval vs ranking/gating separation with benchmark `recall@k` metrics (`k={1,3,5,10}`).
 - Observability expanded for benchmark/runtime paths:
   - decision-edge reporting (failed gate + nearest-pass margin, accepted support features, runner-up gap)
@@ -32,6 +34,7 @@ All notable changes to this project will be documented here.
   - `Metrics` panel moved to Info page.
 
 ### Fixed
+- False negatives where strong YouTube/SoundCloud matches were rejected mainly due to featured-credit artist tokenization and missing album metadata.
 - Album metadata search now includes EP release groups alongside albums (`primarytype:album OR ep`) for artist+album and album-only flows.
 - MusicBrainz pair resolution no longer rejects EP releases as `invalid_release_type`/`no_official_album` in album-run binding paths.
 - Release enrichment fallback now accepts official EP releases (not only albums) when completing canonical music-track metadata.

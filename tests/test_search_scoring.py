@@ -196,6 +196,93 @@ class SearchScoringTests(unittest.TestCase):
         self.assertAlmostEqual(float(scored_upper.get("score_album") or 0.0), float(scored_mixed.get("score_album") or 0.0))
         self.assertAlmostEqual(float(scored_upper.get("final_score") or 0.0), float(scored_mixed.get("final_score") or 0.0))
 
+    def test_music_track_scoring_accepts_primary_artist_when_expected_has_feat_credit(self):
+        expected = {
+            "artist": "HARDY feat. Morgan Wallen",
+            "track": "red",
+            "duration_hint_sec": 205,
+            "media_intent": "music_track",
+            "query": '"HARDY feat. Morgan Wallen" "red"',
+        }
+        candidate = {
+            "source": "youtube_music",
+            "title": "HARDY - red (feat. Morgan Wallen)",
+            "uploader": "HARDY",
+            "artist_detected": "HARDY",
+            "track_detected": "red",
+            "duration_sec": 205,
+            "official": True,
+        }
+        scored = score_candidate(expected, candidate, source_modifier=1.0)
+        self.assertGreaterEqual(float(scored.get("score_artist") or 0.0), 0.99)
+        self.assertNotEqual(scored.get("rejection_reason"), "low_artist_similarity")
+
+    def test_music_track_scoring_uses_album_artist_variant_for_artist_overlap(self):
+        expected = {
+            "artist": "HARDY feat. Morgan Wallen",
+            "album_artist": "HARDY",
+            "track": "red",
+            "duration_hint_sec": 205,
+            "media_intent": "music_track",
+            "query": '"HARDY feat. Morgan Wallen" "red"',
+        }
+        candidate = {
+            "source": "soundcloud",
+            "title": "red (feat. Morgan Wallen)",
+            "uploader": "HARDY",
+            "artist_detected": "HARDY",
+            "track_detected": "red",
+            "duration_sec": 205,
+            "official": True,
+        }
+        scored = score_candidate(expected, candidate, source_modifier=1.0)
+        self.assertGreaterEqual(float(scored.get("score_artist") or 0.0), 0.99)
+
+    def test_music_track_youtube_missing_album_does_not_trigger_album_gate_rejection(self):
+        expected = {
+            "artist": "Artist",
+            "track": "Song",
+            "album": "Album",
+            "duration_hint_sec": 200,
+            "media_intent": "music_track",
+            "query": '"Artist" "Song" "Album"',
+        }
+        candidate = {
+            "source": "youtube_music",
+            "title": "Artist - Song",
+            "uploader": "Artist - Topic",
+            "artist_detected": "Artist",
+            "track_detected": "Song",
+            "album_detected": "",
+            "duration_sec": 200,
+            "official": True,
+        }
+        scored = score_candidate(expected, candidate, source_modifier=1.0)
+        self.assertNotEqual(scored.get("rejection_reason"), "low_album_similarity")
+        self.assertNotIn("album_mismatch_penalty", (scored.get("score_breakdown") or {}).get("penalty_reasons") or [])
+
+    def test_music_track_bandcamp_still_requires_album_similarity_floor(self):
+        expected = {
+            "artist": "Artist",
+            "track": "Song",
+            "album": "Album",
+            "duration_hint_sec": 200,
+            "media_intent": "music_track",
+            "query": '"Artist" "Song" "Album"',
+        }
+        candidate = {
+            "source": "bandcamp",
+            "title": "Artist - Song",
+            "uploader": "Artist",
+            "artist_detected": "Artist",
+            "track_detected": "Song",
+            "album_detected": "",
+            "duration_sec": 200,
+            "official": True,
+        }
+        scored = score_candidate(expected, candidate, source_modifier=1.0)
+        self.assertEqual(scored.get("rejection_reason"), "low_album_similarity")
+
     def test_classify_music_title_variants_representative_tokens(self):
         tags = classify_music_title_variants(
             "Artist - Song (Official Audio) [Lyric Video] (Remastered 2020) (Radio Edit) (Extended Cut) [Sped Up] [Nightcore] [8D]"

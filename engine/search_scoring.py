@@ -33,6 +33,7 @@ _MUSIC_SOURCE_MULTIPLIERS = {
     "soundcloud": 0.94,
     "bandcamp": 0.90,
 }
+_MUSIC_WEAK_ALBUM_METADATA_SOURCES = {"youtube_music", "youtube", "soundcloud"}
 
 _MUSIC_REJECT_PATTERNS = (
     (
@@ -106,6 +107,37 @@ def _expected_track_variants(expected):
     return variants
 
 
+def _expected_artist_token_variants(expected):
+    variants = []
+    seen = set()
+
+    def _add(value):
+        tokens = tuple(tokenize(value))
+        if not tokens or tokens in seen:
+            return
+        seen.add(tokens)
+        variants.append(list(tokens))
+
+    artist_value = str(expected.get("artist") or "").strip()
+    album_artist_value = str(expected.get("album_artist") or "").strip()
+
+    _add(artist_value)
+    if album_artist_value:
+        _add(album_artist_value)
+
+    # Featured credits frequently appear in MB artist strings but not uploader fields.
+    # Include primary-artist-only variants so official uploads are not dropped.
+    for raw_value in (artist_value, album_artist_value):
+        if not raw_value:
+            continue
+        normalized = normalize_text(raw_value)
+        primary = _FEAT_RE.split(normalized, maxsplit=1)[0].strip()
+        if primary:
+            _add(primary)
+
+    return variants or [tokenize(artist_value)]
+
+
 def _music_duration_points(expected_sec, candidate_sec, *, max_delta_ms=12000, hard_cap_ms=35000):
     if expected_sec is None or candidate_sec is None:
         return 0.0, "duration_missing", None
@@ -150,9 +182,12 @@ def _music_source_authority_points(expected, candidate):
         signal = 0.30
     authority_points = 8.0 * signal
 
-    expected_artist_tokens = tokenize(expected.get("artist"))
+    expected_artist_variants = _expected_artist_token_variants(expected)
     uploader_tokens = tokenize(candidate.get("uploader") or candidate.get("artist_detected"))
-    uploader_artist_overlap = token_overlap_score(expected_artist_tokens, uploader_tokens)
+    uploader_artist_overlap = max(
+        (token_overlap_score(tokens, uploader_tokens) for tokens in expected_artist_variants),
+        default=0.0,
+    )
 
     channel_authority_bonus = 0.0
     if source in {"youtube", "youtube_music"}:
@@ -323,7 +358,9 @@ def _canonical_bonus(expected, candidate):
 
 def score_candidate(expected, candidate, *, source_modifier=1.0):
     if str(expected.get("media_intent") or "").strip().lower() == "music_track":
-        expected_artist = tokenize(expected.get("artist"))
+        source_value = str(candidate.get("source") or "").strip().lower()
+        weak_album_metadata_source = source_value in _MUSIC_WEAK_ALBUM_METADATA_SOURCES
+        expected_artist_variants = _expected_artist_token_variants(expected)
         expected_track_variants = _expected_track_variants(expected)
         if not expected_track_variants:
             expected_track_variants = [str(expected.get("track") or "")]
@@ -334,7 +371,10 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
         candidate_track = tokenize(candidate.get("track_detected") or candidate.get("title"))
         candidate_album = tokenize(candidate.get("album_detected"))
 
-        artist_overlap = token_overlap_score(expected_artist, candidate_artist)
+        artist_overlap = max(
+            (token_overlap_score(tokens, candidate_artist) for tokens in expected_artist_variants),
+            default=0.0,
+        )
         track_overlap = 0.0
         relaxed_track_overlap = 0.0
         track_variant_used = expected_track_variants[0] if expected_track_variants else str(expected.get("track") or "")
@@ -404,7 +444,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             noise_penalty += 4.0
             penalty_reasons.append("feat_mismatch_noise")
 
-        if expected_album and album_overlap < 0.35:
+        if expected_album and album_overlap < 0.35 and (candidate_album or not weak_album_metadata_source):
             noise_penalty += 10.0
             penalty_reasons.append("album_mismatch_penalty")
 
@@ -418,17 +458,18 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
         ):
             rejection_reason = rejection_reason or "cover_artist_mismatch"
 
+        album_floor_required = bool(expected_album) and not weak_album_metadata_source
         floor_failed = (
             track_pts < 20.0
             or artist_pts < 15.0
-            or (bool(expected_album) and album_pts < 8.0)
+            or (album_floor_required and album_pts < 8.0)
         )
         if floor_failed and not rejection_reason:
             if track_pts < 20.0:
                 rejection_reason = "low_title_similarity"
             elif artist_pts < 15.0:
                 rejection_reason = "low_artist_similarity"
-            elif bool(expected_album) and album_pts < 8.0:
+            elif album_floor_required and album_pts < 8.0:
                 rejection_reason = "low_album_similarity"
             else:
                 rejection_reason = "floor_check_failed"

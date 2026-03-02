@@ -310,6 +310,27 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         mismatch_score = self.scoring.score_candidate(expected, mismatch, source_modifier=1.0)
         self.assertGreater(float(matched_score["final_score"]), float(mismatch_score["final_score"]))
 
+    def test_youtube_music_missing_album_can_still_match_with_strong_signals(self):
+        service = self._service(
+            {
+                "youtube_music": [
+                    _candidate(
+                        source="youtube_music",
+                        candidate_id="ytm-no-album",
+                        title="Artist - Song",
+                        uploader="Artist - Topic",
+                        artist="Artist",
+                        track="Song",
+                        album="",
+                        duration_sec=200,
+                    )
+                ]
+            }
+        )
+        best = service.search_music_track_best_match("Artist", "Song", album="Album", duration_ms=200000, limit=6)
+        self.assertIsNotNone(best)
+        self.assertEqual(best.get("candidate_id"), "ytm-no-album")
+
     def test_youtube_music_preferred_when_scores_close(self):
         service = self._service(
             {
