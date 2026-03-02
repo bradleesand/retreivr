@@ -1186,7 +1186,13 @@ class DownloadJobStore:
                 cur.execute(
                     """
                     UPDATE download_jobs
-                    SET status=?, queued=?, updated_at=?, attempts=?, last_error=?
+                    SET status=?, queued=?, updated_at=?, attempts=?, last_error=?,
+                        progress_downloaded_bytes=NULL,
+                        progress_total_bytes=NULL,
+                        progress_percent=NULL,
+                        progress_speed_bps=NULL,
+                        progress_eta_seconds=NULL,
+                        progress_updated_at=NULL
                     WHERE id=?
                     """,
                     (JOB_STATUS_QUEUED, queued_at, now, attempts, error_message, job.id),

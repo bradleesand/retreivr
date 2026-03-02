@@ -453,6 +453,13 @@ function formatDuration(seconds) {
   return `${secs}s`;
 }
 
+function toFiniteNumber(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function formatCountdown(serverTime, targetTime) {
   if (!serverTime || !targetTime) return "";
   const now = new Date(serverTime).getTime();
@@ -1236,8 +1243,9 @@ async function refreshStatus() {
     if (activeJobs.length) {
       const topJob = downloadingJobs[0] || activeJobs[0] || {};
       const topJobLabel = [topJob.status, topJob.source].filter(Boolean).join(" · ");
-      const topPercent = Number.isFinite(Number(topJob.progress_percent))
-        ? `${Math.max(0, Math.min(100, Math.round(Number(topJob.progress_percent))))}%`
+      const topPercentValue = toFiniteNumber(topJob.progress_percent);
+      const topPercent = topPercentValue !== null
+        ? `${Math.max(0, Math.min(100, Math.round(topPercentValue)))}%`
         : "";
       if (topJobLabel) {
         queueSummary.push(`head: ${topJobLabel}${topPercent ? ` (${topPercent})` : ""}`);
@@ -1337,12 +1345,12 @@ async function refreshStatus() {
       $("#status-playlist-progress-bar").style.width = `${Math.max(0, Math.min(100, percent))}%`;
     } else if (activeQueueCount > 0) {
       const aggregateDownloaded = downloadingJobs.reduce((sum, job) => {
-        const value = Number(job?.progress_downloaded_bytes);
-        return Number.isFinite(value) ? sum + value : sum;
+        const value = toFiniteNumber(job?.progress_downloaded_bytes);
+        return value !== null ? sum + value : sum;
       }, 0);
       const aggregateTotal = downloadingJobs.reduce((sum, job) => {
-        const value = Number(job?.progress_total_bytes);
-        return Number.isFinite(value) ? sum + value : sum;
+        const value = toFiniteNumber(job?.progress_total_bytes);
+        return value !== null ? sum + value : sum;
       }, 0);
       const aggregatePercent = aggregateTotal > 0
         ? Math.max(0, Math.min(100, Math.round((aggregateDownloaded / aggregateTotal) * 100)))
@@ -1369,38 +1377,38 @@ async function refreshStatus() {
     const videoContainer = $("#status-video-progress");
     const queueHead = downloadingJobs[0] || activeJobs[0] || null;
     const downloaded = queueHead
-      ? Number(queueHead.progress_downloaded_bytes)
-      : Number(status.video_downloaded_bytes);
+      ? toFiniteNumber(queueHead.progress_downloaded_bytes)
+      : toFiniteNumber(status.video_downloaded_bytes);
     const total = queueHead
-      ? Number(queueHead.progress_total_bytes)
-      : Number(status.video_total_bytes);
+      ? toFiniteNumber(queueHead.progress_total_bytes)
+      : toFiniteNumber(status.video_total_bytes);
     const speedBps = queueHead
-      ? Number(queueHead.progress_speed_bps)
-      : Number(status.video_speed);
+      ? toFiniteNumber(queueHead.progress_speed_bps)
+      : toFiniteNumber(status.video_speed);
     const etaSeconds = queueHead
-      ? Number(queueHead.progress_eta_seconds)
-      : Number(status.video_eta);
+      ? toFiniteNumber(queueHead.progress_eta_seconds)
+      : toFiniteNumber(status.video_eta);
     let videoPercent = queueHead
-      ? Number(queueHead.progress_percent)
-      : Number(status.video_progress_percent);
-    if (!Number.isFinite(videoPercent) && Number.isFinite(downloaded) && Number.isFinite(total) && total > 0) {
+      ? toFiniteNumber(queueHead.progress_percent)
+      : toFiniteNumber(status.video_progress_percent);
+    if (videoPercent === null && downloaded !== null && total !== null && total > 0) {
       videoPercent = Math.round((downloaded / total) * 100);
     }
     const hasVideoProgress = activeQueueCount > 0 && (
-      Number.isFinite(videoPercent) ||
-      Number.isFinite(downloaded) ||
-      Number.isFinite(total)
+      videoPercent !== null ||
+      downloaded !== null ||
+      total !== null
     );
     if (hasVideoProgress) {
       videoContainer.classList.remove("hidden");
       $("#status-video-progress-text").textContent =
-        Number.isFinite(videoPercent) ? `${videoPercent}%` : "-";
+        videoPercent !== null ? `${videoPercent}%` : "-";
       $("#status-video-progress-bar").style.width =
-        Number.isFinite(videoPercent) ? `${Math.max(0, Math.min(100, videoPercent))}%` : "0%";
-      const downloadedText = Number.isFinite(downloaded) ? formatBytes(downloaded) : "-";
-      const totalText = Number.isFinite(total) ? formatBytes(total) : "-";
-      const speedText = Number.isFinite(speedBps) ? formatSpeed(speedBps) : "-";
-      const etaText = Number.isFinite(etaSeconds) ? formatDuration(etaSeconds) : "-";
+        videoPercent !== null ? `${Math.max(0, Math.min(100, videoPercent))}%` : "0%";
+      const downloadedText = downloaded !== null ? formatBytes(downloaded) : "-";
+      const totalText = total !== null ? formatBytes(total) : "-";
+      const speedText = speedBps !== null ? formatSpeed(speedBps) : "-";
+      const etaText = etaSeconds !== null ? formatDuration(etaSeconds) : "-";
       const sourceText = queueHead
         ? [queueHead.status, queueHead.source, queueHead.media_intent].filter(Boolean).join(" · ")
         : "current";
@@ -4846,13 +4854,9 @@ async function refreshSearchQueue() {
     }
 
     jobs.forEach((job) => {
-      const downloaded = Number.isFinite(Number(job.progress_downloaded_bytes))
-        ? Number(job.progress_downloaded_bytes)
-        : null;
-      const total = Number.isFinite(Number(job.progress_total_bytes))
-        ? Number(job.progress_total_bytes)
-        : null;
-      const percent = Number.isFinite(Number(job.progress_percent))
+      const downloaded = toFiniteNumber(job.progress_downloaded_bytes);
+      const total = toFiniteNumber(job.progress_total_bytes);
+      const percent = toFiniteNumber(job.progress_percent) !== null
         ? Math.max(0, Math.min(100, Math.round(Number(job.progress_percent))))
         : ((downloaded !== null && total && total > 0)
           ? Math.max(0, Math.min(100, Math.round((downloaded / total) * 100)))
@@ -4864,11 +4868,13 @@ async function refreshSearchQueue() {
       if (downloaded !== null || total !== null) {
         progressParts.push(`${downloaded !== null ? formatBytes(downloaded) : "-"} / ${total !== null ? formatBytes(total) : "-"}`);
       }
-      if (Number.isFinite(Number(job.progress_speed_bps))) {
-        progressParts.push(formatSpeed(Number(job.progress_speed_bps)));
+      const speedBps = toFiniteNumber(job.progress_speed_bps);
+      if (speedBps !== null) {
+        progressParts.push(formatSpeed(speedBps));
       }
-      if (Number.isFinite(Number(job.progress_eta_seconds))) {
-        progressParts.push(`ETA ${formatDuration(Number(job.progress_eta_seconds))}`);
+      const etaSeconds = toFiniteNumber(job.progress_eta_seconds);
+      if (etaSeconds !== null) {
+        progressParts.push(`ETA ${formatDuration(etaSeconds)}`);
       }
       const progressText = progressParts.length ? progressParts.join(" · ") : "-";
       const displayTitle = String(job.display_title || "").trim()
