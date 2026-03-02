@@ -1988,7 +1988,7 @@ class DownloadWorkerEngine:
         review_canonical_id = f"review:{recording_mbid or job.id}:{review_key}"
 
         music_root = resolve_dir(self.config.get("music_download_folder"), self.paths.single_downloads_dir)
-        needs_review_root = os.path.join(music_root, "Music", _MUSIC_REVIEW_FOLDER_NAME)
+        needs_review_root = os.path.join(music_root, _MUSIC_REVIEW_FOLDER_NAME)
         review_metadata = {
             "artist": str(canonical.get("artist") or payload.get("artist") or "").strip() or "Unknown Artist",
             "track": str(canonical.get("track") or payload.get("track") or "").strip() or "Unknown Track",
@@ -5489,7 +5489,12 @@ def finalize_download_artifact(
     if audio_mode and enforce_music_contract:
         _assert_music_canonical_metadata_contract(meta)
         normalized_cleaned = str(cleaned_name or "").replace("\\", "/")
-        if not normalized_cleaned.startswith("Music/"):
+        segments = [segment for segment in normalized_cleaned.split("/") if segment]
+        if (
+            normalized_cleaned.startswith("/")
+            or ".." in segments
+            or len(segments) < 3
+        ):
             raise RuntimeError("music_filename_contract_violation")
 
     final_path = os.path.join(destination_dir, cleaned_name)
@@ -5802,7 +5807,7 @@ def _album_output_dir_from_job(job):
     album_folder = sanitize_component(album)
     if year:
         album_folder = f"{album_folder} ({year})"
-    return os.path.join(base_dir, "Music", sanitize_component(album_artist), album_folder)
+    return os.path.join(base_dir, sanitize_component(album_artist), album_folder)
 
 
 def _normalize_runtime_failure_reason(last_error, output_template):

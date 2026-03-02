@@ -260,7 +260,7 @@ def test_worker_path_uses_album_artist_not_featured_track_artist(jq, monkeypatch
         )
         assert final is not None
         final_path, meta = final
-        assert "/Music/Kenny Chesney/" in final_path
+        assert "/Kenny Chesney/" in final_path
         assert "Grace Potter" not in final_path
         assert meta.get("artist") == "Kenny Chesney feat. Grace Potter"
         assert meta.get("album_artist") == "Kenny Chesney"
