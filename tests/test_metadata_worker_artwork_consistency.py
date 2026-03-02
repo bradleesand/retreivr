@@ -135,3 +135,66 @@ def test_worker_applies_album_run_artwork_even_when_match_confidence_fails(monke
     assert captured["artwork"] == {"data": b"url-art", "mime": "image/jpeg"}
     assert captured["tags"]["artist"] == "Artist"
     assert captured["tags"]["album_artist"] == "Album Artist"
+
+
+def test_worker_falls_back_to_release_group_cover_when_release_cover_missing(monkeypatch, tmp_path: Path) -> None:
+    worker = _load_worker()
+
+    track_path = tmp_path / "track.mp3"
+    track_path.write_bytes(b"audio")
+
+    monkeypatch.setattr(worker.matcher, "parse_source", lambda meta, file_path: {"artist": "Artist", "title": "Song"})
+    monkeypatch.setattr(worker.matcher, "get_duration_seconds", lambda file_path: 200)
+    monkeypatch.setattr(worker.musicbrainz_provider, "search_recordings", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        worker.matcher,
+        "select_best_match",
+        lambda source, candidates, duration: ({"artist": "Artist", "title": "Song", "release_id": "release-per-track"}, 99),
+    )
+
+    class _FakeMBService:
+        def fetch_release_group_cover_art_url(self, release_group_id, timeout=8):
+            _ = release_group_id, timeout
+            return "https://img.test/release-group-cover.jpg"
+
+    calls = {"url": []}
+
+    def _fetch_artwork_from_url(url, max_size_px=1500, timeout=10):
+        _ = max_size_px, timeout
+        calls["url"].append(url)
+        if "release-group-cover" in url:
+            return {"data": b"rg-art", "mime": "image/jpeg"}
+        return None
+
+    monkeypatch.setattr(worker.artwork_provider, "fetch_artwork_from_url", _fetch_artwork_from_url)
+    monkeypatch.setattr(worker.artwork_provider, "fetch_artwork", lambda release_id, max_size_px=1500: None)
+    monkeypatch.setattr(worker, "get_musicbrainz_service", lambda: _FakeMBService())
+
+    captured = {}
+    monkeypatch.setattr(
+        worker,
+        "apply_tags",
+        lambda file_path, tags, artwork, **kwargs: captured.update({"tags": tags, "artwork": artwork}),
+    )
+
+    worker._process_item(
+        {
+            "file_path": str(track_path),
+            "config": {"embed_artwork": True, "confidence_threshold": 70},
+            "meta": {
+                "artist": "Artist",
+                "track": "Song",
+                "album": "Album",
+                "album_artist": "Album Artist",
+                "track_number": 1,
+                "disc_number": 1,
+                "artwork_url": "https://img.test/missing-cover.jpg",
+                "mb_release_id": "album-release",
+                "mb_release_group_id": "album-rg",
+            },
+        }
+    )
+
+    assert calls["url"][0] == "https://img.test/missing-cover.jpg"
+    assert "https://img.test/release-group-cover.jpg" in calls["url"]
+    assert captured["artwork"] == {"data": b"rg-art", "mime": "image/jpeg"}

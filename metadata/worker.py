@@ -7,6 +7,7 @@ from . import matcher
 from .providers import acoustid as acoustid_provider
 from .providers import artwork as artwork_provider
 from .providers import musicbrainz as musicbrainz_provider
+from .services.musicbrainz_service import get_musicbrainz_service
 from .tagging_service import apply_tags
 from .lyric_enrichment import fetch_lyrics
 
@@ -92,18 +93,39 @@ def _process_item(item):
         "mb_release_id": meta.get("mb_release_id") or best.get("release_id"),
     }
     release_id = meta.get("mb_release_id") or best.get("release_id")
+    release_group_id = meta.get("mb_release_group_id") or best.get("release_group_id")
     artwork = None
     if config.get("embed_artwork"):
+        max_size_px = config.get("max_artwork_size_px", 1500)
         artwork_url = str(meta.get("artwork_url") or "").strip()
+        thumbnail_url = str(meta.get("thumbnail_url") or "").strip()
         if artwork_url:
             artwork = artwork_provider.fetch_artwork_from_url(
                 artwork_url,
-                max_size_px=config.get("max_artwork_size_px", 1500),
+                max_size_px=max_size_px,
             )
         if artwork is None and release_id:
             artwork = artwork_provider.fetch_artwork(
                 release_id,
-                max_size_px=config.get("max_artwork_size_px", 1500),
+                max_size_px=max_size_px,
+            )
+        if artwork is None and release_group_id:
+            try:
+                group_cover_url = get_musicbrainz_service().fetch_release_group_cover_art_url(
+                    release_group_id,
+                    timeout=8,
+                )
+            except Exception:
+                group_cover_url = None
+            if group_cover_url:
+                artwork = artwork_provider.fetch_artwork_from_url(
+                    group_cover_url,
+                    max_size_px=max_size_px,
+                )
+        if artwork is None and thumbnail_url and thumbnail_url != artwork_url:
+            artwork = artwork_provider.fetch_artwork_from_url(
+                thumbnail_url,
+                max_size_px=max_size_px,
             )
 
     display_artist = tags.get("artist") or "-"
