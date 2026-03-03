@@ -181,6 +181,17 @@ SUPPORTED_IMPORT_EXTENSIONS = {".m3u", ".m3u8", ".csv", ".xml", ".plist", ".json
 IMPORT_JOB_TTL_SECONDS = 6 * 60 * 60
 
 
+def _log_transition(event: str, **fields) -> None:
+    label = str(event or "event").strip() or "event"
+    if fields:
+        parts = [f"{key}={value}" for key, value in fields.items()]
+        logging.info("")
+        logging.info("========== %s | %s ==========", label, " ".join(parts))
+    else:
+        logging.info("")
+        logging.info("========== %s ==========", label)
+
+
 def _mb_service():
     return get_musicbrainz_service()
 
@@ -3058,10 +3069,13 @@ async def _start_run_with_config(
                     bool(playlist_id),
                 )
                 if run_source == "watcher":
+                    _log_transition("RUN_START", source="watcher", run_id=app.state.run_id)
                     logging.info("Watcher-triggered run starting")
                 elif run_source == "scheduled":
+                    _log_transition("RUN_START", source="scheduled", run_id=app.state.run_id)
                     logging.info("Scheduled run starting")
                 else:
+                    _log_transition("RUN_START", source=run_source, run_id=app.state.run_id)
                     logging.info("Manual run starting (source=%s)", run_source)
                 if playlist_id:
                     run_callable = functools.partial(
@@ -3367,6 +3381,7 @@ async def _handle_scheduled_run():
         return
     result, next_allowed = await _start_run_with_config(config, run_source="scheduled")
     if result == "started":
+        _log_transition("SCHEDULED_TICK", action="run_started")
         logging.info("Scheduled run starting")
         now = datetime.now(timezone.utc).isoformat()
         _set_schedule_state(last_run=now, next_run=_get_next_run_iso())
@@ -4589,6 +4604,7 @@ def _set_watcher_status(state=None, **fields):
         app.state.watcher_status = status
     prev_state = status.get("state")
     if state and state != prev_state:
+        _log_transition("WATCHER_STATE", from_state=prev_state or "-", to_state=state)
         status["state"] = state
         if state == "polling":
             logging.info("Watcher state → polling")
@@ -4867,6 +4883,12 @@ async def api_run(request: RunRequest):
         accounts = (config.get("accounts") or {}) if isinstance(config, dict) else {}
         if request.playlist_account not in accounts:
             raise HTTPException(status_code=400, detail="playlist_account not found in config")
+    _log_transition(
+        "RUN_REQUESTED",
+        source="api",
+        single_url=bool(request.single_url),
+        playlist_id=request.playlist_id or "-",
+    )
     logging.info(
         "Manual run requested (source=api) single_url=%s playlist_id=%s",
         bool(request.single_url),
