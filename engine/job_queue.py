@@ -228,6 +228,7 @@ _MUSIC_MAX_PRERESOLVE_LOOKAHEAD = 4
 _WORKER_DEFAULT_POLL_SECONDS = 1
 _SOURCE_DEFAULT_CONCURRENCY = 2
 _SOURCE_MAX_CONCURRENCY = 4
+_GLOBAL_MAX_CONCURRENT_JOBS = 32
 
 
 @dataclass(frozen=True)
@@ -1069,16 +1070,40 @@ class DownloadJobStore:
         finally:
             conn.close()
 
-    def claim_next_job(self, source, *, now=None, max_active_per_source=1):
+    def claim_next_job(
+        self,
+        source,
+        *,
+        now=None,
+        max_active_per_source=1,
+        max_active_total=None,
+    ):
         now = now or utc_now()
         try:
             active_limit = max(1, int(max_active_per_source or 1))
         except (TypeError, ValueError):
             active_limit = 1
+        total_limit = None
+        if max_active_total is not None:
+            try:
+                parsed_total = int(max_active_total)
+            except (TypeError, ValueError):
+                parsed_total = None
+            if parsed_total is not None and parsed_total > 0:
+                total_limit = parsed_total
         conn = self._connect()
         try:
             cur = conn.cursor()
             cur.execute("BEGIN IMMEDIATE")
+            if total_limit is not None:
+                cur.execute(
+                    "SELECT COUNT(1) FROM download_jobs WHERE status IN (?, ?)",
+                    (JOB_STATUS_CLAIMED, JOB_STATUS_DOWNLOADING),
+                )
+                active_total = int((cur.fetchone() or [0])[0] or 0)
+                if active_total >= total_limit:
+                    conn.commit()
+                    return None
             cur.execute(
                 "SELECT COUNT(1) FROM download_jobs WHERE status IN (?, ?) AND source=?",
                 (JOB_STATUS_CLAIMED, JOB_STATUS_DOWNLOADING, source),
@@ -1467,6 +1492,7 @@ class DownloadWorkerEngine:
         self._music_resolution_cache = OrderedDict()
         self._source_semaphores = {}
         self._source_concurrency_limits = {}
+        self._global_concurrency_limit_cache = "__unset__"
 
     def _extract_resolved_candidate(self, resolved):
         if not resolved:
@@ -2344,6 +2370,28 @@ class DownloadWorkerEngine:
             self._source_concurrency_limits[source] = limit
         return limit
 
+    def _global_concurrency_limit(self) -> int | None:
+        with self._locks_lock:
+            cached = self._global_concurrency_limit_cache
+            if cached != "__unset__":
+                return cached
+        cfg = self.config if isinstance(self.config, dict) else {}
+        value = cfg.get("max_concurrent_jobs_total")
+        if value is None:
+            limit = None
+        else:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = None
+            if parsed is None or parsed <= 0:
+                limit = None
+            else:
+                limit = max(1, min(parsed, _GLOBAL_MAX_CONCURRENT_JOBS))
+        with self._locks_lock:
+            self._global_concurrency_limit_cache = limit
+        return limit
+
     def _get_source_semaphore(self, source):
         with self._locks_lock:
             semaphore = self._source_semaphores.get(source)
@@ -2619,6 +2667,7 @@ class DownloadWorkerEngine:
                     job = self.store.claim_next_job(
                         source,
                         max_active_per_source=source_limit,
+                        max_active_total=self._global_concurrency_limit(),
                     )
                     if not job:
                         source_semaphore.release()
