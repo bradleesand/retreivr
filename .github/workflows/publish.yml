@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 env:
-  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/retreivr
+  IMAGE_REPO: retreivr
   DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/retreivr
 
 jobs:
@@ -20,6 +20,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Normalize GHCR image name
+        id: image_name
+        shell: bash
+        run: |
+          set -euo pipefail
+          OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "value=ghcr.io/${OWNER_LC}/${IMAGE_REPO}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -48,7 +56,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.GHCR_IMAGE }}
+            ${{ steps.image_name.outputs.value }}
             ${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=ref,event=tag

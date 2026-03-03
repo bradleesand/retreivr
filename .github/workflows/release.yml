@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/retreivr
+  IMAGE_REPO: retreivr
 
 jobs:
   release:
@@ -19,6 +19,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Normalize GHCR image name
+        id: image_name
+        shell: bash
+        run: |
+          set -euo pipefail
+          OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "value=ghcr.io/${OWNER_LC}/${IMAGE_REPO}" >> "${GITHUB_OUTPUT}"
 
       - name: Determine release mode
         id: release_mode
@@ -44,6 +52,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          IMAGE_NAME="${{ steps.image_name.outputs.value }}"
           TAGS="${IMAGE_NAME}:${GITHUB_REF_NAME}"
           if [[ "${{ steps.release_mode.outputs.is_prerelease }}" == "false" ]]; then
             TAGS="${TAGS}"$'\n'"${IMAGE_NAME}:latest"
