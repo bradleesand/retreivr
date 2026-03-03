@@ -1031,13 +1031,31 @@ def run_single_playlist(
         logging.error("Invalid playlist ID or URL: %s", playlist_value)
         return status
 
-    folder = destination or config.get("music_download_folder") or config.get("single_download_folder") or "."
+    normalized_final_format = str(final_format_override or "").strip().lower()
+    explicit_music_mode = bool(_ignored.get("music_mode"))
+    configured_media_type = str((config or {}).get("media_type") or "").strip().lower()
+    inferred_music_mode = explicit_music_mode or configured_media_type in {"music", "audio"} or normalized_final_format in {
+        "mp3",
+        "m4a",
+        "flac",
+        "wav",
+        "ogg",
+        "opus",
+        "aac",
+    }
+    if inferred_music_mode:
+        default_folder = config.get("music_download_folder") or config.get("single_download_folder") or "."
+    else:
+        default_folder = config.get("single_download_folder") or config.get("music_download_folder") or "."
+    folder = destination or default_folder
     entry = {
         "playlist_id": playlist_id,
         "folder": folder,
         "remove_after_download": False,
         "mode": "full",
     }
+    if inferred_music_mode:
+        entry["media_type"] = "music"
     if account:
         entry["account"] = account
     if final_format_override:
