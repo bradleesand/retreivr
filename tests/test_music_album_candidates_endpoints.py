@@ -72,3 +72,74 @@ def test_album_candidates_post_empty_query_returns_legacy_envelope(monkeypatch) 
     resp = client.post("/api/music/album/candidates", json={"query": ""})
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok", "album_candidates": []}
+
+
+def test_album_search_get_uses_artist_mbid_strict_lookup(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    called = {"artist_mbid": None}
+
+    def _fake_by_mbid(artist_mbid: str, *, limit: int):
+        called["artist_mbid"] = artist_mbid
+        return [{"release_group_id": "rg-strict", "title": "Strict Album"}]
+
+    monkeypatch.setattr(module, "_search_music_album_candidates_for_artist_mbid", _fake_by_mbid)
+    monkeypatch.setattr(module, "_search_music_album_candidates", lambda query, limit: [{"release_group_id": "rg-loose"}])
+
+    resp = client.get(
+        "/api/music/albums/search",
+        params={"q": "ERNEST", "artist_mbid": "artist-mbid-123", "limit": 10},
+    )
+    assert resp.status_code == 200
+    assert called["artist_mbid"] == "artist-mbid-123"
+    assert resp.json() == [{"release_group_id": "rg-strict", "title": "Strict Album"}]
+
+
+def test_artist_mbid_album_search_filters_out_singles(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "search_release_groups",
+        lambda query, limit: {
+            "release-group-list": [
+                {
+                    "id": "rg-album-1",
+                    "title": "Real Album",
+                    "primary-type": "Album",
+                    "secondary-type-list": [],
+                    "artist-credit": [{"name": "ERNEST"}],
+                    "ext:score": "97",
+                },
+                {
+                    "id": "rg-ep-1",
+                    "title": "Real EP",
+                    "primary-type": "EP",
+                    "secondary-type-list": [],
+                    "artist-credit": [{"name": "ERNEST"}],
+                    "ext:score": "95",
+                },
+                {
+                    "id": "rg-single-1",
+                    "title": "Single Leak",
+                    "primary-type": "Single",
+                    "secondary-type-list": [],
+                    "artist-credit": [{"name": "ERNEST"}],
+                    "ext:score": "99",
+                },
+            ]
+        },
+    )
+
+    resp = client.get(
+        "/api/music/albums/search",
+        params={"q": "ERNEST", "artist_mbid": "artist-mbid-123", "limit": 10},
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    ids = {str(item.get("release_group_id") or "") for item in payload}
+    assert "rg-album-1" in ids
+    assert "rg-ep-1" in ids
+    assert "rg-single-1" not in ids

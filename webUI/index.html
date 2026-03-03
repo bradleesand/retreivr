@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.5-ui-2">
-  <script defer src="app.js?v=0.9.5-ui-2"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.6-ui-queue-2">
+  <script defer src="app.js?v=0.9.6-ui-queue-14"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -16,7 +16,7 @@
       <img class="app-icon" src="app_icon.png" alt="Retreivr">
       <div class="brand-text">
         <div class="title">Retreivr</div>
-        <div class="subtitle">Self-hosted playlist archiving</div>
+        <div class="subtitle">Self-Hosted Media Retrieval</div>
       </div>
     </div>
     <button id="nav-toggle" class="button ghost small nav-toggle" type="button" aria-expanded="false" aria-controls="primary-nav">
@@ -30,9 +30,10 @@
       <div id="nav-actions" class="nav-actions"></div>
     </nav>
     <div class="top-actions" id="top-actions">
-      <button id="refresh-all" class="button small">Refresh</button>
       <button id="toggle-theme" class="button ghost small">Light mode</button>
-      <a class="button ghost small" href="/docs" target="_blank" rel="noopener">OpenAPI</a>
+    </div>
+    <div class="header-sponsor">
+      <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
     </div>
   </header>
 
@@ -123,48 +124,47 @@
           </div>
         </div>
 
-        <div id="music-mode-console" class="hidden">
-          <section class="panel">
+        <div id="music-mode-console" class="music-search-console hidden">
+          <div class="music-search-header">
             <div class="panel-title">Music Search</div>
-            <div class="stack">
-              <div class="group">
-                <div class="group-title">Create Search Request</div>
-                <div class="grid two">
-                  <label class="field medium">
-                    <span>Artist</span>
-                    <input id="search-artist" type="text" placeholder="Artist name">
-                  </label>
-                  <label class="field medium">
-                    <span>Album</span>
-                    <input id="search-album" type="text" placeholder="Optional album">
-                  </label>
-                  <label class="field medium">
-                    <span>Track</span>
-                    <input id="search-track" type="text" placeholder="Optional track">
-                  </label>
-                  <label class="field short">
-                    <span>Mode</span>
-                    <select id="music-mode-select">
-                      <option value="auto">Auto</option>
-                      <option value="artist">Artist</option>
-                      <option value="album">Album</option>
-                      <option value="track">Track</option>
-                    </select>
-                  </label>
-                  <label class="field short">
-                    <span>Max candidates (1-15)</span>
-                    <input id="search-max-candidates" type="number" min="1" max="15" value="10">
-                  </label>
-                </div>
-                <div class="row">
-                  <div class="action-group">
-                    <button id="search-create-only" class="button">Search</button>
-                  </div>
-                  <div id="search-create-message" class="notice" role="status"></div>
-                </div>
-              </div>
-            </div>
-          </section>
+          </div>
+          <div class="music-search-grid">
+            <label class="field">
+              <span>Artist</span>
+              <input id="search-artist" type="text" placeholder="Artist name">
+            </label>
+            <label class="field">
+              <span>Album</span>
+              <input id="search-album" type="text" placeholder="Optional album">
+            </label>
+            <label class="field">
+              <span>Track</span>
+              <input id="search-track" type="text" placeholder="Optional track">
+            </label>
+          </div>
+          <div class="music-search-options">
+            <label class="field">
+              <span>Mode</span>
+              <select id="music-mode-select">
+                <option value="auto">Auto</option>
+                <option value="artist">Artist</option>
+                <option value="album">Album</option>
+                <option value="track">Track</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Max candidates (1-15)</span>
+              <input id="search-max-candidates" type="number" min="1" max="15" value="10">
+            </label>
+            <label class="checkbox-inline music-search-force-redownload">
+              <input id="music-force-redownload" type="checkbox">
+              <span>Force re-download</span>
+            </label>
+          </div>
+          <div class="music-search-actions-row">
+            <button id="search-create-only" class="button primary">Search</button>
+            <div id="search-create-message" class="notice" role="status"></div>
+          </div>
         </div>
         <div id="music-results-container"></div>
 
@@ -195,39 +195,16 @@
         <div id="home-results-detail" class="meta home-results-detail hidden"></div>
         <div id="home-results-list"></div>
       </div>
+      <footer class="home-footer-links info-footer-links" aria-label="Project links">
+        <a href="https://github.com/sudoStacks/retreivr" target="_blank" rel="noopener">Retreivr Repository</a>
+        <a href="https://github.com/sudoStacks/" target="_blank" rel="noopener">SudoStacks GitHub</a>
+        <a href="https://x.com/sudoStacks" target="_blank" rel="noopener">
+          <span class="x-logo" aria-hidden="true">X</span>
+          <span>Follow us on X</span>
+        </a>
+      </footer>
     </section>
-    <section class="panel" id="search-queue-panel" data-page="status">
-      <div class="panel-title">Download Queue</div>
-      <div class="notice">Live operations queue (completed jobs are shown in Download History).</div>
-      <div class="row">
-        <label class="field inline short">
-          <span>Limit</span>
-          <input id="search-queue-limit" type="number" min="1" max="5000" value="100">
-        </label>
-        <button id="search-queue-refresh" class="button ghost">Refresh</button>
-        <div id="search-queue-message" class="notice" role="status"></div>
-      </div>
-      <div class="table-wrap">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>Job ID</th>
-              <th>Origin</th>
-              <th>Source</th>
-              <th>Media intent</th>
-              <th>Status</th>
-              <th>Progress</th>
-              <th>Attempts</th>
-              <th>Created</th>
-              <th>Last error</th>
-            </tr>
-          </thead>
-          <tbody id="search-queue-body"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel" id="status-panel" data-page="status">
+    <section class="panel full" id="status-panel" data-page="status">
       <div class="panel-title">Operations Status (Live)</div>
       <div class="stack">
         <div class="row">
@@ -427,8 +404,10 @@
               <span class="label">Count</span>
               <span id="music-failures-count">0</span>
             </div>
-            <button id="music-failures-refresh" class="button ghost small" type="button">Refresh</button>
+            <button id="music-failures-refresh" class="button ghost small" type="button" onclick="refreshMusicFailures()">Refresh</button>
+            <button id="music-failures-clear" class="button ghost remove small" type="button" onclick="clearMusicFailures()">Clear Music Failures</button>
           </div>
+          <div id="music-failures-message" class="notice" role="status"></div>
           <div id="music-failures-list" class="stack"></div>
         </div>
         <div class="row">
@@ -437,7 +416,40 @@
       </div>
     </section>
 
-    <section class="panel" id="metrics-panel" data-page="status">
+    <section class="panel full" id="search-queue-panel" data-page="status">
+      <div class="panel-title">Download Queue</div>
+      <div class="notice">Live operations queue (completed jobs are shown in Download History).</div>
+      <div class="row">
+        <label class="field inline short">
+          <span>Limit</span>
+          <input id="search-queue-limit" type="number" min="1" max="5000" value="100">
+        </label>
+        <button id="search-queue-refresh" class="button ghost">Refresh</button>
+        <button id="search-queue-clear-failed" class="button ghost remove">Clear Failed/Cancelled</button>
+        <div id="search-queue-message" class="notice" role="status"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Origin</th>
+              <th>Source</th>
+              <th>Media intent</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Attempts</th>
+              <th>Created</th>
+              <th>Last error</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="search-queue-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" id="metrics-panel" data-page="advanced">
       <div class="panel-title">Metrics</div>
       <div class="panel-body">
         <div class="row">
@@ -481,7 +493,10 @@
     </section>
 
     <section class="panel full" id="config-panel" data-page="config">
-      <div class="panel-title">Config Editor</div>
+      <div class="panel-header-row">
+        <div class="panel-title">Config Editor</div>
+        <a class="button ghost small" href="/docs" target="_blank" rel="noopener">OpenAPI</a>
+      </div>
       <div class="stack">
         <div class="group">
           <div class="group-title">Config File</div>
@@ -862,10 +877,6 @@
         </table>
       </div>
     </section>
-
-    
-
-    
 
     <section class="panel full page-full" id="logs-panel" data-page="status">
       <div class="panel-title">System Logs (Diagnostics)</div>

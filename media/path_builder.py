@@ -28,7 +28,7 @@ def build_music_relative_layout(
     safe_disc_number = int(disc_number) if isinstance(disc_number, int) and disc_number > 0 else 1
     safe_disc_total = int(disc_total) if isinstance(disc_total, int) and disc_total > 0 else None
 
-    segments = ["Music", safe_album_artist, safe_album_folder]
+    segments = [safe_album_artist, safe_album_folder]
     include_disc_folder = bool((safe_disc_total and safe_disc_total > 1) or safe_disc_number > 1)
     if include_disc_folder:
         segments.append(f"Disc {safe_disc_number}")
@@ -48,9 +48,6 @@ def resolve_music_root_path(payload: dict) -> Path:
         or "."
     )
     root = Path(str(root_value))
-    # Canonical layout builders already include a leading "Music/" segment.
-    if root.name.lower() == "music":
-        return root.parent if str(root.parent) != "" else Path(".")
     return root
 
 
@@ -58,11 +55,10 @@ def build_music_path(root: Path, metadata: CanonicalMetadata, ext: str) -> Path:
     """Build and return a canonical music path without creating directories.
 
     Layout:
-        Music/
-          {album_artist}/
-            {album} ({year})/
-              [Disc {disc_num}/ only when multi-disc]
-                {track_num:02d} - {title}.{ext}
+      {album_artist}/
+        {album} ({year})/
+          [Disc {disc_num}/ only when multi-disc]
+            {track_num:02d} - {title}.{ext}
     """
     album_artist = sanitize_for_filesystem(metadata.album_artist or metadata.artist or "Unknown Artist")
     album_folder = build_album_directory(metadata)

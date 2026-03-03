@@ -1,6 +1,12 @@
 import re
 import unicodedata
 
+from engine.music_title_normalization import relaxed_search_title
+
+# Search scoring logic is benchmark-gated.
+# Changes require benchmark pass + no precision regression.
+# Do not alter thresholds without updating gate config and benchmark baseline.
+
 _WEIGHTS = {
     "artist": 0.30,
     "track": 0.35,
@@ -10,9 +16,13 @@ _WEIGHTS = {
 }
 
 _BRACKET_JUNK_RE = re.compile(
-    r"[\(\[\{][^\)\]\}]*?(official|lyrics|audio|video|visualizer)[^\)\]\}]*?[\)\]\}]",
+    r"[\(\[\{][^\)\]\}]*?"
+    r"(official|official\s+audio|official\s+music\s+video|official\s+video|"
+    r"lyrics?|lyric\s+video|audio|video|visualizer|hd|4k|topic)"
+    r"[^\)\]\}]*?[\)\]\}]",
     re.IGNORECASE,
 )
+_TOPIC_SUFFIX_RE = re.compile(r"\s*-\s*topic\s*$", re.IGNORECASE)
 _FEAT_RE = re.compile(r"\b(feat\.?|ft\.?|featuring)\b", re.IGNORECASE)
 
 _BANNED_TOKENS = {"cover", "tribute", "karaoke", "reaction", "8d", "nightcore", "slowed"}
@@ -23,10 +33,20 @@ _MUSIC_SOURCE_MULTIPLIERS = {
     "soundcloud": 0.94,
     "bandcamp": 0.90,
 }
+_MUSIC_WEAK_ALBUM_METADATA_SOURCES = {"youtube_music", "youtube", "soundcloud"}
+_MUSIC_ALL_GATES_PASS_BONUS = 0.03
 
 _MUSIC_REJECT_PATTERNS = (
-    ("disallowed_variant", re.compile(r"\b(live|acoustic|stripped|radio edit|karaoke|instrumental)\b", re.IGNORECASE)),
-    ("video_variant", re.compile(r"\b(official\s+video|music\s+video|visualizer|lyric\s+video)\b", re.IGNORECASE)),
+    (
+        "disallowed_variant",
+        re.compile(
+            r"\b("
+            r"live|acoustic|instrumental|karaoke|cover|tribute|remix|extended\s+mix|"
+            r"sped\s*up|slowed(?:\s+down)?|nightcore|stripped|radio\s+edit"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
     ("preview_variant", re.compile(r"\b(preview|snippet|teaser|short\s+version)\b", re.IGNORECASE)),
     ("session_variant", re.compile(r"\b(cmt\s*\d+\s*sessions?)\b", re.IGNORECASE)),
 )
@@ -39,13 +59,90 @@ _MUSIC_NOISE_PATTERNS = (
     ("session_noise", re.compile(r"\bcmt\s*\d+\s*sessions?\b", re.IGNORECASE), 7.0),
 )
 
+_VARIANT_TOKEN_RULES = (
+    ("official_audio", re.compile(r"\bofficial\s+audio\b", re.IGNORECASE)),
+    ("lyric_video", re.compile(r"\blyrics?\b|\blyric\s+video\b", re.IGNORECASE)),
+    ("live", re.compile(r"\blive\b", re.IGNORECASE)),
+    ("remaster", re.compile(r"\bremaster(?:ed)?(?:\s+\d{2,4})?\b", re.IGNORECASE)),
+    ("radio_edit", re.compile(r"\bradio\s+edit(?:ion)?\b|\bradio\s+version\b", re.IGNORECASE)),
+    ("sped_up", re.compile(r"\bsped[\s_-]*up\b", re.IGNORECASE)),
+    ("slowed", re.compile(r"\bslowed(?:[\s_-]+down)?\b", re.IGNORECASE)),
+    ("nightcore", re.compile(r"\bnightcore\b", re.IGNORECASE)),
+    ("8d", re.compile(r"\b8d\b", re.IGNORECASE)),
+    ("extended", re.compile(r"\bextended\b", re.IGNORECASE)),
+    ("edit", re.compile(r"\bedit\b", re.IGNORECASE)),
+    ("cut", re.compile(r"\bcut\b", re.IGNORECASE)),
+)
+
 
 def _music_query_variant_flags(query):
     query_lower = str(query or "").lower()
     return {term for term in _MUSIC_VARIANT_TERMS if term in query_lower}
 
 
-def _music_duration_points(expected_sec, candidate_sec):
+def _expected_track_variants(expected):
+    variants = []
+    seen = set()
+
+    def _append(value):
+        text = str(value or "").strip()
+        if not text:
+            return
+        key = normalize_text(text)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        variants.append(text)
+
+    _append(expected.get("track"))
+    aliases = expected.get("track_aliases")
+    if isinstance(aliases, (list, tuple, set)):
+        for alias in aliases:
+            _append(alias)
+    disambiguation = str(expected.get("track_disambiguation") or "").strip()
+    if disambiguation:
+        canonical_track = str(expected.get("track") or "").strip()
+        if canonical_track:
+            _append(f"{canonical_track} {disambiguation}")
+        _append(disambiguation)
+    return variants
+
+
+def _expected_artist_token_variants(expected):
+    variants = []
+    seen = set()
+
+    def _add(value):
+        tokens = tuple(tokenize(value))
+        if not tokens or tokens in seen:
+            return
+        seen.add(tokens)
+        variants.append(list(tokens))
+
+    artist_value = str(expected.get("artist") or "").strip()
+    album_artist_value = str(expected.get("album_artist") or "").strip()
+
+    _add(artist_value)
+    if album_artist_value:
+        _add(album_artist_value)
+
+    # Featured credits frequently appear in MB artist strings but not uploader fields.
+    # Include primary-artist-only variants so official uploads are not dropped.
+    for raw_value in (artist_value, album_artist_value):
+        if not raw_value:
+            continue
+        normalized = normalize_text(raw_value)
+        primary = _FEAT_RE.split(normalized, maxsplit=1)[0].strip()
+        if primary:
+            _add(primary)
+        collaborator_parts = re.split(r"\s*(?:&|,|/|\band\b|\bx\b|\bwith\b)\s*", str(raw_value), flags=re.IGNORECASE)
+        for part in collaborator_parts:
+            _add(part)
+
+    return variants or [tokenize(artist_value)]
+
+
+def _music_duration_points(expected_sec, candidate_sec, *, max_delta_ms=12000, hard_cap_ms=35000):
     if expected_sec is None or candidate_sec is None:
         return 0.0, "duration_missing", None
     try:
@@ -56,7 +153,9 @@ def _music_duration_points(expected_sec, candidate_sec):
     delta_ms = abs(candidate_ms - expected_ms)
     if candidate_ms < max(45000, int(expected_ms * 0.45)):
         return 0.0, "preview_duration", delta_ms
-    if delta_ms > 12000:
+    if delta_ms > int(hard_cap_ms):
+        return 0.0, "duration_over_hard_cap", delta_ms
+    if delta_ms > int(max_delta_ms):
         return 0.0, "duration_out_of_bounds", delta_ms
     if delta_ms <= 2000:
         return 20.0, None, delta_ms
@@ -71,7 +170,7 @@ def _music_source_multiplier(source):
     return _MUSIC_SOURCE_MULTIPLIERS.get(str(source or "").lower(), 1.0)
 
 
-def _music_source_authority_points(candidate):
+def _music_source_authority_points(expected, candidate):
     source = str(candidate.get("source") or "").lower()
     title_lower = str(candidate.get("title") or "").lower()
     uploader_lower = str(candidate.get("uploader") or candidate.get("artist_detected") or "").lower()
@@ -85,11 +184,78 @@ def _music_source_authority_points(candidate):
         signal = 0.35
     elif source == "soundcloud":
         signal = 0.30
-    return 8.0 * signal
+    authority_points = 8.0 * signal
+
+    expected_artist_variants = _expected_artist_token_variants(expected)
+    uploader_tokens = tokenize(candidate.get("uploader") or candidate.get("artist_detected"))
+    uploader_artist_overlap = max(
+        (token_overlap_score(tokens, uploader_tokens) for tokens in expected_artist_variants),
+        default=0.0,
+    )
+
+    channel_authority_bonus = 0.0
+    if source in {"youtube", "youtube_music"}:
+        strong_artist_match = uploader_artist_overlap >= 0.80
+        topic_channel = "topic" in uploader_lower
+        official_channel = official or ("official artist channel" in uploader_lower)
+        if strong_artist_match and (topic_channel or official_channel):
+            channel_authority_bonus = 4.0
+        elif uploader_artist_overlap >= 0.65 and official_channel:
+            channel_authority_bonus = 2.0
+
+    return min(12.0, authority_points + channel_authority_bonus)
+
+
+def _music_owned_channel_bonus(
+    expected,
+    candidate,
+    *,
+    artist_overlap,
+    effective_track_overlap,
+    duration_delta_ms,
+):
+    source = str(candidate.get("source") or "").strip().lower()
+    if source not in {"youtube_music", "youtube", "soundcloud"}:
+        return 0.0
+    if float(artist_overlap or 0.0) < 0.625:
+        return 0.0
+    if float(effective_track_overlap or 0.0) < 0.95:
+        return 0.0
+    try:
+        delta = abs(int(duration_delta_ms)) if duration_delta_ms is not None else None
+    except Exception:
+        delta = None
+    if delta is None or delta > 3000:
+        return 0.0
+
+    uploader_lower = normalize_text(candidate.get("uploader") or candidate.get("artist_detected"))
+    uploader_tokens = tokenize(candidate.get("uploader") or candidate.get("artist_detected"))
+    if not uploader_tokens:
+        return 0.0
+    expected_artist_variants = _expected_artist_token_variants(expected)
+    uploader_artist_overlap = max(
+        (token_overlap_score(tokens, uploader_tokens) for tokens in expected_artist_variants),
+        default=0.0,
+    )
+    if uploader_artist_overlap < 0.80:
+        return 0.0
+
+    official = bool(candidate.get("official"))
+    if source in {"youtube_music", "youtube"}:
+        if "topic" in uploader_lower or "official artist channel" in uploader_lower or official:
+            return 2.5
+        return 0.0
+    if source == "soundcloud":
+        if official or uploader_artist_overlap >= 1.0:
+            return 2.0
+    return 0.0
 
 
 def _music_reject_reason(expected, candidate):
     query_flags = _music_query_variant_flags(expected.get("query"))
+    explicit_flags = expected.get("variant_allow_tokens")
+    if isinstance(explicit_flags, (set, list, tuple)):
+        query_flags = set(query_flags) | {str(token).strip().lower() for token in explicit_flags if str(token or "").strip()}
     title = str(candidate.get("title") or "")
     uploader = str(candidate.get("uploader") or candidate.get("artist_detected") or "")
     haystack = f"{title} {uploader}".strip()
@@ -118,10 +284,22 @@ def normalize_text(value):
     text = unicodedata.normalize("NFKD", str(value))
     text = text.lower().strip()
     text = _FEAT_RE.sub("feat", text)
+    text = _TOPIC_SUFFIX_RE.sub("", text)
     text = _BRACKET_JUNK_RE.sub(" ", text)
     text = re.sub(r"[^\w\s/&]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def classify_music_title_variants(title):
+    raw = unicodedata.normalize("NFKD", str(title or "")).lower()
+    normalized = re.sub(r"[^\w\s]", " ", raw)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    tags = set()
+    for tag, pattern in _VARIANT_TOKEN_RULES:
+        if pattern.search(normalized):
+            tags.add(tag)
+    return tags
 
 
 def tokenize(value):
@@ -229,39 +407,83 @@ def _canonical_bonus(expected, candidate):
 
 def score_candidate(expected, candidate, *, source_modifier=1.0):
     if str(expected.get("media_intent") or "").strip().lower() == "music_track":
-        expected_artist = tokenize(expected.get("artist"))
-        expected_track = tokenize(expected.get("track"))
+        source_value = str(candidate.get("source") or "").strip().lower()
+        weak_album_metadata_source = source_value in _MUSIC_WEAK_ALBUM_METADATA_SOURCES
+        expected_artist_variants = _expected_artist_token_variants(expected)
+        expected_track_variants = _expected_track_variants(expected)
+        if not expected_track_variants:
+            expected_track_variants = [str(expected.get("track") or "")]
+        expected_track = tokenize(expected_track_variants[0])
         expected_album = tokenize(expected.get("album"))
 
         candidate_artist = tokenize(candidate.get("artist_detected") or candidate.get("uploader"))
         candidate_track = tokenize(candidate.get("track_detected") or candidate.get("title"))
         candidate_album = tokenize(candidate.get("album_detected"))
 
-        artist_overlap = token_overlap_score(expected_artist, candidate_artist)
-        track_overlap = token_overlap_score(expected_track, candidate_track)
+        artist_overlap = max(
+            (token_overlap_score(tokens, candidate_artist) for tokens in expected_artist_variants),
+            default=0.0,
+        )
+        track_overlap = 0.0
+        relaxed_track_overlap = 0.0
+        track_variant_used = expected_track_variants[0] if expected_track_variants else str(expected.get("track") or "")
+        relaxed_candidate_track = tokenize(relaxed_search_title(candidate.get("track_detected") or candidate.get("title")))
+        for variant in expected_track_variants:
+            variant_tokens = tokenize(variant)
+            variant_track_overlap = token_overlap_score(variant_tokens, candidate_track)
+            relaxed_expected_track = tokenize(relaxed_search_title(variant))
+            variant_relaxed_overlap = token_overlap_score(relaxed_expected_track, relaxed_candidate_track)
+            if (
+                variant_track_overlap > track_overlap
+                or (
+                    variant_track_overlap == track_overlap
+                    and variant_relaxed_overlap > relaxed_track_overlap
+                )
+            ):
+                track_overlap = variant_track_overlap
+                relaxed_track_overlap = variant_relaxed_overlap
+                track_variant_used = variant
+        effective_track_overlap = max(track_overlap, min(relaxed_track_overlap * 0.90, 1.0))
         album_overlap = token_overlap_score(expected_album, candidate_album) if expected_album else 0.0
 
         rejection_reason = _music_reject_reason(expected, candidate)
+        duration_max_delta_ms = expected.get("duration_max_delta_ms")
+        if duration_max_delta_ms is None:
+            duration_max_delta_ms = 12000
+        duration_hard_cap_ms = expected.get("duration_hard_cap_ms")
+        if duration_hard_cap_ms is None:
+            duration_hard_cap_ms = 35000
         duration_pts, duration_reject_reason, duration_delta_ms = _music_duration_points(
-            expected.get("duration_hint_sec"), candidate.get("duration_sec")
+            expected.get("duration_hint_sec"),
+            candidate.get("duration_sec"),
+            max_delta_ms=duration_max_delta_ms,
+            hard_cap_ms=duration_hard_cap_ms,
         )
         if duration_reject_reason == "duration_missing":
             duration_penalty = 12.0
         else:
             duration_penalty = 0.0
-        if duration_reject_reason in {"preview_duration", "duration_out_of_bounds"}:
+        if duration_reject_reason in {"preview_duration", "duration_out_of_bounds", "duration_over_hard_cap"}:
             rejection_reason = duration_reject_reason
 
         if expected_album:
-            track_pts = 30.0 * track_overlap
+            track_pts = 30.0 * effective_track_overlap
             artist_pts = 24.0 * artist_overlap
             album_pts = 18.0 * album_overlap
         else:
-            track_pts = 39.0 * track_overlap
+            track_pts = 39.0 * effective_track_overlap
             artist_pts = 33.0 * artist_overlap
             album_pts = 0.0
 
-        source_authority_pts = _music_source_authority_points(candidate)
+        source_authority_pts = _music_source_authority_points(expected, candidate)
+        owned_channel_bonus_pts = _music_owned_channel_bonus(
+            expected,
+            candidate,
+            artist_overlap=artist_overlap,
+            effective_track_overlap=effective_track_overlap,
+            duration_delta_ms=duration_delta_ms,
+        )
+        authority_channel_match = source_authority_pts >= 8.0
 
         noise_penalty = 0.0
         penalty_reasons = []
@@ -278,7 +500,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             noise_penalty += 4.0
             penalty_reasons.append("feat_mismatch_noise")
 
-        if expected_album and album_overlap < 0.35:
+        if expected_album and album_overlap < 0.35 and (candidate_album or not weak_album_metadata_source):
             noise_penalty += 10.0
             penalty_reasons.append("album_mismatch_penalty")
 
@@ -292,13 +514,21 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
         ):
             rejection_reason = rejection_reason or "cover_artist_mismatch"
 
+        album_floor_required = bool(expected_album) and not weak_album_metadata_source
         floor_failed = (
             track_pts < 20.0
             or artist_pts < 15.0
-            or (bool(expected_album) and album_pts < 8.0)
+            or (album_floor_required and album_pts < 8.0)
         )
         if floor_failed and not rejection_reason:
-            rejection_reason = "floor_check_failed"
+            if track_pts < 20.0:
+                rejection_reason = "low_title_similarity"
+            elif artist_pts < 15.0:
+                rejection_reason = "low_artist_similarity"
+            elif album_floor_required and album_pts < 8.0:
+                rejection_reason = "low_album_similarity"
+            else:
+                rejection_reason = "floor_check_failed"
 
         raw_score_100 = (
             track_pts
@@ -306,16 +536,20 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             + album_pts
             + duration_pts
             + source_authority_pts
+            + owned_channel_bonus_pts
             - noise_penalty
             - duration_penalty
         )
         multiplier = _music_source_multiplier(candidate.get("source"))
         final_score_100 = max(0.0, min(100.0, raw_score_100 * multiplier))
-        final_score = final_score_100 / 100.0
+        gate_pass_bonus = _MUSIC_ALL_GATES_PASS_BONUS if not rejection_reason else 0.0
+        final_score = min(1.0, (final_score_100 / 100.0) + gate_pass_bonus)
 
         return {
             "score_artist": artist_overlap,
             "score_track": track_overlap,
+            "score_track_relaxed": relaxed_track_overlap,
+            "score_track_variant_used": track_variant_used,
             "score_album": album_overlap if expected_album else 0.0,
             "score_duration": (duration_pts / 20.0) if duration_pts > 0 else 0.0,
             "source_modifier": source_modifier,
@@ -323,6 +557,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             "final_score": final_score,
             "duration_delta_ms": duration_delta_ms,
             "rejection_reason": rejection_reason,
+            "authority_channel_match": authority_channel_match,
             "title_noise_score": noise_penalty,
             "score_breakdown": {
                 "track_pts": track_pts,
@@ -330,11 +565,13 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
                 "album_pts": album_pts,
                 "duration_pts": duration_pts,
                 "source_authority_pts": source_authority_pts,
+                "owned_channel_bonus_pts": owned_channel_bonus_pts,
                 "noise_penalty": noise_penalty,
                 "duration_penalty": duration_penalty,
                 "source_multiplier": multiplier,
                 "raw_score_100": raw_score_100,
                 "final_score_100": final_score_100,
+                "gate_pass_bonus": gate_pass_bonus,
                 "penalty_reasons": penalty_reasons,
             },
         }

@@ -2,6 +2,55 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.6 — Runtime Distribution + Music Match Robustness
+
+### High-Level
+This release focuses on three themes: faster music retrieval/download throughput, safer/more deterministic matching, and better runtime visibility. It also adds Docker-first runtime packaging and tightens import/job execution behavior for large queues.
+
+### Added
+- Runtime distribution: GHCR versioned images, release bundle zip assets, and `README-runtime.md`.
+- Deterministic music benchmark gate with CI artifacts (`results` plus markdown delta report).
+- Runtime album `run_summary.json` diagnostics (completion, unresolved classes, rejection mix, per-track detail).
+- Import-only low-confidence quarantine flow to `Music/Needs Review` via `music_track_review`.
+
+### Changed
+- Music matching/retrieval pipeline hardened and made faster without lowering gates:
+  - deterministic multi-rung fallback and bounded duration expansion
+  - per-rung source retrieval parallelized across `youtube_music`, `youtube`, `soundcloud`, `bandcamp` with deterministic merge
+  - candidate pre-resolution overlaps with active downloads, with bounded lookahead (`music_preresolve_lookahead`, default `3`, cap `4`)
+  - stronger in-process MB resolution cache reuse for repeated `(recording_mbid, release_mbid)` pairs
+  - conservative default fragment concurrency for music downloads (`yt_dlp_opts.concurrent_fragment_downloads=2`, overrideable)
+- Import/runtime throughput improvements:
+  - bounded parallel MB binding (`import_mb_binding_workers`, default `4`, cap `5`)
+  - import row dedupe before MB lookup for exact `(artist/title/album)` repeats, while preserving per-track enqueue/progress fan-out
+  - worker poll interval reduced from `5s` to `1s`
+  - bounded same-source job concurrency via per-source semaphores (default `2`, cap `4`; configurable with `max_concurrent_jobs_per_source` or `source_concurrency`)
+- EP-aware handling expanded:
+  - EP retrieval refinement rung for album runs
+  - EP release groups included in album metadata search (`primarytype:album OR ep`)
+  - EP releases accepted in album-run pair resolution and enrichment fallback
+- Scoring/gating robustness improved:
+  - featured-artist normalization (`feat/ft/featuring`) and `album_artist` aware artist/channel scoring
+  - source-aware album gating for weak-metadata adapters (`youtube_music`, `youtube`, `soundcloud`)
+  - clearer retrieval-vs-ranking separation with `recall@k` benchmark metrics (`k={1,3,5,10}`)
+- Runtime observability expanded:
+  - decision-edge diagnostics, richer rejected-candidate metadata, injected-candidate rejection mix, EP refinement telemetry, variant tagging, benchmark motif rollups
+  - lightweight runtime metrics for per-source active slots, queue age, resolve latency, and resolution-cache hit rate
+- UI/status usability refresh:
+  - full-width `Operations Status` and `Download Queue`
+  - wider/scrollable queue table using user-facing title column
+  - `Clear Failed` queue action
+  - `Metrics` panel moved to Info
+  - Home search now routes YouTube playlist URLs through playlist enqueue on `Search & Download` (instead of direct-URL mode), while `Search` shows a clear prompt to use download mode for playlist URLs
+
+### Fixed
+- Reduced false-negative music rejects tied to featured-credit tokenization and missing album metadata.
+- Corrected playlist/library import progress reporting (completed-work snapshots, no pre-item drift, finalization shown as active).
+- Fixed MusicBrainz include-contract error in album metadata fetch (`genres` include misuse).
+- Fixed MP4 post-processing regression where incompatible audio could persist.
+- Fixed Home/header UI consistency regressions after layout/navigation changes.
+- Fixed worker retry-loop regression causing duplicate downloads after successful writes (adapter store wiring and post-download crash path).
+
 ## v0.9.5 — Music Mode Hardening + Playlist File Import
 
 ### Added

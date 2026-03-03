@@ -7,6 +7,7 @@ from . import matcher
 from .providers import acoustid as acoustid_provider
 from .providers import artwork as artwork_provider
 from .providers import musicbrainz as musicbrainz_provider
+from .services.musicbrainz_service import get_musicbrainz_service
 from .tagging_service import apply_tags
 from .lyric_enrichment import fetch_lyrics
 
@@ -62,60 +63,106 @@ def _process_item(item):
         else:
             logging.warning("Music metadata: acoustid enabled but API key is missing")
 
-    best, score = matcher.select_best_match(source, candidates, duration)
+    best, score, score_breakdown = matcher.select_best_match(source, candidates, duration)
     threshold = config.get("confidence_threshold", 70)
     best = best if isinstance(best, dict) else {}
     match_ok = bool(best) and score >= threshold
-    if not match_ok and not str(meta.get("artwork_url") or "").strip():
-        logging.warning(
-            "Music metadata skipped (score=%s, threshold=%s) for %s",
-            score if best else "none",
-            threshold,
-            os.path.basename(file_path),
-        )
-        return
 
+    # Always apply at least source-derived tags, even when MB confidence is low.
+    source_artist = source.get("artist") or ""
+    source_title = source.get("title") or ""
+    source_album = source.get("album") or ""
     tags = {
-        "artist": meta.get("artist") or best.get("artist"),
-        "album": meta.get("album") or best.get("album"),
-        "title": meta.get("track") or meta.get("title") or best.get("title"),
+        "artist": meta.get("artist") or source_artist or best.get("artist"),
+        "album": meta.get("album") or source_album or best.get("album"),
+        "title": meta.get("track") or meta.get("title") or source_title or best.get("title"),
         "track_number": meta.get("track_number") or best.get("track_number"),
         "track_total": meta.get("track_total"),
-        "year": best.get("year"),
-        "date": meta.get("release_date") or meta.get("date") or best.get("date") or best.get("year"),
+        "year": best.get("year") if match_ok else None,
+        "date": meta.get("release_date") or meta.get("date") or (best.get("date") if match_ok else None) or (best.get("year") if match_ok else None),
         "disc_number": meta.get("disc_number") or meta.get("disc") or best.get("disc_number"),
         "disc_total": meta.get("disc_total"),
-        "genre": meta.get("genre") or best.get("genre"),
-        "album_artist": meta.get("album_artist") or best.get("album_artist") or best.get("artist"),
-        "recording_id": best.get("recording_id") or meta.get("mb_recording_id") or meta.get("recording_mbid"),
+        "genre": meta.get("genre") or (best.get("genre") if match_ok else None),
+        "album_artist": meta.get("album_artist") or (best.get("album_artist") if match_ok else None) or (best.get("artist") if match_ok else None) or source_artist,
+        "recording_id": (best.get("recording_id") if match_ok else None) or meta.get("mb_recording_id") or meta.get("recording_mbid"),
         "mb_recording_id": meta.get("mb_recording_id") or meta.get("recording_mbid") or best.get("recording_id"),
-        "mb_release_id": meta.get("mb_release_id") or best.get("release_id"),
+        "mb_release_id": meta.get("mb_release_id") or (best.get("release_id") if match_ok else None),
     }
-    release_id = meta.get("mb_release_id") or best.get("release_id")
+    # Allow selective enrichment when a component is strongly matched,
+    # even if total score misses threshold.
+    artist_component = int((score_breakdown or {}).get("artist_score") or 0)
+    track_component = int((score_breakdown or {}).get("track_score") or 0)
+    album_component = int((score_breakdown or {}).get("album_score") or 0)
+    if not match_ok and best:
+        if artist_component >= 88 and not tags.get("artist"):
+            tags["artist"] = best.get("artist")
+        if track_component >= 88 and not tags.get("title"):
+            tags["title"] = best.get("title")
+        if album_component >= 90 and not tags.get("album"):
+            tags["album"] = best.get("album")
+
+    release_id = meta.get("mb_release_id") or (best.get("release_id") if match_ok else None)
+    release_group_id = meta.get("mb_release_group_id") or (best.get("release_group_id") if match_ok else None)
     artwork = None
     if config.get("embed_artwork"):
+        max_size_px = config.get("max_artwork_size_px", 1500)
         artwork_url = str(meta.get("artwork_url") or "").strip()
+        thumbnail_url = str(meta.get("thumbnail_url") or "").strip()
         if artwork_url:
             artwork = artwork_provider.fetch_artwork_from_url(
                 artwork_url,
-                max_size_px=config.get("max_artwork_size_px", 1500),
+                max_size_px=max_size_px,
             )
         if artwork is None and release_id:
             artwork = artwork_provider.fetch_artwork(
                 release_id,
-                max_size_px=config.get("max_artwork_size_px", 1500),
+                max_size_px=max_size_px,
+            )
+        if artwork is None and release_group_id:
+            try:
+                group_cover_url = get_musicbrainz_service().fetch_release_group_cover_art_url(
+                    release_group_id,
+                    timeout=8,
+                )
+            except Exception:
+                group_cover_url = None
+            if group_cover_url:
+                artwork = artwork_provider.fetch_artwork_from_url(
+                    group_cover_url,
+                    max_size_px=max_size_px,
+                )
+        if artwork is None and thumbnail_url and thumbnail_url != artwork_url:
+            artwork = artwork_provider.fetch_artwork_from_url(
+                thumbnail_url,
+                max_size_px=max_size_px,
             )
 
     display_artist = tags.get("artist") or "-"
     display_title = tags.get("title") or "-"
     display_album = tags.get("album") or "-"
-    logging.info(
-        "Metadata matched (%s%%) - %s / %s / %s",
-        score,
-        display_artist,
-        display_title,
-        display_album,
-    )
+    if match_ok:
+        logging.info(
+            "Metadata matched (%s%%) artist=%s track=%s album=%s - %s / %s / %s",
+            score,
+            artist_component,
+            track_component,
+            album_component,
+            display_artist,
+            display_title,
+            display_album,
+        )
+    else:
+        logging.warning(
+            "Metadata partial (%s%% < %s%%) artist=%s track=%s album=%s - %s / %s / %s",
+            score,
+            threshold,
+            artist_component,
+            track_component,
+            album_component,
+            display_artist,
+            display_title,
+            display_album,
+        )
 
     # Optional lyrics enrichment (non-fatal)
     if config.get("enable_lyrics"):

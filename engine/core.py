@@ -762,6 +762,48 @@ def get_playlist_videos_fallback(playlist_id, *, cookie_file=None):
         return [], True
 
 
+def get_playlist_preview_fallback(playlist_id, *, cookie_file=None):
+    playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+    opts = {
+        "skip_download": True,
+        "extract_flat": True,
+        "quiet": True,
+        "no_warnings": True,
+    }
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(playlist_url, download=False) or {}
+            title = str(info.get("title") or "").strip() or None
+            entries = info.get("entries") or []
+            first_video_id = None
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                candidate = str(entry.get("id") or entry.get("url") or "").strip()
+                if candidate:
+                    first_video_id = candidate
+                    break
+            thumbnail_url = (
+                f"https://i.ytimg.com/vi/{first_video_id}/hqdefault.jpg"
+                if first_video_id
+                else None
+            )
+            return {
+                "playlist_title": title,
+                "first_video_id": first_video_id,
+                "thumbnail_url": thumbnail_url,
+            }, False
+    except Exception:
+        logging.exception("yt-dlp playlist preview fallback failed for %s", playlist_id)
+        return {
+            "playlist_title": None,
+            "first_video_id": None,
+            "thumbnail_url": None,
+        }, True
+
+
 def extract_video_id(url):
     if not url:
         return None
@@ -796,14 +838,14 @@ def build_video_url(video_id):
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
-def telegram_notify(config, message):
+def telegram_notify_result(config, message):
     telegram = config.get("telegram") if isinstance(config, dict) else None
     if not telegram or not message:
-        return False
+        return {"ok": False, "message_id": None}
     bot_token = telegram.get("bot_token")
     chat_id = telegram.get("chat_id")
     if not bot_token or not chat_id:
-        return False
+        return {"ok": False, "message_id": None}
     max_chars = 4096
     text = str(message)
     if len(text) > max_chars:
@@ -813,11 +855,25 @@ def telegram_notify(config, message):
     try:
         resp = requests.post(url, json=payload, timeout=15)
         if resp.ok:
-            return True
+            message_id = None
+            try:
+                body = resp.json()
+                if isinstance(body, dict):
+                    result = body.get("result")
+                    if isinstance(result, dict):
+                        message_id = result.get("message_id")
+            except Exception:
+                message_id = None
+            return {"ok": True, "message_id": message_id}
         logging.warning("Telegram notify failed: %s", resp.text)
     except Exception:
         logging.exception("Telegram notify failed")
-    return False
+    return {"ok": False, "message_id": None}
+
+
+def telegram_notify(config, message):
+    result = telegram_notify_result(config, message)
+    return bool(result.get("ok"))
 
 
 def run_single_download(
@@ -825,6 +881,7 @@ def run_single_download(
     video_url,
     destination=None,
     final_format_override=None,
+    force_redownload=False,
     *,
     paths: EnginePaths,
     status=None,
@@ -901,6 +958,7 @@ def run_single_download(
             return False
         job_id, created, _dedupe_reason = store.enqueue_job(
             log_duplicate_event=False,
+            force_requeue=bool(force_redownload),
             **enqueue_payload,
         )
         if created:
@@ -958,6 +1016,7 @@ def run_single_playlist(
     destination=None,
     account=None,
     final_format_override=None,
+    force_redownload=False,
     *,
     paths: EnginePaths,
     status=None,
@@ -972,13 +1031,31 @@ def run_single_playlist(
         logging.error("Invalid playlist ID or URL: %s", playlist_value)
         return status
 
-    folder = destination or config.get("music_download_folder") or config.get("single_download_folder") or "."
+    normalized_final_format = str(final_format_override or "").strip().lower()
+    explicit_music_mode = bool(_ignored.get("music_mode"))
+    configured_media_type = str((config or {}).get("media_type") or "").strip().lower()
+    inferred_music_mode = explicit_music_mode or configured_media_type in {"music", "audio"} or normalized_final_format in {
+        "mp3",
+        "m4a",
+        "flac",
+        "wav",
+        "ogg",
+        "opus",
+        "aac",
+    }
+    if inferred_music_mode:
+        default_folder = config.get("music_download_folder") or config.get("single_download_folder") or "."
+    else:
+        default_folder = config.get("single_download_folder") or config.get("music_download_folder") or "."
+    folder = destination or default_folder
     entry = {
         "playlist_id": playlist_id,
         "folder": folder,
         "remove_after_download": False,
         "mode": "full",
     }
+    if inferred_music_mode:
+        entry["media_type"] = "music"
     if account:
         entry["account"] = account
     if final_format_override:
@@ -991,11 +1068,12 @@ def run_single_playlist(
         run_config,
         paths=paths,
         status=status,
+        force_redownload=bool(force_redownload),
     )
     return status
 
 
-def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ignored):
+def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, force_redownload=False, **_ignored):
     if status is None:
         status = EngineStatus()
 
@@ -1080,7 +1158,7 @@ def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ign
                 if not vid:
                     continue
                 video_id = extract_video_id(vid) or vid
-                if is_video_downloaded(conn, video_id):
+                if not force_redownload and is_video_downloaded(conn, video_id):
                     continue
 
                 video_url = build_video_url(vid)
@@ -1112,6 +1190,7 @@ def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ign
                     continue
 
                 job_id, created, _dedupe_reason = store.enqueue_job(
+                    force_requeue=bool(force_redownload),
                     **enqueue_payload,
                 )
                 if created:
@@ -1143,6 +1222,7 @@ def run_archive(
     delivery_mode=None,
     stop_event=None,
     run_source="manual",
+    force_redownload=False,
     music_mode=None,
     **_ignored,
 ):
@@ -1168,6 +1248,7 @@ def run_archive(
             single_url,
             destination,
             final_format_override,
+            force_redownload=force_redownload,
             paths=paths,
             status=status,
             stop_event=stop_event,
@@ -1176,5 +1257,11 @@ def run_archive(
         status.single_download_ok = ok
         return status
 
-    run_once(config, paths=paths, status=status, stop_event=stop_event)
+    run_once(
+        config,
+        paths=paths,
+        status=status,
+        stop_event=stop_event,
+        force_redownload=bool(force_redownload),
+    )
     return status

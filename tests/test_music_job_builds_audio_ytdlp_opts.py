@@ -76,6 +76,31 @@ def test_music_job_builds_audio_ytdlp_opts(jq) -> None:
     extract_pp = next((pp for pp in postprocessors if pp.get("key") == "FFmpegExtractAudio"), None)
     assert extract_pp is not None
     assert extract_pp.get("preferredcodec") == "mp3"
+    assert opts.get("concurrent_fragment_downloads") == 2
+
+
+def test_music_job_allows_override_of_fragment_concurrency(jq) -> None:
+    context = {
+        "operation": "download",
+        "url": "https://www.youtube.com/watch?v=abc123xyz00",
+        "media_type": "music",
+        "media_intent": "music_track",
+        "final_format": "mkv",
+        "output_template": "%(id)s.%(ext)s",
+        "output_template_meta": {
+            "final_format": "mkv",
+            "music_final_format": "mp3",
+        },
+        "config": {
+            "final_format": "mkv",
+            "music_final_format": "mp3",
+        },
+        "overrides": {
+            "concurrent_fragment_downloads": 3,
+        },
+    }
+    opts = jq.build_ytdlp_opts(context)
+    assert opts.get("concurrent_fragment_downloads") == 3
 
 
 def test_video_job_builds_video_ytdlp_opts(jq) -> None:
@@ -167,6 +192,70 @@ def test_music_job_uses_resolved_music_codec_for_extract_audio(jq) -> None:
     extract_pp = next((pp for pp in postprocessors if pp.get("key") == "FFmpegExtractAudio"), None)
     assert extract_pp is not None
     assert extract_pp.get("preferredcodec") == "m4a"
+
+
+def test_claim_next_job_respects_global_active_cap(jq, tmp_path) -> None:
+    db_path = tmp_path / "queue-global-cap.sqlite"
+    conn = jq.sqlite3.connect(str(db_path), check_same_thread=False)
+    try:
+        jq.ensure_download_jobs_table(conn)
+    finally:
+        conn.close()
+
+    store = jq.DownloadJobStore(str(db_path))
+    for idx in range(3):
+        store.enqueue_job(
+            origin="test",
+            origin_id="global-cap",
+            media_type="music",
+            media_intent="music_track",
+            source="youtube_music",
+            url=f"https://music.youtube.com/watch?v=cap{idx}",
+            output_template={"output_dir": "/tmp", "final_format": "mp3"},
+        )
+
+    first = store.claim_next_job("youtube_music", max_active_per_source=3, max_active_total=2)
+    second = store.claim_next_job("youtube_music", max_active_per_source=3, max_active_total=2)
+    third = store.claim_next_job("youtube_music", max_active_per_source=3, max_active_total=2)
+
+    assert first is not None
+    assert second is not None
+    assert third is None
+
+
+def test_claim_next_job_global_cap_applies_across_sources(jq, tmp_path) -> None:
+    db_path = tmp_path / "queue-global-cap-sources.sqlite"
+    conn = jq.sqlite3.connect(str(db_path), check_same_thread=False)
+    try:
+        jq.ensure_download_jobs_table(conn)
+    finally:
+        conn.close()
+
+    store = jq.DownloadJobStore(str(db_path))
+    store.enqueue_job(
+        origin="test",
+        origin_id="global-cap-cross-source",
+        media_type="music",
+        media_intent="music_track",
+        source="youtube_music",
+        url="https://music.youtube.com/watch?v=capsource1",
+        output_template={"output_dir": "/tmp", "final_format": "mp3"},
+    )
+    store.enqueue_job(
+        origin="test",
+        origin_id="global-cap-cross-source",
+        media_type="music",
+        media_intent="music_track",
+        source="soundcloud",
+        url="https://soundcloud.com/test/track-capsource2",
+        output_template={"output_dir": "/tmp", "final_format": "mp3"},
+    )
+
+    first = store.claim_next_job("youtube_music", max_active_per_source=2, max_active_total=1)
+    second = store.claim_next_job("soundcloud", max_active_per_source=2, max_active_total=1)
+
+    assert first is not None
+    assert second is None
 
 
 def test_video_mp4_job_uses_same_download_selector_with_mp4_merge_target(jq) -> None:

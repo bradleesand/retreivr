@@ -3,6 +3,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 from collections import OrderedDict
 from datetime import datetime
 
@@ -20,6 +21,8 @@ _DEFAULT_MAX_CACHE_ENTRIES = 512
 _DEFAULT_CACHE_TTL_SECONDS = 6 * 60 * 60
 _DEFAULT_COVER_CACHE_TTL_SECONDS = 24 * 60 * 60
 _DEFAULT_MIN_INTERVAL_SECONDS = 1.0
+_DEFAULT_RETRY_CAP_SECONDS = 8.0
+_RETRY_JITTER_FACTORS = (1.00, 1.15, 0.95, 1.25, 1.05, 1.20)
 _SEARCH_TTL_SECONDS = 24 * 60 * 60
 _RELEASE_GROUP_TTL_SECONDS = 24 * 60 * 60
 _RELEASE_TRACKS_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -36,6 +39,14 @@ _NOISE_WORDS = {
     "remastered",
     "bonus",
 }
+_MB_RELATION_ALLOWED_TYPE_MARKERS = (
+    "youtube",
+    "official music video",
+    "music video",
+    "streaming",
+    "free streaming",
+)
+_OPTIONAL_MB_INCLUDES = ("aliases", "url-rels", "recording-rels", "release-rels")
 
 
 class _TTLCache:
@@ -167,6 +178,11 @@ class MusicBrainzService:
     def _lucene_escape(self, text):
         return str(text or "").replace("\\", "\\\\").replace('"', '\\"')
 
+    @staticmethod
+    def _is_allowed_album_release_group_type(primary_type) -> bool:
+        value = str(primary_type or "").strip().lower()
+        return value in {"album", "ep"}
+
     def _artist_credit_text(self, artist_credit):
         if not isinstance(artist_credit, list):
             return ""
@@ -204,25 +220,78 @@ class MusicBrainzService:
                 continue
         return None
 
+    def _classify_retry_error(self, exc):
+        text = str(exc or "").lower()
+        if any(marker in text for marker in ("ssl", "tls")) and "eof" in text:
+            return "ssl_eof", True
+        if "ssl" in text or "tls" in text:
+            return "ssl", True
+        if "eof" in text:
+            return "eof", True
+        if any(marker in text for marker in ("timed out", "timeout")):
+            return "timeout", True
+        if any(marker in text for marker in ("temporary failure", "connection reset", "connection aborted", "connection refused", "remote disconnected")):
+            return "connection", True
+        if any(marker in text for marker in ("service unavailable", "503", "502", "504")):
+            return "upstream_unavailable", True
+        return "non_transient", False
+
+    def _retry_delay_seconds(self, *, base_delay, attempt):
+        safe_base = max(float(base_delay or 0.3), 0.1)
+        factor = _RETRY_JITTER_FACTORS[(max(int(attempt), 1) - 1) % len(_RETRY_JITTER_FACTORS)]
+        delay = safe_base * (2 ** (max(int(attempt), 1) - 1)) * factor
+        return min(delay, _DEFAULT_RETRY_CAP_SECONDS)
+
     def _call_with_retry(self, fn, *, attempts=3, base_delay=0.3):
         self._ensure_initialized()
+        effective_attempts = max(int(attempts or 1), 1)
+
         last_error = None
-        for attempt in range(1, attempts + 1):
+        attempt = 1
+        while attempt <= effective_attempts:
             try:
                 self._respect_rate_limit()
                 self._inc_metric("total_requests")
                 return fn()
             except Exception as exc:
                 last_error = exc
-                if attempt >= attempts:
+                error_class, transient = self._classify_retry_error(exc)
+                if transient and effective_attempts < 5:
+                    effective_attempts = 5
+                if attempt >= effective_attempts:
                     break
                 self._inc_metric("retries")
-                delay = base_delay * (2 ** (attempt - 1))
-                self._debug_log("[MUSICBRAINZ] retry attempt=%s delay=%.3fs error=%s", attempt, delay, exc)
-                time.sleep(base_delay * (2 ** (attempt - 1)))
+                delay = self._retry_delay_seconds(base_delay=base_delay, attempt=attempt)
+                self._debug_log(
+                    "[MUSICBRAINZ] retry attempt=%s/%s delay=%.3fs transient=%s error_class=%s error=%s",
+                    attempt,
+                    effective_attempts,
+                    delay,
+                    transient,
+                    error_class,
+                    exc,
+                )
+                time.sleep(delay)
+                attempt += 1
+                continue
+            attempt += 1
         if last_error:
             raise last_error
         return None
+
+    def _retry_without_invalid_includes(self, fn_factory, includes_tuple, error):
+        lower_error = str(error or "").lower()
+        if "invalid" not in lower_error or "include" not in lower_error:
+            raise error
+        fallback = tuple(
+            item
+            for item in includes_tuple
+            if str(item).strip() not in _OPTIONAL_MB_INCLUDES
+        )
+        if fallback == includes_tuple:
+            # Fall back to no includes rather than failing on edge include validation behavior.
+            fallback = ()
+        return self._call_with_retry(lambda: fn_factory(fallback))
 
     def get_metrics(self):
         with self._metrics_lock:
@@ -285,12 +354,16 @@ class MusicBrainzService:
         self._inc_metric("cache_misses")
         self._debug_log("[MUSICBRAINZ] cache miss key=%s", key)
 
-        payload = self._call_with_retry(
-            lambda: musicbrainzngs.get_release_by_id(
-                rid,
-                includes=list(includes_tuple) if includes_tuple else [],
+        try:
+            payload = self._call_with_retry(
+                lambda: musicbrainzngs.get_release_by_id(rid, includes=list(includes_tuple) if includes_tuple else [])
             )
-        )
+        except Exception as exc:
+            payload = self._retry_without_invalid_includes(
+                lambda inc: musicbrainzngs.get_release_by_id(rid, includes=list(inc) if inc else []),
+                includes_tuple,
+                exc,
+            )
         self._cache.set(key, payload)
         return payload
 
@@ -308,12 +381,16 @@ class MusicBrainzService:
         self._inc_metric("cache_misses")
         self._debug_log("[MUSICBRAINZ] cache miss key=%s", key)
 
-        payload = self._call_with_retry(
-            lambda: musicbrainzngs.get_recording_by_id(
-                rid,
-                includes=list(includes_tuple) if includes_tuple else [],
+        try:
+            payload = self._call_with_retry(
+                lambda: musicbrainzngs.get_recording_by_id(rid, includes=list(includes_tuple) if includes_tuple else [])
             )
-        )
+        except Exception as exc:
+            payload = self._retry_without_invalid_includes(
+                lambda inc: musicbrainzngs.get_recording_by_id(rid, includes=list(inc) if inc else []),
+                includes_tuple,
+                exc,
+            )
         self._cache.set(key, payload)
         return payload
 
@@ -356,7 +433,7 @@ class MusicBrainzService:
         clean_tokens = self._remove_noise_tokens(query_tokens) or query_tokens
         normalized_query = " ".join(clean_tokens).strip() or cleaned_query
         artist_fragment, album_fragment = self._split_artist_album(normalized_query)
-        lucene_parts = ['primarytype:"album"']
+        lucene_parts = ['(primarytype:"album" OR primarytype:"ep")']
         if artist_fragment:
             lucene_parts.append(f'artist:"{self._lucene_escape(artist_fragment)}"')
         if album_fragment:
@@ -404,8 +481,8 @@ class MusicBrainzService:
             if "remix" in secondary_lower:
                 adjusted -= 20
             primary_type = str(group.get("primary-type") or "")
-            if primary_type and primary_type.lower() != "album":
-                adjusted -= 15
+            if not self._is_allowed_album_release_group_type(primary_type):
+                continue
             adjusted = max(0, min(100, adjusted))
             candidates.append(
                 {
@@ -604,6 +681,130 @@ class MusicBrainzService:
             cover_url = thumbs.get("small") or thumbs.get("250") or first.get("image")
         self._cover_cache.set(key, cover_url, ttl_seconds=_DEFAULT_COVER_CACHE_TTL_SECONDS)
         return cover_url
+
+    def _normalize_youtube_watch_url(self, value):
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = urllib.parse.urlparse(raw)
+        except Exception:
+            return None
+        host = (parsed.netloc or "").lower()
+        path = parsed.path or ""
+        if "youtu.be" in host:
+            video_id = path.strip("/").split("/", 1)[0]
+        elif "youtube.com" in host:
+            if path.startswith("/watch"):
+                query = urllib.parse.parse_qs(parsed.query or "")
+                video_id = str((query.get("v") or [None])[0] or "").strip()
+            elif path.startswith("/shorts/") or path.startswith("/embed/"):
+                video_id = path.strip("/").split("/", 1)[1].split("/", 1)[0]
+            else:
+                video_id = ""
+        else:
+            return None
+        video_id = str(video_id or "").strip()
+        if not video_id:
+            return None
+        return f"https://www.youtube.com/watch?v={video_id}"
+
+    def _iter_url_relations(self, entity):
+        if not isinstance(entity, dict):
+            return []
+        out = []
+        direct = entity.get("url-relation-list")
+        if isinstance(direct, list):
+            out.extend(item for item in direct if isinstance(item, dict))
+        relation_list = entity.get("relation-list")
+        if isinstance(relation_list, list):
+            for bucket in relation_list:
+                if not isinstance(bucket, dict):
+                    continue
+                target_type = str(bucket.get("target-type") or "").strip().lower()
+                if target_type and target_type != "url":
+                    continue
+                nested = bucket.get("relation")
+                if isinstance(nested, list):
+                    out.extend(item for item in nested if isinstance(item, dict))
+        return out
+
+    def _relation_allows_youtube_injection(self, relation):
+        rel_type = str(relation.get("type") or "").strip().lower()
+        attrs_raw = relation.get("attribute-list")
+        attrs = {
+            str(item or "").strip().lower()
+            for item in (attrs_raw if isinstance(attrs_raw, list) else [])
+            if str(item or "").strip()
+        }
+        if any(marker in rel_type for marker in _MB_RELATION_ALLOWED_TYPE_MARKERS):
+            return True
+        if "official" in attrs and "video" in rel_type:
+            return True
+        return False
+
+    def _extract_youtube_relationships(self, entity, *, entity_name):
+        relationships = []
+        for relation in self._iter_url_relations(entity):
+            target = relation.get("target")
+            if not target and isinstance(relation.get("url"), dict):
+                target = relation.get("url", {}).get("resource")
+            canonical_url = self._normalize_youtube_watch_url(target)
+            if not canonical_url:
+                continue
+            if not self._relation_allows_youtube_injection(relation):
+                continue
+            relationships.append(
+                {
+                    "url": canonical_url,
+                    "relation_type": str(relation.get("type") or "").strip().lower() or None,
+                    "entity": entity_name,
+                }
+            )
+        return relationships
+
+    def fetch_youtube_relationship_urls(self, recording_id, *, release_id=None, limit=4):
+        recording_mbid = str(recording_id or "").strip()
+        release_mbid = str(release_id or "").strip()
+        if not recording_mbid:
+            return []
+        cache_key = f"youtube_rels:{recording_mbid}:{release_mbid}:{int(limit or 4)}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            self._inc_metric("cache_hits")
+            self._debug_log("[MUSICBRAINZ] cache hit key=%s", cache_key)
+            return cached
+        self._inc_metric("cache_misses")
+        self._debug_log("[MUSICBRAINZ] cache miss key=%s", cache_key)
+
+        relationships = []
+        recording_payload = self.get_recording(
+            recording_mbid,
+            includes=["url-rels", "recording-rels"],
+        )
+        recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
+        relationships.extend(self._extract_youtube_relationships(recording_data, entity_name="recording"))
+
+        if release_mbid:
+            release_payload = self.get_release(
+                release_mbid,
+                includes=["url-rels", "release-rels"],
+            )
+            release_data = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
+            relationships.extend(self._extract_youtube_relationships(release_data, entity_name="release"))
+
+        seen = set()
+        deduped = []
+        for rel in relationships:
+            url = str(rel.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            deduped.append(rel)
+            if len(deduped) >= max(1, int(limit or 4)):
+                break
+        self._cache.set(cache_key, deduped, ttl_seconds=_SEARCH_TTL_SECONDS)
+        return deduped
 
 
 _MUSICBRAINZ_SERVICE = None

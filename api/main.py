@@ -89,6 +89,8 @@ from engine.core import (
     build_youtube_clients,
     extract_playlist_id,
     get_playlist_videos,
+    get_playlist_videos_fallback,
+    get_playlist_preview_fallback,
     get_status,
     init_db,
     is_video_downloaded,
@@ -104,7 +106,9 @@ from engine.core import (
     run_direct_url_self_test,
     run_archive,
     run_single_playlist,
+    resolve_cookie_file,
     telegram_notify,
+    telegram_notify_result,
     validate_config,
 )
 from engine.paths import (
@@ -175,6 +179,20 @@ WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI
 MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024
 SUPPORTED_IMPORT_EXTENSIONS = {".m3u", ".m3u8", ".csv", ".xml", ".plist", ".json"}
 IMPORT_JOB_TTL_SECONDS = 6 * 60 * 60
+_LAST_TRANSITION_EVENT: str | None = None
+
+
+def _log_transition(event: str, **fields) -> None:
+    global _LAST_TRANSITION_EVENT
+    label = str(event or "event").strip() or "event"
+    if _LAST_TRANSITION_EVENT != label:
+        logging.info("")
+        _LAST_TRANSITION_EVENT = label
+    if fields:
+        parts = [f"{key}={value}" for key, value in fields.items()]
+        logging.info("========== %s | %s ==========", label, " ".join(parts))
+    else:
+        logging.info("========== %s ==========", label)
 
 
 def _mb_service():
@@ -309,6 +327,7 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
         },
         "active_count": 0,
         "active_jobs": [],
+        "runtime_metrics": {},
     }
     db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
     if not db_path:
@@ -384,6 +403,12 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
             logging.exception("Failed to build download queue snapshot")
     finally:
         conn.close()
+    engine = getattr(app.state, "worker_engine", None)
+    if engine is not None and callable(getattr(engine, "get_runtime_metrics", None)):
+        try:
+            summary["runtime_metrics"] = safe_json(engine.get_runtime_metrics() or {})
+        except Exception:
+            logging.exception("Failed to load worker runtime metrics")
     return summary
 
 
@@ -491,6 +516,57 @@ def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
     if not normalized_query:
         return []
     return _mb_service().search_release_groups(normalized_query, limit=limit)
+
+
+def _is_allowed_album_release_group_type(primary_type: str | None) -> bool:
+    value = str(primary_type or "").strip().lower()
+    return value in {"album", "ep"}
+
+
+def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: int) -> list[dict]:
+    normalized_artist_mbid = str(artist_mbid or "").strip()
+    if not normalized_artist_mbid:
+        return []
+    payload = musicbrainzngs.search_release_groups(
+        query=f"arid:{normalized_artist_mbid}",
+        limit=max(1, min(int(limit or 10), 100)),
+    )
+    groups = payload.get("release-group-list", []) if isinstance(payload, dict) else []
+    candidates: list[dict] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        primary_type = str(group.get("primary-type") or "").strip()
+        if not _is_allowed_album_release_group_type(primary_type):
+            continue
+        artist_credit = group.get("artist-credit")
+        artist_name = ""
+        if isinstance(artist_credit, list):
+            parts: list[str] = []
+            for item in artist_credit:
+                if not isinstance(item, dict):
+                    continue
+                artist_obj = item.get("artist") if isinstance(item.get("artist"), dict) else {}
+                name = str(item.get("name") or artist_obj.get("name") or "").strip()
+                joinphrase = str(item.get("joinphrase") or "")
+                if name:
+                    parts.append(name)
+                if joinphrase:
+                    parts.append(joinphrase)
+            artist_name = "".join(parts).strip()
+        candidates.append(
+            {
+                "release_group_id": group.get("id"),
+                "title": group.get("title"),
+                "artist_credit": artist_name,
+                "first_release_date": group.get("first-release-date"),
+                "primary_type": primary_type,
+                "secondary_types": group.get("secondary-type-list") or [],
+                "score": group.get("ext:score"),
+                "track_count": None,
+            }
+        )
+    return candidates
 
 
 def _search_music_recording_candidates(query: str, *, limit: int, config: dict | None = None) -> list[dict]:
@@ -684,9 +760,67 @@ def _ensure_music_failures_table(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_music_failures_batch ON music_failures (origin_batch_id)")
     conn.commit()
 
-def notify_run_summary(config, *, run_type: str, status, started_at, finished_at):
+
+def _parse_iso_datetime(value: str, *, field_name: str) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail=f"{field_name}_required")
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid_{field_name}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _delete_music_failures(
+    conn: sqlite3.Connection,
+    *,
+    before: datetime | None = None,
+    keep_latest: int | None = None,
+) -> tuple[int, int, int]:
+    _ensure_music_failures_table(conn)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM music_failures")
+    before_count = int((cur.fetchone() or [0])[0] or 0)
+
+    where_clause = ""
+    params: list[object] = []
+    if before is not None:
+        where_clause = " WHERE created_at < ?"
+        params.append(before.replace(microsecond=0).isoformat())
+
+    if keep_latest is None:
+        cur.execute(f"DELETE FROM music_failures{where_clause}", tuple(params))
+        deleted = int(cur.rowcount or 0)
+    else:
+        if keep_latest < 0:
+            raise HTTPException(status_code=400, detail="invalid_keep_latest")
+        query = f"""
+            DELETE FROM music_failures
+            WHERE id IN (
+                SELECT id
+                FROM music_failures
+                {where_clause}
+                ORDER BY id DESC
+                LIMIT -1 OFFSET ?
+            )
+        """
+        params_with_offset = list(params)
+        params_with_offset.append(int(keep_latest))
+        cur.execute(query, tuple(params_with_offset))
+        deleted = int(cur.rowcount or 0)
+
+    conn.commit()
+    cur.execute("SELECT COUNT(*) FROM music_failures")
+    remaining = int((cur.fetchone() or [0])[0] or 0)
+    return deleted, before_count, remaining
+
+def notify_run_summary(config, *, run_type: str, status, started_at, finished_at, force_send: bool = False):
     if run_type not in {"scheduled", "watcher", "api"}:
-        return
+        return {"attempted": 0, "sent": False, "telegram_message_id": None}
 
     TELEGRAM_MAX_MESSAGE_CHARS = 4096
 
@@ -797,8 +931,11 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
     failures = _count(getattr(status, "run_failures", 0))
     attempted = successes + failures
 
-    if attempted <= 0:
-        return
+    if attempted <= 0 and not force_send:
+        return {"attempted": 0, "sent": False, "telegram_message_id": None}
+    if attempted <= 0 and force_send:
+        failures = 1
+        attempted = 1
 
     duration_label = "unknown"
     if started_at and finished_at:
@@ -812,10 +949,100 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
     downloaded_labels = _resolve_downloaded_labels(getattr(status, "run_successes", []) or [])
     msg = _build_message(successes, failures, duration_label, downloaded_labels)
 
+    telegram_message_id = None
+    sent = False
     try:
-        telegram_notify(config, msg)
+        result = telegram_notify_result(config, msg)
+        if isinstance(result, dict):
+            sent = bool(result.get("ok"))
+            telegram_message_id = result.get("message_id")
+        else:
+            sent = bool(telegram_notify(config, msg))
     except Exception:
         logging.exception("Telegram notify failed (run_type=%s)", run_type)
+        sent = False
+        telegram_message_id = None
+
+    return {
+        "attempted": attempted,
+        "sent": sent,
+        "telegram_message_id": telegram_message_id,
+    }
+
+
+def dispatch_run_summary_once(
+    config,
+    *,
+    run_type: str,
+    run_id: str | None,
+    status,
+    started_at,
+    finished_at,
+    last_error: str | None = None,
+):
+    registry = getattr(app.state, "run_summary_dispatch", None)
+    if not isinstance(registry, dict):
+        registry = {}
+        app.state.run_summary_dispatch = registry
+
+    dedupe_key = f"{run_type}:{str(run_id or '').strip() or 'unknown'}"
+    existing = registry.get(dedupe_key) if isinstance(registry.get(dedupe_key), dict) else None
+    if existing and bool(existing.get("summary_sent")):
+        setattr(status, "summary_sent", True)
+        setattr(status, "telegram_message_id", existing.get("telegram_message_id"))
+        logging.info(
+            "run_summary_telegram_dispatch_skipped run_id=%s run_type=%s reason=already_sent message_id=%s",
+            run_id,
+            run_type,
+            existing.get("telegram_message_id"),
+        )
+        return existing
+
+    if bool(getattr(status, "summary_sent", False)):
+        cached = {
+            "summary_sent": True,
+            "telegram_message_id": getattr(status, "telegram_message_id", None),
+            "attempted": 0,
+        }
+        registry[dedupe_key] = cached
+        logging.info(
+            "run_summary_telegram_dispatch_skipped run_id=%s run_type=%s reason=status_summary_sent message_id=%s",
+            run_id,
+            run_type,
+            cached.get("telegram_message_id"),
+        )
+        return cached
+
+    force_send = bool(str(last_error or "").strip())
+    result = notify_run_summary(
+        config,
+        run_type=run_type,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+        force_send=force_send,
+    )
+    sent = bool(result.get("sent")) if isinstance(result, dict) else False
+    telegram_message_id = result.get("telegram_message_id") if isinstance(result, dict) else None
+    attempted = int(result.get("attempted") or 0) if isinstance(result, dict) else 0
+    setattr(status, "summary_sent", sent)
+    setattr(status, "telegram_message_id", telegram_message_id)
+
+    record = {
+        "summary_sent": sent,
+        "telegram_message_id": telegram_message_id,
+        "attempted": attempted,
+    }
+    registry[dedupe_key] = record
+    logging.info(
+        "run_summary_telegram_dispatch run_id=%s run_type=%s attempted=%s sent=%s message_id=%s",
+        run_id,
+        run_type,
+        attempted,
+        sent,
+        telegram_message_id,
+    )
+    return record
 
 
 def normalize_search_payload(payload: dict | None, *, default_sources: list[str]) -> dict:
@@ -1194,10 +1421,16 @@ class _IntentQueueAdapter:
         base_dir = app.state.paths.single_downloads_dir
 
         media_intent = str(payload.get("media_intent") or "").strip() or "track"
-        origin = "spotify_playlist" if payload.get("playlist_id") else "intent"
-        origin_id = str(payload.get("playlist_id") or payload.get("spotify_track_id") or "manual")
+        origin = str(payload.get("origin") or "").strip() or ("spotify_playlist" if payload.get("playlist_id") else "intent")
+        origin_id = str(
+            payload.get("origin_id")
+            or payload.get("playlist_id")
+            or payload.get("spotify_track_id")
+            or "manual"
+        ).strip() or "manual"
         destination = str(payload.get("destination") or "").strip() or None
         final_format = str(payload.get("final_format") or "").strip() or None
+        force_redownload = bool(payload.get("force_redownload"))
         canonical_metadata = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
         # Heuristic for Music Mode-origin payloads:
         # explicit music flags OR MusicBrainz identifiers already present in payload/canonical metadata.
@@ -1278,6 +1511,19 @@ class _IntentQueueAdapter:
             normalized_release_date = str(payload.get("release_date") or "").strip() or None
             normalized_artwork_url = str(payload.get("artwork_url") or "").strip() or None
             normalized_genre = str(payload.get("genre") or "").strip() or None
+            normalized_release_primary_type = str(payload.get("release_primary_type") or "").strip() or None
+            release_secondary_raw = payload.get("release_secondary_types")
+            normalized_release_secondary_types = []
+            if isinstance(release_secondary_raw, (list, tuple, set)):
+                for value in release_secondary_raw:
+                    text = str(value or "").strip()
+                    if text:
+                        normalized_release_secondary_types.append(text)
+            normalized_mb_youtube_urls = (
+                list(payload.get("mb_youtube_urls"))
+                if isinstance(payload.get("mb_youtube_urls"), (list, tuple, set))
+                else []
+            )
             if not normalized_artist or not normalized_track:
                 logging.warning("Intent enqueue skipped: music query missing artist/track")
                 return
@@ -1300,6 +1546,9 @@ class _IntentQueueAdapter:
                 "mb_recording_id": normalized_recording_mbid,
                 "mb_release_id": normalized_release_mbid,
                 "mb_release_group_id": normalized_release_group_mbid,
+                "mb_youtube_urls": normalized_mb_youtube_urls,
+                "release_primary_type": normalized_release_primary_type,
+                "release_secondary_types": normalized_release_secondary_types,
             }
             canonical_id = _build_music_track_canonical_id(
                 normalized_artist,
@@ -1339,10 +1588,16 @@ class _IntentQueueAdapter:
                     "mb_recording_id": normalized_recording_mbid,
                     "mb_release_id": normalized_release_mbid,
                     "mb_release_group_id": normalized_release_group_mbid,
+                    "mb_youtube_urls": normalized_mb_youtube_urls,
+                    "release_primary_type": normalized_release_primary_type,
+                    "release_secondary_types": normalized_release_secondary_types,
                 },
                 canonical_id=canonical_id,
             )
-            store.enqueue_job(**enqueue_payload)
+            store.enqueue_job(
+                **enqueue_payload,
+                force_requeue=force_redownload,
+            )
             logging.info(
                 "Intent payload queued playlist_id=%s spotify_track_id=%s",
                 payload.get("playlist_id"),
@@ -1412,7 +1667,10 @@ class _IntentQueueAdapter:
             },
             canonical_id=canonical_id,
         )
-        store.enqueue_job(**enqueue_payload)
+        store.enqueue_job(
+            **enqueue_payload,
+            force_requeue=force_redownload,
+        )
         logging.info(
             "Intent payload queued playlist_id=%s spotify_track_id=%s",
             payload.get("playlist_id"),
@@ -1458,6 +1716,7 @@ async def basic_auth_middleware(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup():
+    _log_transition("APP_STARTUP", phase="begin")
     app.state.paths = build_engine_paths()
     try:
         app.state.config_path = resolve_config_path(os.environ.get("YT_ARCHIVER_CONFIG"))
@@ -1475,6 +1734,7 @@ async def startup():
     app.state.run_lock = asyncio.Lock()
     app.state.stop_event = threading.Event()
     app.state.run_task = None
+    app.state.run_summary_dispatch = {}
     app.state.loop = asyncio.get_running_loop()
     app.state.schedule_lock = threading.Lock()
     app.state.ytdlp_update_lock = threading.Lock()
@@ -1640,10 +1900,17 @@ async def startup():
         app.state.single_worker_enforced,
         downtime_active,
     )
+    _log_transition(
+        "APP_STARTUP",
+        phase="complete",
+        watcher_enabled=bool(app.state.watcher_lock),
+        worker_count=app.state.worker_count,
+    )
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    _log_transition("APP_SHUTDOWN", phase="begin")
     if app.state.running:
         app.state.stop_event.set()
         task = app.state.run_task
@@ -1677,6 +1944,7 @@ async def shutdown():
             os.close(lock_fd)
         except OSError:
             pass
+    _log_transition("APP_SHUTDOWN", phase="complete")
     logging.shutdown()
 
 
@@ -2813,11 +3081,15 @@ async def _start_run_with_config(
                     bool(playlist_id),
                 )
                 if run_source == "watcher":
+                    _log_transition("RUN_START", source="watcher", run_id=app.state.run_id)
                     logging.info("Watcher-triggered run starting")
                 elif run_source == "scheduled":
+                    _log_transition("RUN_START", source="scheduled", run_id=app.state.run_id)
                     logging.info("Scheduled run starting")
                 else:
+                    _log_transition("RUN_START", source=run_source, run_id=app.state.run_id)
                     logging.info("Manual run starting (source=%s)", run_source)
+                manual_force_redownload = bool(run_source == "api")
                 if playlist_id:
                     run_callable = functools.partial(
                         run_single_playlist,
@@ -2826,6 +3098,7 @@ async def _start_run_with_config(
                         destination,
                         playlist_account,
                         effective_final_format_override,
+                        manual_force_redownload,
                         paths=app.state.paths,
                         status=status,
                         js_runtime_override=js_runtime,
@@ -2892,6 +3165,7 @@ async def _start_run_with_config(
                             music_mode=bool(music_mode) if music_mode is not None else False,
                             skip_downtime=skip_downtime,
                             delivery_mode=delivery_mode or "server",
+                            force_redownload=manual_force_redownload,
                         )
                 await anyio.to_thread.run_sync(run_callable)
                 if (
@@ -2962,12 +3236,14 @@ async def _start_run_with_config(
                 elif app.state.state in {"running", "completed"}:
                     app.state.state = "idle"
                 
-                notify_run_summary(
+                dispatch_run_summary_once(
                     config,
                     run_type=run_source,
+                    run_id=app.state.run_id,
                     status=status,
                     started_at=app.state.started_at,
                     finished_at=app.state.finished_at,
+                    last_error=app.state.last_error,
                 )
 
         app.state.run_task = asyncio.create_task(_runner())
@@ -3120,6 +3396,7 @@ async def _handle_scheduled_run():
         return
     result, next_allowed = await _start_run_with_config(config, run_source="scheduled")
     if result == "started":
+        _log_transition("SCHEDULED_TICK", action="run_started")
         logging.info("Scheduled run starting")
         now = datetime.now(timezone.utc).isoformat()
         _set_schedule_state(last_run=now, next_run=_get_next_run_iso())
@@ -4342,6 +4619,7 @@ def _set_watcher_status(state=None, **fields):
         app.state.watcher_status = status
     prev_state = status.get("state")
     if state and state != prev_state:
+        _log_transition("WATCHER_STATE", from_state=prev_state or "-", to_state=state)
         status["state"] = state
         if state == "polling":
             logging.info("Watcher state → polling")
@@ -4620,6 +4898,12 @@ async def api_run(request: RunRequest):
         accounts = (config.get("accounts") or {}) if isinstance(config, dict) else {}
         if request.playlist_account not in accounts:
             raise HTTPException(status_code=400, detail="playlist_account not found in config")
+    _log_transition(
+        "RUN_REQUESTED",
+        source="api",
+        single_url=bool(request.single_url),
+        playlist_id=request.playlist_id or "-",
+    )
     logging.info(
         "Manual run requested (source=api) single_url=%s playlist_id=%s",
         bool(request.single_url),
@@ -4696,6 +4980,45 @@ async def api_direct_url_preview(request: DirectUrlPreviewRequest):
         logging.exception("Direct URL preview failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return safe_json({"preview": preview})
+
+
+@app.get("/api/playlist/preview")
+async def api_playlist_preview(playlist_id: str = Query(..., min_length=2, max_length=200)):
+    normalized_playlist_id = extract_playlist_id(playlist_id) or str(playlist_id or "").strip()
+    if not normalized_playlist_id:
+        raise HTTPException(status_code=400, detail="playlist_id_required")
+    config = get_loaded_config() or _read_config_or_404()
+    cookie_file = resolve_cookie_file(config)
+    preview, _fallback_error = get_playlist_preview_fallback(
+        normalized_playlist_id,
+        cookie_file=cookie_file,
+    )
+    first_video_id = str((preview or {}).get("first_video_id") or "").strip()
+    thumbnail_url = str((preview or {}).get("thumbnail_url") or "").strip() or None
+    playlist_title = str((preview or {}).get("playlist_title") or "").strip() or None
+    if not first_video_id:
+        videos, _videos_fallback_error = get_playlist_videos_fallback(
+            normalized_playlist_id,
+            cookie_file=cookie_file,
+        )
+        if isinstance(videos, list):
+            for entry in videos:
+                if not isinstance(entry, dict):
+                    continue
+                candidate = str(entry.get("videoId") or "").strip()
+                if candidate:
+                    first_video_id = candidate
+                    break
+        if not thumbnail_url and first_video_id:
+            thumbnail_url = f"https://i.ytimg.com/vi/{first_video_id}/hqdefault.jpg"
+    return safe_json(
+        {
+            "playlist_id": normalized_playlist_id,
+            "playlist_title": playlist_title,
+            "first_video_id": first_video_id or None,
+            "thumbnail_url": thumbnail_url,
+        }
+    )
 
 
 @app.post("/api/cancel")
@@ -5018,11 +5341,313 @@ async def run_search_resolution_once():
     return {"request_id": request_id}
 
 
+def _album_run_summary_dir() -> Path:
+    return DATA_DIR / "run_summaries" / "music_album"
+
+
+def _album_run_summary_path(album_run_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(album_run_id or "").strip())
+    if not safe_id:
+        raise ValueError("invalid_album_run_id")
+    return _album_run_summary_dir() / safe_id / "run_summary.json"
+
+
+def _normalize_runtime_failure_reason(last_error: str | None) -> str:
+    text = str(last_error or "").strip().lower()
+    if not text:
+        return "no_candidates_retrieved"
+    marker = "yt_dlp_source_unavailable:"
+    if marker in text:
+        tail = text.split(marker, 1)[1]
+        unavailable_class = tail.split(":", 1)[0].strip() or "unknown"
+        return f"source_unavailable:{unavailable_class}"
+    if "source_unavailable:" in text:
+        tail = text.split("source_unavailable:", 1)[1]
+        unavailable_class = tail.split(":", 1)[0].strip() or "unknown"
+        return f"source_unavailable:{unavailable_class}"
+    if "duration_filtered" in text:
+        return "duration_filtered"
+    if "no_candidate_above_threshold" in text:
+        return "no_candidate_above_threshold"
+    if "no_candidates" in text:
+        return "no_candidates_retrieved"
+    if "album_similarity_blocked" in text:
+        return "album_similarity_blocked"
+    if "all_filtered_by_gate" in text:
+        return "all_filtered_by_gate"
+    return "all_filtered_by_gate"
+
+
+def _classify_runtime_missing_hint(failure_reason: str) -> tuple[str, str]:
+    reason = str(failure_reason or "").strip().lower()
+    if reason.startswith("source_unavailable:"):
+        return ("unavailable", "Unavailable (blocked/removed)")
+    if reason == "duration_filtered":
+        return (
+            "likely_wrong_mb_recording_length",
+            "Likely wrong MB recording length (duration mismatch persistent across many candidates)",
+        )
+    return (
+        "recoverable_ladder_extension",
+        "Recoverable by ladder extension (no candidates)",
+    )
+
+
+def _empty_injected_rejection_mix() -> dict[str, int]:
+    return {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0,
+    }
+
+
+def _normalize_injected_rejection_mix(value: object) -> dict[str, int]:
+    mix = _empty_injected_rejection_mix()
+    if not isinstance(value, dict):
+        return mix
+    for key, raw_count in value.items():
+        try:
+            count = int(raw_count or 0)
+        except Exception:
+            count = 0
+        normalized_key = str(key or "").strip().lower()
+        bucket = None
+        if normalized_key in mix:
+            bucket = normalized_key
+        elif normalized_key in {"mb_injected_failed_duration", "pass_b_duration"}:
+            bucket = "duration_fail"
+        elif normalized_key in {"mb_injected_failed_title", "low_title_similarity", "floor_check_failed", "low_album_similarity"}:
+            bucket = "title_similarity_fail"
+        elif normalized_key in {"mb_injected_failed_artist", "mb_injected_failed_authority", "low_artist_similarity"}:
+            bucket = "artist_similarity_fail"
+        elif normalized_key in {"mb_injected_failed_variant", "disallowed_variant", "preview_variant", "session_variant", "cover_artist_mismatch"}:
+            bucket = "variant_blocked"
+        elif normalized_key in {"mb_injected_failed_unavailable", "source_unavailable", "unavailable"}:
+            bucket = "unavailable"
+        if bucket:
+            mix[bucket] = int(mix.get(bucket) or 0) + count
+    return mix
+
+
+def _normalize_decision_edge(value: object) -> dict[str, object]:
+    edge = value if isinstance(value, dict) else {}
+    accepted = edge.get("accepted_selection") if isinstance(edge.get("accepted_selection"), dict) else None
+    final_rejection = edge.get("final_rejection") if isinstance(edge.get("final_rejection"), dict) else None
+    rejected_candidates = edge.get("rejected_candidates") if isinstance(edge.get("rejected_candidates"), list) else []
+    normalized_rejected = [dict(item) for item in rejected_candidates if isinstance(item, dict)]
+    candidate_variant_distribution = edge.get("candidate_variant_distribution") if isinstance(edge.get("candidate_variant_distribution"), dict) else {}
+    normalized_distribution: dict[str, int] = {}
+    for key, value in candidate_variant_distribution.items():
+        tag = str(key or "").strip()
+        if not tag:
+            continue
+        try:
+            normalized_distribution[tag] = int(value or 0)
+        except Exception:
+            continue
+    selected_variant_tags = edge.get("selected_candidate_variant_tags") if isinstance(edge.get("selected_candidate_variant_tags"), list) else []
+    normalized_selected_variant_tags = sorted({str(tag or "").strip() for tag in selected_variant_tags if str(tag or "").strip()})
+    top_rejected_variant_tags = edge.get("top_rejected_variant_tags") if isinstance(edge.get("top_rejected_variant_tags"), list) else []
+    normalized_top_rejected_variant_tags = [str(tag or "").strip() for tag in top_rejected_variant_tags if str(tag or "").strip()]
+    return {
+        "accepted_selection": accepted,
+        "final_rejection": final_rejection,
+        "rejected_candidates": normalized_rejected,
+        "candidate_variant_distribution": dict(sorted(normalized_distribution.items(), key=lambda item: item[0])),
+        "selected_candidate_variant_tags": normalized_selected_variant_tags,
+        "top_rejected_variant_tags": normalized_top_rejected_variant_tags,
+    }
+
+
+def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_group_mbid: str | None = None) -> dict:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, status, last_error, output_template
+            FROM download_jobs
+            WHERE origin=? AND origin_id=? AND media_intent=?
+            ORDER BY created_at ASC
+            """,
+            ("music_album", album_run_id, "music_track"),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    tracks_total = len(rows)
+    tracks_resolved = 0
+    unresolved = []
+    why_missing_tracks = []
+    why_missing_counts = {}
+    source_unavailable = 0
+    injected_rejection_mix = _empty_injected_rejection_mix()
+    per_track = []
+
+    for row in rows:
+        status = str(row["status"] or "").strip().lower()
+        if status == "completed":
+            tracks_resolved += 1
+            continue
+        if status in {"queued", "claimed", "downloading", "postprocessing"}:
+            continue
+        failure_reason = _normalize_runtime_failure_reason(row["last_error"])
+        if failure_reason.startswith("source_unavailable:"):
+            source_unavailable += 1
+        hint_code, hint_label = _classify_runtime_missing_hint(failure_reason)
+        why_missing_counts[hint_label] = int(why_missing_counts.get(hint_label) or 0) + 1
+
+        output_template = row["output_template"]
+        parsed = {}
+        if isinstance(output_template, str) and output_template.strip():
+            try:
+                loaded = json.loads(output_template)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                parsed = {}
+        runtime_search_meta = parsed.get("runtime_search_meta") if isinstance(parsed.get("runtime_search_meta"), dict) else {}
+        ep_refinement_attempted = bool(runtime_search_meta.get("ep_refinement_attempted"))
+        ep_refinement_candidates_considered = int(runtime_search_meta.get("ep_refinement_candidates_considered") or 0)
+        runtime_media_profile = parsed.get("runtime_media_profile") if isinstance(parsed.get("runtime_media_profile"), dict) else {}
+        final_container = str(runtime_media_profile.get("final_container") or "").strip() or None
+        final_video_codec = str(runtime_media_profile.get("final_video_codec") or "").strip() or None
+        final_audio_codec = str(runtime_media_profile.get("final_audio_codec") or "").strip() or None
+        decision_edge = _normalize_decision_edge(runtime_search_meta.get("decision_edge"))
+        normalized_rejections = _normalize_injected_rejection_mix(runtime_search_meta.get("mb_injected_rejections"))
+        for key, count in normalized_rejections.items():
+            injected_rejection_mix[key] = int(injected_rejection_mix.get(key) or 0) + int(count or 0)
+        canonical = parsed.get("canonical_metadata") if isinstance(parsed.get("canonical_metadata"), dict) else {}
+        track_id = str(
+            canonical.get("recording_mbid")
+            or parsed.get("recording_mbid")
+            or row["id"]
+        ).strip()
+
+        why_missing_tracks.append(
+            {
+                "album_id": str(
+                    canonical.get("mb_release_group_id")
+                    or parsed.get("mb_release_group_id")
+                    or release_group_mbid
+                    or ""
+                ).strip(),
+                "track_id": track_id,
+                "hint_code": hint_code,
+                "hint_label": hint_label,
+                "evidence": {
+                    "failure_reason": failure_reason,
+                },
+            }
+        )
+        unresolved.append(row)
+        per_track.append(
+            {
+                "track_id": track_id,
+                "resolved": False,
+                "failure_reason": failure_reason,
+                "decision_edge": decision_edge,
+                "ep_refinement_attempted": ep_refinement_attempted,
+                "ep_refinement_candidates_considered": ep_refinement_candidates_considered,
+                "final_container": final_container,
+                "final_video_codec": final_video_codec,
+                "final_audio_codec": final_audio_codec,
+            }
+        )
+    for row in rows:
+        status = str(row["status"] or "").strip().lower()
+        if status != "completed":
+            continue
+        output_template = row["output_template"]
+        parsed = {}
+        if isinstance(output_template, str) and output_template.strip():
+            try:
+                loaded = json.loads(output_template)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                parsed = {}
+        canonical = parsed.get("canonical_metadata") if isinstance(parsed.get("canonical_metadata"), dict) else {}
+        track_id = str(
+            canonical.get("recording_mbid")
+            or parsed.get("recording_mbid")
+            or row["id"]
+        ).strip()
+        runtime_search_meta = parsed.get("runtime_search_meta") if isinstance(parsed.get("runtime_search_meta"), dict) else {}
+        ep_refinement_attempted = bool(runtime_search_meta.get("ep_refinement_attempted"))
+        ep_refinement_candidates_considered = int(runtime_search_meta.get("ep_refinement_candidates_considered") or 0)
+        runtime_media_profile = parsed.get("runtime_media_profile") if isinstance(parsed.get("runtime_media_profile"), dict) else {}
+        final_container = str(runtime_media_profile.get("final_container") or "").strip() or None
+        final_video_codec = str(runtime_media_profile.get("final_video_codec") or "").strip() or None
+        final_audio_codec = str(runtime_media_profile.get("final_audio_codec") or "").strip() or None
+        decision_edge = _normalize_decision_edge(runtime_search_meta.get("decision_edge"))
+        per_track.append(
+            {
+                "track_id": track_id,
+                "resolved": True,
+                "failure_reason": None,
+                "decision_edge": decision_edge,
+                "ep_refinement_attempted": ep_refinement_attempted,
+                "ep_refinement_candidates_considered": ep_refinement_candidates_considered,
+                "final_container": final_container,
+                "final_video_codec": final_video_codec,
+                "final_audio_codec": final_audio_codec,
+            }
+        )
+
+    no_viable = max(0, len(unresolved) - source_unavailable)
+    completion_percent = (tracks_resolved / tracks_total * 100.0) if tracks_total else 0.0
+    per_album_id = str(release_group_mbid or "").strip() or album_run_id
+    return {
+        "schema_version": 1,
+        "run_type": "music_album",
+        "album_run_id": album_run_id,
+        "release_group_mbid": release_group_mbid,
+        "telegram_sent": False,
+        "telegram_message_id": None,
+        "tracks_total": tracks_total,
+        "tracks_resolved": tracks_resolved,
+        "completion_percent": completion_percent,
+        "unresolved_classification": {
+            "source_unavailable": source_unavailable,
+            "no_viable_match": no_viable,
+        },
+        "why_missing": {
+            "hint_counts": dict(sorted(why_missing_counts.items(), key=lambda item: (-int(item[1]), item[0]))),
+            "tracks": why_missing_tracks,
+        },
+        "mb_injected_rejection_mix": injected_rejection_mix,
+        "per_album": {
+            per_album_id: {
+                "injected_rejection_mix": injected_rejection_mix,
+            }
+        },
+        "per_track": sorted(per_track, key=lambda item: str(item.get("track_id") or "")),
+    }
+
+
+def _write_music_album_run_summary(summary: dict[str, object]) -> str:
+    album_run_id = str(summary.get("album_run_id") or "").strip()
+    if not album_run_id:
+        raise ValueError("album_run_id required")
+    output_path = _album_run_summary_path(album_run_id)
+    ensure_dir(str(output_path.parent))
+    with output_path.open("w", encoding="utf-8") as handle:
+        safe_json_dump(summary, handle, indent=2)
+        handle.write("\n")
+    return str(output_path)
+
+
 @app.post("/api/music/album/download")
 def download_full_album(data: dict):
     release_group_mbid = str((data or {}).get("release_group_mbid") or "").strip()
     if not release_group_mbid:
         raise HTTPException(status_code=400, detail="release_group_mbid required")
+    force_redownload = bool((data or {}).get("force_redownload"))
 
     cfg = _read_config_or_404()
     threshold_raw = (cfg or {}).get("music_mb_binding_threshold", 0.78)
@@ -5039,7 +5664,8 @@ def download_full_album(data: dict):
         release_group_payload = mb._call_with_retry(  # noqa: SLF001
             lambda: musicbrainzngs.get_release_group_by_id(
                 release_group_mbid,
-                includes=["releases", "tags", "genres"],
+                # release-group does not accept "genres" include in musicbrainzngs.
+                includes=["releases", "tags"],
             )
         )
     except Exception:
@@ -5068,7 +5694,8 @@ def download_full_album(data: dict):
         release_payload = mb._call_with_retry(  # noqa: SLF001
             lambda: musicbrainzngs.get_release_by_id(
                 release_mbid,
-                includes=["recordings", "media", "artists", "tags", "genres"],
+                # Keep include list contract-safe; use tags fallback for genre best-effort.
+                includes=["recordings", "media", "artists", "tags"],
             )
         )
     except Exception:
@@ -5167,6 +5794,10 @@ def download_full_album(data: dict):
         except Exception:
             album_artwork_url = None
     album_genre = _best_mb_genre(release_obj) or _best_mb_genre(release_group)
+    release_primary_type = str(release_group.get("primary-type") or "").strip() if isinstance(release_group, dict) else ""
+    release_secondary_types = release_group.get("secondary-type-list") if isinstance(release_group, dict) else []
+    if not isinstance(release_secondary_types, list):
+        release_secondary_types = []
 
     queue = _IntentQueueAdapter()
     engine = getattr(app.state, "worker_engine", None)
@@ -5175,6 +5806,7 @@ def download_full_album(data: dict):
     job_ids = []
     failed_tracks = []
     album_duration_delta_limit_ms = 25000
+    album_run_id = uuid4().hex
 
     for medium in media:
         if not isinstance(medium, dict):
@@ -5234,7 +5866,10 @@ def download_full_album(data: dict):
                     continue
 
                 payload = {
+                    "origin": "music_album",
+                    "origin_id": album_run_id,
                     "media_intent": "music_track",
+                    "force_redownload": force_redownload,
                     "artist": resolved.get("artist") or artist,
                     "album": release_title,
                     "album_artist": album_artist or (resolved.get("album_artist") or resolved.get("artist") or artist),
@@ -5253,6 +5888,12 @@ def download_full_album(data: dict):
                     "artwork_url": album_artwork_url,
                     "genre": album_genre or (resolved.get("genre") if isinstance(resolved, dict) else None),
                     "duration_ms": resolved.get("duration_ms") or duration_ms_int,
+                    "track_aliases": resolved.get("track_aliases") if isinstance(resolved, dict) else None,
+                    "track_disambiguation": resolved.get("track_disambiguation") if isinstance(resolved, dict) else None,
+                    "mb_recording_title": resolved.get("mb_recording_title") if isinstance(resolved, dict) else None,
+                    "mb_youtube_urls": resolved.get("mb_youtube_urls") if isinstance(resolved, dict) else None,
+                    "release_primary_type": release_primary_type or None,
+                    "release_secondary_types": release_secondary_types or [],
                 }
                 canonical_id = _build_music_track_canonical_id(
                     payload.get("artist"),
@@ -5287,8 +5928,35 @@ def download_full_album(data: dict):
                 )
                 continue
 
+    initial_summary = {
+        "schema_version": 1,
+        "run_type": "music_album",
+        "album_run_id": album_run_id,
+        "release_group_mbid": release_group_mbid,
+        "tracks_total": tracks_enqueued,
+        "tracks_resolved": 0,
+        "completion_percent": 0.0,
+        "unresolved_classification": {
+            "source_unavailable": 0,
+            "no_viable_match": 0,
+        },
+        "why_missing": {
+            "hint_counts": {},
+            "tracks": [],
+        },
+        "mb_injected_rejection_mix": _empty_injected_rejection_mix(),
+        "per_album": {
+            str(release_group_mbid or "").strip() or album_run_id: {
+                "injected_rejection_mix": _empty_injected_rejection_mix(),
+            }
+        },
+    }
+    summary_path = _write_music_album_run_summary(initial_summary)
+
     return {
         "status": "enqueued",
+        "album_run_id": album_run_id,
+        "run_summary_path": summary_path,
         "release_group_mbid": release_group_mbid,
         "release_mbid": release_mbid,
         "tracks_enqueued": tracks_enqueued,
@@ -5296,6 +5964,28 @@ def download_full_album(data: dict):
         "failed_tracks": failed_tracks,
         "job_ids": job_ids,
     }
+
+
+@app.get("/api/music/album/runs/{album_run_id}/summary")
+def music_album_run_summary(album_run_id: str, release_group_mbid: str | None = Query(None)):
+    normalized_run_id = str(album_run_id or "").strip()
+    if not normalized_run_id:
+        raise HTTPException(status_code=400, detail="album_run_id required")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", normalized_run_id):
+        raise HTTPException(status_code=400, detail="invalid_album_run_id")
+
+    db_path = str(getattr(getattr(app.state, "paths", None), "db_path", "") or "")
+    if not db_path:
+        db_path = str((DATA_DIR / "database" / "db.sqlite").resolve())
+
+    summary = _compute_music_album_run_summary(
+        db_path,
+        normalized_run_id,
+        release_group_mbid=str(release_group_mbid or "").strip() or None,
+    )
+    summary_path = _write_music_album_run_summary(summary)
+    summary["run_summary_path"] = summary_path
+    return summary
 
 
 @app.post("/api/music/album/candidates")
@@ -5320,7 +6010,18 @@ def music_album_candidates(payload: dict):
 
 
 @app.get("/api/music/albums/search")
-def music_albums_search(q: str = Query("", alias="q"), limit: int = Query(10, ge=1, le=50)):
+def music_albums_search(
+    q: str = Query("", alias="q"),
+    limit: int = Query(10, ge=1, le=50),
+    artist_mbid: str = Query("", alias="artist_mbid"),
+):
+    artist_mbid_value = str(artist_mbid or "").strip()
+    if artist_mbid_value:
+        try:
+            return _search_music_album_candidates_for_artist_mbid(artist_mbid_value, limit=int(limit))
+        except Exception:
+            logging.exception("music_albums_search artist-mbid lookup failed artist_mbid=%s", artist_mbid_value)
+            raise HTTPException(status_code=502, detail="musicbrainz_artist_album_search_failed")
     return _search_music_album_candidates(str(q or ""), limit=int(limit))
 
 
@@ -5447,10 +6148,15 @@ def enqueue_music_track(data: dict = Body(...)):
         "mb_recording_id": recording_mbid,
         "mb_release_id": mb_release_id,
         "mb_release_group_id": mb_release_group_id,
+        "track_aliases": payload.get("track_aliases"),
+        "track_disambiguation": payload.get("track_disambiguation"),
+        "mb_recording_title": payload.get("mb_recording_title"),
+        "mb_youtube_urls": payload.get("mb_youtube_urls"),
     }
 
     destination = str(payload.get("destination") or payload.get("destination_dir") or "").strip() or None
     final_format_override = str(payload.get("final_format") or "").strip() or None
+    force_redownload = bool(payload.get("force_redownload"))
     runtime_config = _read_config_or_404()
     engine = getattr(app.state, "worker_engine", None)
     queue_store = getattr(engine, "store", None) if engine is not None else None
@@ -5492,6 +6198,10 @@ def enqueue_music_track(data: dict = Body(...)):
                 "disc_number": disc_number,
                 "release_date": canonical_metadata["release_date"],
                 "duration_ms": duration_ms,
+                "track_aliases": canonical_metadata.get("track_aliases"),
+                "track_disambiguation": canonical_metadata.get("track_disambiguation"),
+                "mb_recording_title": canonical_metadata.get("mb_recording_title"),
+                "mb_youtube_urls": canonical_metadata.get("mb_youtube_urls"),
             },
             canonical_id=canonical_id,
         )
@@ -5509,7 +6219,10 @@ def enqueue_music_track(data: dict = Body(...)):
                 },
             )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    job_id, created, dedupe_reason = queue_store.enqueue_job(**enqueue_payload)
+    job_id, created, dedupe_reason = queue_store.enqueue_job(
+        **enqueue_payload,
+        force_requeue=force_redownload,
+    )
     return {
         "status": "ok",
         "job_id": job_id,
@@ -6152,11 +6865,50 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
 
 @app.get("/api/download_jobs")
 async def list_download_jobs(limit: int = 100, status: str | None = None):
+    def _display_title(media_intent: str | None, url: str | None, output_template_raw: str | None) -> str:
+        media_intent_value = str(media_intent or "").strip().lower()
+        fallback = str(url or "").strip()
+        if fallback and "watch?v=" in fallback:
+            fallback = fallback.split("watch?v=", 1)[1]
+        if fallback and "/" in fallback:
+            fallback = fallback.rsplit("/", 1)[-1]
+        if not fallback:
+            fallback = "Unknown item"
+
+        parsed: dict[str, object] = {}
+        if isinstance(output_template_raw, str) and output_template_raw.strip():
+            try:
+                loaded = json.loads(output_template_raw)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                parsed = {}
+
+        canonical = parsed.get("canonical_metadata") if isinstance(parsed.get("canonical_metadata"), dict) else {}
+        if media_intent_value == "music_track":
+            artist = str(canonical.get("artist") or parsed.get("artist") or "").strip()
+            track = str(canonical.get("track") or parsed.get("track") or parsed.get("title") or "").strip()
+            if artist and track:
+                return f"{artist} - {track}"
+            if track:
+                return track
+        if media_intent_value in {"music_album", "album"}:
+            artist = str(parsed.get("artist") or "").strip()
+            album = str(parsed.get("album") or "").strip()
+            if artist and album:
+                return f"{artist} - {album}"
+            if album:
+                return album
+        title = str(parsed.get("title") or parsed.get("track") or "").strip()
+        if title:
+            return title
+        return fallback
+
     conn = sqlite3.connect(app.state.paths.db_path)
     try:
         cur = conn.cursor()
         query = (
-            "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error, "
+            "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, updated_at, last_error, output_template, "
             "progress_downloaded_bytes, progress_total_bytes, progress_percent, progress_speed_bps, progress_eta_seconds, progress_updated_at "
             "FROM download_jobs"
         )
@@ -6175,7 +6927,7 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                 raise
             # Backward compatibility if DB has not yet migrated progress columns.
             query = (
-                "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error "
+                "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, updated_at, last_error, output_template "
                 "FROM download_jobs"
             )
             params = []
@@ -6198,7 +6950,9 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                     "status": row[6],
                     "attempts": row[7],
                     "created_at": row[8],
-                    "last_error": row[9],
+                    "updated_at": row[9],
+                    "last_error": row[10],
+                    "display_title": _display_title(row[5], row[3], row[11]),
                     "progress_downloaded_bytes": None,
                     "progress_total_bytes": None,
                     "progress_percent": None,
@@ -6220,19 +6974,36 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                 "status": row[6],
                 "attempts": row[7],
                 "created_at": row[8],
-                "last_error": row[9],
-                "progress_downloaded_bytes": row[10],
-                "progress_total_bytes": row[11],
-                "progress_percent": row[12],
-                "progress_speed_bps": row[13],
-                "progress_eta_seconds": row[14],
-                "progress_updated_at": row[15],
+                "updated_at": row[9],
+                "last_error": row[10],
+                "display_title": _display_title(row[5], row[3], row[11]),
+                "progress_downloaded_bytes": row[12],
+                "progress_total_bytes": row[13],
+                "progress_percent": row[14],
+                "progress_speed_bps": row[15],
+                "progress_eta_seconds": row[16],
+                "progress_updated_at": row[17],
             }
             for row in cur.fetchall()
         ]
     finally:
         conn.close()
     return safe_json({"jobs": rows})
+
+
+@app.post("/api/download_jobs/clear_failed")
+async def clear_failed_download_jobs():
+    conn = sqlite3.connect(app.state.paths.db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM download_jobs WHERE status IN (?, ?)", ("failed", "cancelled"))
+        before_count = int((cur.fetchone() or [0])[0] or 0)
+        cur.execute("DELETE FROM download_jobs WHERE status IN (?, ?)", ("failed", "cancelled"))
+        deleted_count = int(cur.rowcount or 0)
+        conn.commit()
+    finally:
+        conn.close()
+    return safe_json({"deleted": deleted_count, "before": before_count, "remaining": max(0, before_count - deleted_count)})
 
 
 @app.get("/api/music/failures")
@@ -6280,6 +7051,42 @@ async def list_music_failures(limit: int = Query(50, ge=1, le=500)):
     finally:
         conn.close()
     return {"count": total_count, "rows": rows}
+
+
+@app.delete("/api/music/failures")
+async def delete_music_failures(
+    before: str | None = Query(None),
+    keep_latest: int | None = Query(None, ge=0),
+):
+    before_dt = _parse_iso_datetime(before, field_name="before") if before else None
+    conn = sqlite3.connect(app.state.paths.db_path)
+    try:
+        deleted, before_count, remaining = _delete_music_failures(
+            conn,
+            before=before_dt,
+            keep_latest=keep_latest,
+        )
+    finally:
+        conn.close()
+    return safe_json(
+        {
+            "deleted": int(deleted),
+            "before": int(before_count),
+            "remaining": int(remaining),
+            "filter": {
+                "before": before_dt.replace(microsecond=0).isoformat() if before_dt else None,
+                "keep_latest": int(keep_latest) if keep_latest is not None else None,
+            },
+        }
+    )
+
+
+@app.post("/api/music/failures/clear")
+async def clear_music_failures_compat(
+    before: str | None = Query(None),
+    keep_latest: int | None = Query(None, ge=0),
+):
+    return await delete_music_failures(before=before, keep_latest=keep_latest)
 
 
 

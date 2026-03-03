@@ -301,6 +301,86 @@ def test_import_pipeline_uses_single_batch_id_for_all_enqueued_items() -> None:
     assert second == result.import_batch_id
 
 
+def test_import_pipeline_dedupes_exact_track_lookup_before_mb_binding() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-dedupe-1",
+                        "title": "Repeat Song",
+                        "ext:score": "96",
+                        "artist-credit": [{"name": "Artist Repeat"}],
+                        "release-list": [{"id": "release-dedupe-1"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    intents = [
+        TrackIntent(artist="Artist Repeat", title="Repeat Song", album="Same Album", raw_line="", source_format="m3u"),
+        TrackIntent(artist="Artist Repeat", title="Repeat Song", album="Same Album", raw_line="", source_format="m3u"),
+    ]
+
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+        },
+    )
+
+    assert result.total_tracks == 2
+    assert result.resolved_count == 2
+    assert result.enqueued_count == 2
+    assert result.failed_count == 0
+    assert len(queue_store.enqueued) == 2
+    assert len(mb.calls) == 1
+
+
+def test_import_pipeline_dedupe_normalizes_case_and_whitespace() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-dedupe-2",
+                        "title": "Repeat Song",
+                        "ext:score": "96",
+                        "artist-credit": [{"name": "Artist Repeat"}],
+                        "release-list": [{"id": "release-dedupe-2"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    intents = [
+        TrackIntent(artist="Artist   Repeat", title="Repeat Song", album="Same  Album", raw_line="", source_format="m3u"),
+        TrackIntent(artist="artist repeat", title="  Repeat    Song  ", album="same album", raw_line="", source_format="m3u"),
+    ]
+
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+        },
+    )
+
+    assert result.total_tracks == 2
+    assert result.resolved_count == 2
+    assert result.enqueued_count == 2
+    assert result.failed_count == 0
+    assert len(queue_store.enqueued) == 2
+    assert len(mb.calls) == 1
+
+
 def test_import_pipeline_threshold_uses_app_config_when_wrapper_passed() -> None:
     mb = FakeMusicBrainzService(
         [
@@ -343,3 +423,63 @@ def test_import_pipeline_threshold_uses_app_config_when_wrapper_passed() -> None
     assert result.unresolved_count == 1
     assert result.enqueued_count == 0
     assert len(queue_store.enqueued) == 0
+
+
+def test_import_pipeline_progress_callback_reports_completed_work_units() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-progress-1",
+                        "title": "Song One",
+                        "ext:score": "95",
+                        "artist-credit": [{"name": "Artist One"}],
+                        "release-list": [{"id": "release-progress-1"}],
+                    }
+                ]
+            },
+            {"recording-list": []},
+        ]
+    )
+    queue_store = FakeQueueStore()
+    intents = [
+        TrackIntent(
+            artist="Artist One",
+            title="Song One",
+            album="Album One",
+            raw_line="",
+            source_format="m3u",
+        ),
+        TrackIntent(
+            artist="Artist Two",
+            title="Song Two",
+            album="Album Two",
+            raw_line="",
+            source_format="m3u",
+        ),
+    ]
+    snapshots: list[dict] = []
+
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+            "progress_callback": lambda snapshot: snapshots.append(dict(snapshot)),
+        },
+    )
+
+    assert snapshots
+    assert snapshots[0]["phase"] == "resolving"
+    assert snapshots[0]["processed_tracks"] == 0
+    assert snapshots[1]["processed_tracks"] == 1
+    assert snapshots[2]["processed_tracks"] == 2
+    assert snapshots[-1]["phase"] == "finalizing"
+    assert snapshots[-1]["processed_tracks"] == 2
+    assert snapshots[-1]["resolved_count"] == result.resolved_count
+    assert snapshots[-1]["unresolved_count"] == result.unresolved_count
+    assert snapshots[-1]["enqueued_count"] == result.enqueued_count
+    assert snapshots[-1]["failed_count"] == result.failed_count

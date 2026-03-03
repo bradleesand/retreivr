@@ -51,6 +51,7 @@ const state = {
   playlistImportJobId: null,
   playlistImportPollTimer: null,
   playlistImportInProgress: false,
+  logsStickToBottom: true,
 };
 const browserState = {
   open: false,
@@ -123,6 +124,8 @@ const HOME_FINAL_STATUSES = new Set(["completed", "completed_with_skips", "faile
 const HOME_RESULT_TIMEOUT_MS = 18000;
 const DIRECT_URL_PLAYLIST_ERROR =
   "Playlist URLs are not supported in Direct URL mode. Please add this playlist via Scheduler or Playlist settings.";
+const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
+  "Playlist URL detected. Use Search & Download to enqueue all videos in the playlist.";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -451,6 +454,13 @@ function formatDuration(seconds) {
     return `${mins}m ${secs}s`;
   }
   return `${secs}s`;
+}
+
+function toFiniteNumber(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function formatCountdown(serverTime, targetTime) {
@@ -956,7 +966,11 @@ function renderPlaylistImportStatus(status) {
   const safe = status || {};
   const phase = String(safe.phase || safe.state || "queued");
   const phaseLower = phase.toLowerCase();
-  const active = phaseLower === "queued" || phaseLower === "parsing" || phaseLower === "resolving";
+  const active =
+    phaseLower === "queued" ||
+    phaseLower === "parsing" ||
+    phaseLower === "resolving" ||
+    phaseLower === "finalizing";
   const total = Number.isFinite(Number(safe.total_tracks)) ? Number(safe.total_tracks) : 0;
   const processed = Number.isFinite(Number(safe.processed_tracks)) ? Number(safe.processed_tracks) : 0;
   const resolved = Number.isFinite(Number(safe.resolved)) ? Number(safe.resolved) : 0;
@@ -1023,8 +1037,12 @@ async function pollPlaylistImportStatus() {
     const data = await fetchJson(`/api/import/playlist/jobs/${encodeURIComponent(jobId)}`);
     const status = data.status || {};
     renderPlaylistImportStatus(status);
-    const phase = String(status.state || "").toLowerCase();
-    const active = phase === "queued" || phase === "parsing" || phase === "resolving";
+    const phase = String(status.phase || status.state || "").toLowerCase();
+    const active =
+      phase === "queued" ||
+      phase === "parsing" ||
+      phase === "resolving" ||
+      phase === "finalizing";
     state.playlistImportInProgress = active;
     setPlaylistImportControlsEnabled(!active);
     if (!active) {
@@ -1236,8 +1254,9 @@ async function refreshStatus() {
     if (activeJobs.length) {
       const topJob = downloadingJobs[0] || activeJobs[0] || {};
       const topJobLabel = [topJob.status, topJob.source].filter(Boolean).join(" · ");
-      const topPercent = Number.isFinite(Number(topJob.progress_percent))
-        ? `${Math.max(0, Math.min(100, Math.round(Number(topJob.progress_percent))))}%`
+      const topPercentValue = toFiniteNumber(topJob.progress_percent);
+      const topPercent = topPercentValue !== null
+        ? `${Math.max(0, Math.min(100, Math.round(topPercentValue)))}%`
         : "";
       if (topJobLabel) {
         queueSummary.push(`head: ${topJobLabel}${topPercent ? ` (${topPercent})` : ""}`);
@@ -1246,46 +1265,79 @@ async function refreshStatus() {
     $("#status-queue-summary").textContent = queueSummary.join(" · ");
 
     const importState = data.playlist_import || {};
-    const importCurrent = importState.current_job || {};
-    const importActiveCount = Number.isFinite(Number(importState.active_count))
+    const importActive = !!importState.active;
+    const importCurrent = importActive ? (importState.current_job || {}) : {};
+    let importActiveCount = Number.isFinite(Number(importState.active_count))
       ? Number(importState.active_count)
       : 0;
-    const importProcessed = Number.isFinite(Number(importCurrent.processed_tracks))
+    let importProcessed = Number.isFinite(Number(importCurrent.processed_tracks))
       ? Number(importCurrent.processed_tracks)
       : 0;
-    const importTotal = Number.isFinite(Number(importCurrent.total_tracks))
+    let importTotal = Number.isFinite(Number(importCurrent.total_tracks))
       ? Number(importCurrent.total_tracks)
       : 0;
-    const importEnqueued = Number.isFinite(Number(importCurrent.enqueued))
+    let importEnqueued = Number.isFinite(Number(importCurrent.enqueued))
       ? Number(importCurrent.enqueued)
       : 0;
-    const importFailed = Number.isFinite(Number(importCurrent.failed))
+    let importFailed = Number.isFinite(Number(importCurrent.failed))
       ? Number(importCurrent.failed)
       : 0;
-    const importResolved = Number.isFinite(Number(importCurrent.resolved))
+    let importResolved = Number.isFinite(Number(importCurrent.resolved))
       ? Number(importCurrent.resolved)
       : 0;
-    const importStateText = importCurrent.state || (importState.active ? "running" : "idle");
-    const importPercent = importTotal > 0
+    let importStateText = importCurrent.state || (importActive ? "running" : "idle");
+    let importPercent = importTotal > 0
       ? Math.max(0, Math.min(100, Math.round((importProcessed / importTotal) * 100)))
       : 0;
+    let importSummaryParts = importActive
+      ? [
+        `${importPercent}% processed`,
+        `${importResolved} resolved`,
+        `${importEnqueued} enqueued`,
+      ]
+      : ["Idle"];
+    if (importActive && importCurrent.message) {
+      importSummaryParts.push(importCurrent.message);
+    }
+    if (importActive && importCurrent.error) {
+      importSummaryParts.push(`error: ${importCurrent.error}`);
+    }
+
+    // Fallback when no playlist-import job is active:
+    // surface live queue download progress so this status block does not sit at 0% during playlist runs.
+    if (!importActive && activeQueueCount > 0) {
+      const leadJob = downloadingJobs[0] || activeJobs[0] || null;
+      const leadPercentRaw = toFiniteNumber(leadJob?.progress_percent);
+      const leadDownloaded = toFiniteNumber(leadJob?.progress_downloaded_bytes);
+      const leadTotal = toFiniteNumber(leadJob?.progress_total_bytes);
+      const leadPercent = leadPercentRaw !== null
+        ? Math.max(0, Math.min(100, Math.round(leadPercentRaw)))
+        : ((leadDownloaded !== null && leadTotal !== null && leadTotal > 0)
+          ? Math.max(0, Math.min(100, Math.round((leadDownloaded / leadTotal) * 100)))
+          : 0);
+      importStateText = "downloading";
+      importActiveCount = activeQueueCount;
+      importProcessed = downloadingCount;
+      importTotal = activeQueueCount;
+      importEnqueued = queuedCount + claimedCount;
+      importFailed = failedCount;
+      importResolved = downloadingCount + postprocessingCount;
+      importPercent = leadPercent;
+      importSummaryParts = [
+        `${importPercent}% current`,
+        `${downloadingCount} downloading`,
+        `${queuedCount + claimedCount} pending`,
+      ];
+      if (postprocessingCount > 0) {
+        importSummaryParts.push(`${postprocessingCount} postprocessing`);
+      }
+    }
     $("#status-import-state").textContent = importStateText;
     $("#status-import-active-count").textContent = String(importActiveCount);
     $("#status-import-processed").textContent = `${importProcessed} / ${importTotal}`;
     $("#status-import-enqueued").textContent = String(importEnqueued);
     $("#status-import-failed").textContent = String(importFailed);
     $("#status-import-progress-bar").style.width = `${importPercent}%`;
-    const importSummaryParts = [
-      `${importPercent}% processed`,
-      `${importResolved} resolved`,
-      `${importEnqueued} enqueued`,
-    ];
-    if (importCurrent.message) {
-      importSummaryParts.push(importCurrent.message);
-    }
-    if (importCurrent.error) {
-      importSummaryParts.push(`error: ${importCurrent.error}`);
-    }
     $("#status-import-progress-text").textContent = importSummaryParts.join(" · ");
 
     const watcherStatus = data.watcher_status || {};
@@ -1326,27 +1378,16 @@ async function refreshStatus() {
     } else {
       $("#status-last-completed").textContent = "-";
     }
-    if (Number.isFinite(status.progress_total) && Number.isFinite(status.progress_current)) {
-      const percent = Number.isFinite(status.progress_percent)
-        ? status.progress_percent
-        : (status.progress_total > 0
-          ? Math.round((status.progress_current / status.progress_total) * 100)
-          : 0);
-      $("#status-playlist-progress-text").textContent =
-        `${status.progress_current}/${status.progress_total} (${percent}%)`;
-      $("#status-playlist-progress-bar").style.width = `${Math.max(0, Math.min(100, percent))}%`;
-    } else if (activeQueueCount > 0) {
-      const aggregateDownloaded = downloadingJobs.reduce((sum, job) => {
-        const value = Number(job?.progress_downloaded_bytes);
-        return Number.isFinite(value) ? sum + value : sum;
-      }, 0);
-      const aggregateTotal = downloadingJobs.reduce((sum, job) => {
-        const value = Number(job?.progress_total_bytes);
-        return Number.isFinite(value) ? sum + value : sum;
-      }, 0);
-      const aggregatePercent = aggregateTotal > 0
-        ? Math.max(0, Math.min(100, Math.round((aggregateDownloaded / aggregateTotal) * 100)))
-        : null;
+    if (activeQueueCount > 0) {
+      const queueLeadDownloading = downloadingJobs[0] || null;
+      const leadDownloaded = toFiniteNumber(queueLeadDownloading?.progress_downloaded_bytes);
+      const leadTotal = toFiniteNumber(queueLeadDownloading?.progress_total_bytes);
+      const leadPercentRaw = toFiniteNumber(queueLeadDownloading?.progress_percent);
+      const leadPercent = leadPercentRaw !== null
+        ? Math.max(0, Math.min(100, Math.round(leadPercentRaw)))
+        : ((leadDownloaded !== null && leadTotal !== null && leadTotal > 0)
+          ? Math.max(0, Math.min(100, Math.round((leadDownloaded / leadTotal) * 100)))
+          : null);
       const queuePendingCount = queuedCount + claimedCount;
       const summaryParts = [
         `${downloadingCount} downloading`,
@@ -1355,52 +1396,61 @@ async function refreshStatus() {
       if (postprocessingCount > 0) {
         summaryParts.push(`${postprocessingCount} postprocessing`);
       }
-      if (aggregatePercent !== null) {
-        summaryParts.push(`${aggregatePercent}% data`);
+      if (leadPercent !== null) {
+        summaryParts.push(`${leadPercent}% lead`);
       }
       $("#status-playlist-progress-text").textContent = summaryParts.join(" · ");
       $("#status-playlist-progress-bar").style.width =
-        aggregatePercent !== null ? `${aggregatePercent}%` : "0%";
+        leadPercent !== null ? `${leadPercent}%` : "0%";
+    } else if (Number.isFinite(status.progress_total) && Number.isFinite(status.progress_current)) {
+      const percent = Number.isFinite(status.progress_percent)
+        ? status.progress_percent
+        : (status.progress_total > 0
+          ? Math.round((status.progress_current / status.progress_total) * 100)
+          : 0);
+      $("#status-playlist-progress-text").textContent =
+        `${status.progress_current}/${status.progress_total} (${percent}%)`;
+      $("#status-playlist-progress-bar").style.width = `${Math.max(0, Math.min(100, percent))}%`;
     } else {
       $("#status-playlist-progress-text").textContent = "-";
       $("#status-playlist-progress-bar").style.width = "0%";
     }
 
     const videoContainer = $("#status-video-progress");
-    const queueHead = downloadingJobs[0] || activeJobs[0] || null;
+    const queueHead = downloadingJobs[0] || null;
     const downloaded = queueHead
-      ? Number(queueHead.progress_downloaded_bytes)
-      : Number(status.video_downloaded_bytes);
+      ? toFiniteNumber(queueHead.progress_downloaded_bytes)
+      : toFiniteNumber(status.video_downloaded_bytes);
     const total = queueHead
-      ? Number(queueHead.progress_total_bytes)
-      : Number(status.video_total_bytes);
+      ? toFiniteNumber(queueHead.progress_total_bytes)
+      : toFiniteNumber(status.video_total_bytes);
     const speedBps = queueHead
-      ? Number(queueHead.progress_speed_bps)
-      : Number(status.video_speed);
+      ? toFiniteNumber(queueHead.progress_speed_bps)
+      : toFiniteNumber(status.video_speed);
     const etaSeconds = queueHead
-      ? Number(queueHead.progress_eta_seconds)
-      : Number(status.video_eta);
+      ? toFiniteNumber(queueHead.progress_eta_seconds)
+      : toFiniteNumber(status.video_eta);
     let videoPercent = queueHead
-      ? Number(queueHead.progress_percent)
-      : Number(status.video_progress_percent);
-    if (!Number.isFinite(videoPercent) && Number.isFinite(downloaded) && Number.isFinite(total) && total > 0) {
+      ? toFiniteNumber(queueHead.progress_percent)
+      : toFiniteNumber(status.video_progress_percent);
+    if (videoPercent === null && downloaded !== null && total !== null && total > 0) {
       videoPercent = Math.round((downloaded / total) * 100);
     }
-    const hasVideoProgress = activeQueueCount > 0 && (
-      Number.isFinite(videoPercent) ||
-      Number.isFinite(downloaded) ||
-      Number.isFinite(total)
+    const hasVideoProgress = activeQueueCount > 0 && queueHead && (
+      videoPercent !== null ||
+      downloaded !== null ||
+      total !== null
     );
     if (hasVideoProgress) {
       videoContainer.classList.remove("hidden");
       $("#status-video-progress-text").textContent =
-        Number.isFinite(videoPercent) ? `${videoPercent}%` : "-";
+        videoPercent !== null ? `${videoPercent}%` : "-";
       $("#status-video-progress-bar").style.width =
-        Number.isFinite(videoPercent) ? `${Math.max(0, Math.min(100, videoPercent))}%` : "0%";
-      const downloadedText = Number.isFinite(downloaded) ? formatBytes(downloaded) : "-";
-      const totalText = Number.isFinite(total) ? formatBytes(total) : "-";
-      const speedText = Number.isFinite(speedBps) ? formatSpeed(speedBps) : "-";
-      const etaText = Number.isFinite(etaSeconds) ? formatDuration(etaSeconds) : "-";
+        videoPercent !== null ? `${Math.max(0, Math.min(100, videoPercent))}%` : "0%";
+      const downloadedText = downloaded !== null ? formatBytes(downloaded) : "-";
+      const totalText = total !== null ? formatBytes(total) : "-";
+      const speedText = speedBps !== null ? formatSpeed(speedBps) : "-";
+      const etaText = etaSeconds !== null ? formatDuration(etaSeconds) : "-";
       const sourceText = queueHead
         ? [queueHead.status, queueHead.source, queueHead.media_intent].filter(Boolean).join(" · ")
         : "current";
@@ -1415,18 +1465,7 @@ async function refreshStatus() {
 
     const cancelBtn = $("#status-cancel");
     if (cancelBtn) {
-      cancelBtn.disabled = !data.running;
-      cancelBtn.onclick = async () => {
-        const jobId = data.current_job_id || data.run_id;
-        if (!jobId) return;
-        cancelBtn.disabled = true;
-        try {
-          await cancelJob(jobId);
-          await refreshStatus();
-        } catch (err) {
-          setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
-        }
-      };
+      cancelBtn.disabled = !(Boolean(data.running) || activeQueueCount > 0);
     }
     if (!state.playlistImportInProgress) {
       const activeImport = !!importState.active;
@@ -1482,8 +1521,13 @@ async function refreshStatus() {
 async function refreshMusicFailures() {
   const countEl = $("#music-failures-count");
   const listEl = $("#music-failures-list");
+  const messageEl = $("#music-failures-message");
   if (!countEl || !listEl) {
     return;
+  }
+  if (messageEl) {
+    messageEl.textContent = "";
+    messageEl.classList.remove("error");
   }
   try {
     const data = await fetchJson("/api/music/failures?limit=25");
@@ -1514,11 +1558,62 @@ async function refreshMusicFailures() {
     failed.className = "meta";
     failed.textContent = `Failed to load music failures: ${err.message}`;
     listEl.appendChild(failed);
+    if (messageEl) {
+      messageEl.textContent = "Failed to refresh music failures.";
+      messageEl.classList.add("error");
+    }
   }
 }
 
+async function clearMusicFailures() {
+  const messageEl = $("#music-failures-message");
+  const clearBtn = $("#music-failures-clear");
+  const ok = confirm("Clear stored music failure diagnostics?");
+  if (!ok) {
+    return;
+  }
+  try {
+    if (clearBtn) {
+      clearBtn.disabled = true;
+    }
+    if (messageEl) {
+      messageEl.textContent = "Clearing music failures...";
+      messageEl.classList.remove("error");
+    }
+    let result = null;
+    try {
+      result = await fetchJson("/api/music/failures", { method: "DELETE" });
+    } catch (_err) {
+      result = await fetchJson("/api/music/failures/clear", { method: "POST" });
+    }
+    const deleted = Number.isFinite(Number(result?.deleted)) ? Number(result.deleted) : 0;
+    if (messageEl) {
+      messageEl.textContent = `Cleared ${deleted} music failure record(s).`;
+      messageEl.classList.remove("error");
+    }
+    await refreshMusicFailures();
+  } catch (err) {
+    if (messageEl) {
+      messageEl.textContent = `Clear music failures failed: ${err.message}`;
+      messageEl.classList.add("error");
+    }
+  } finally {
+    if (clearBtn) {
+      clearBtn.disabled = false;
+    }
+  }
+}
+
+// Expose these handlers for inline fallback and defensive delegated binding.
+window.refreshMusicFailures = refreshMusicFailures;
+window.clearMusicFailures = clearMusicFailures;
+
 async function refreshLogs() {
   const lines = parseInt($("#logs-lines").value, 10) || 200;
+  const outputEl = $("#logs-output");
+  if (!outputEl) {
+    return;
+  }
   try {
     const response = await fetch(`/api/logs?lines=${lines}`);
     if (!response.ok) {
@@ -1526,12 +1621,18 @@ async function refreshLogs() {
       throw new Error(`${response.status} ${text}`);
     }
     const text = await response.text();
+    const shouldStick = !!state.logsStickToBottom;
     if (text !== state.lastLogsText) {
-      $("#logs-output").textContent = text;
+      outputEl.textContent = text;
       state.lastLogsText = text;
     }
+    if (shouldStick) {
+      requestAnimationFrame(() => {
+        outputEl.scrollTop = outputEl.scrollHeight;
+      });
+    }
   } catch (err) {
-    $("#logs-output").textContent = `Failed to load logs: ${err.message}`;
+    outputEl.textContent = `Failed to load logs: ${err.message}`;
   }
 }
 
@@ -2280,6 +2381,7 @@ function normalizeMusicSearchResults(rawResults) {
 }
 
 async function enqueueAlbum(releaseGroupMbid) {
+  const forceRedownload = !!document.getElementById("music-force-redownload")?.checked;
   return fetchJson("/api/music/album/download", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2288,6 +2390,7 @@ async function enqueueAlbum(releaseGroupMbid) {
       destination: $("#home-destination")?.value.trim() || null,
       final_format: $("#home-format")?.value.trim() || null,
       music_mode: true,
+      force_redownload: forceRedownload,
     }),
   });
 }
@@ -2335,6 +2438,7 @@ function renderAlbumQueueSummary(result, { albumTitle = "Album" } = {}) {
 }
 
 async function enqueueMusicTrack(payload = {}) {
+  const forceRedownload = !!document.getElementById("music-force-redownload")?.checked;
   return fetchJson("/api/music/enqueue", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2352,6 +2456,7 @@ async function enqueueMusicTrack(payload = {}) {
       destination: String(payload.destination || payload.destination_dir || "").trim() || null,
       final_format: String(payload.final_format || "").trim() || null,
       music_mode: true,
+      force_redownload: forceRedownload,
     }),
   });
 }
@@ -2438,18 +2543,33 @@ function renderMusicModeResults(response, query = "") {
       const button = document.createElement("button");
       button.className = "button ghost small";
       button.textContent = "View Albums";
-      button.addEventListener("click", () => {
+      button.addEventListener("click", async () => {
         const nextQuery = String(artistItem?.name || "").trim();
-        if (nextQuery) {
-          const artistInput = document.getElementById("search-artist");
-          const albumInput = document.getElementById("search-album");
-          const trackInput = document.getElementById("search-track");
-          const modeSelect = document.getElementById("music-mode-select");
-          if (artistInput) artistInput.value = nextQuery;
-          if (albumInput) albumInput.value = "";
-          if (trackInput) trackInput.value = "";
-          if (modeSelect) modeSelect.value = "album";
-          performMusicModeSearch();
+        const nextArtistMbid = String(artistItem?.artist_mbid || "").trim();
+        if (!nextQuery) {
+          return;
+        }
+        const artistInput = document.getElementById("search-artist");
+        const albumInput = document.getElementById("search-album");
+        const trackInput = document.getElementById("search-track");
+        const modeSelect = document.getElementById("music-mode-select");
+        if (artistInput) artistInput.value = nextQuery;
+        if (albumInput) albumInput.value = "";
+        if (trackInput) trackInput.value = "";
+        if (modeSelect) modeSelect.value = "album";
+
+        button.disabled = true;
+        const previousLabel = button.textContent;
+        button.textContent = "Loading...";
+        setNotice($("#home-search-message"), `Loading albums for ${nextQuery}...`, false);
+        try {
+          const albums = await fetchMusicAlbumsByArtist({ name: nextQuery, artist_mbid: nextArtistMbid });
+          renderMusicModeResults({ artists: [], albums, tracks: [], mode_used: "album" }, nextQuery);
+          setNotice($("#home-search-message"), `Loaded ${albums.length} album candidates for ${nextQuery}.`, false);
+        } catch (err) {
+          button.disabled = false;
+          button.textContent = previousLabel;
+          setNotice($("#home-search-message"), `View Albums failed: ${err.message}`, true);
         }
       });
       action.appendChild(button);
@@ -2548,6 +2668,45 @@ function renderMusicModeResults(response, query = "") {
       container.appendChild(card);
     });
   }
+}
+
+async function fetchMusicAlbumsByArtist(artist) {
+  const query = typeof artist === "object" && artist !== null
+    ? String(artist.name || "").trim()
+    : String(artist || "").trim();
+  const artistMbid = typeof artist === "object" && artist !== null
+    ? String(artist.artist_mbid || "").trim()
+    : "";
+  if (!query) {
+    return [];
+  }
+  const params = new URLSearchParams();
+  params.set("q", query);
+  params.set("limit", "50");
+  if (artistMbid) {
+    params.set("artist_mbid", artistMbid);
+  }
+  const raw = await fetchJson(
+    `/api/music/albums/search?${params.toString()}`
+  );
+  const entries = Array.isArray(raw)
+    ? raw
+    : (Array.isArray(raw?.album_candidates) ? raw.album_candidates : []);
+  const out = [];
+  for (const item of entries) {
+    if (!item || typeof item !== "object") continue;
+    const releaseGroupMbid = String(item.release_group_mbid || item.release_group_id || item.album_id || "").trim();
+    if (!releaseGroupMbid) continue;
+    const first = String(item.first_release_date || item.first_released || "").trim();
+    const releaseYear = first && /^\d{4}/.test(first) ? first.slice(0, 4) : null;
+    out.push({
+      release_group_mbid: releaseGroupMbid,
+      title: String(item.title || "").trim(),
+      artist: String(item.artist || item.artist_credit || "").trim(),
+      release_year: releaseYear,
+    });
+  }
+  return out;
 }
 
 async function performMusicModeSearch() {
@@ -2834,10 +2993,11 @@ function renderHomeAlbumCandidates(candidates, query = "") {
     button.disabled = true;
     try {
       const payload = {
-        release_group_id: releaseGroupId,
+        release_group_mbid: releaseGroupId,
         destination: $("#home-destination")?.value.trim() || null,
         final_format: $("#home-format")?.value.trim() || null,
         music_mode: true,
+        force_redownload: !!document.getElementById("music-force-redownload")?.checked,
       };
       homeMusicDebugLog("[MUSIC UI] queue album", payload);
       const result = await fetchJson("/api/music/album/download", {
@@ -3510,7 +3670,8 @@ function renderHomeCandidateRow(candidate, item) {
   return row;
 }
 
-function renderHomeDirectUrlCard(preview, status) {
+function renderHomeDirectUrlCard(preview, status, options = {}) {
+  const hideStatusBadge = !!options.hideStatusBadge;
   const card = document.createElement("article");
   card.className = "home-result-card";
   card.dataset.directUrl = preview.url || "";
@@ -3520,7 +3681,9 @@ function renderHomeDirectUrlCard(preview, status) {
   const summary = preview.title || preview.url || "Direct URL";
   title.innerHTML = `<strong>${summary}</strong>`;
   header.appendChild(title);
-  header.appendChild(renderHomeStatusBadge(status));
+  if (!hideStatusBadge) {
+    header.appendChild(renderHomeStatusBadge(status));
+  }
   card.appendChild(header);
   const detail = document.createElement("div");
   detail.className = "home-candidate-title";
@@ -3930,30 +4093,85 @@ async function refreshHomeDirectJobStatus() {
   const container = $("#home-results-list");
   if (!container) return;
   try {
-    const data = await fetchJson("/api/download_jobs?limit=50");
+    const data = await fetchJson("/api/download_jobs?limit=500");
     const jobs = data.jobs || [];
-    const job = jobs.find((entry) => {
-      if (state.homeDirectJob.playlistId) {
-        return entry.origin === "playlist" && entry.origin_id === state.homeDirectJob.playlistId;
+    const playlistId = state.homeDirectJob.playlistId || null;
+    const startedAtMs = Date.parse(String(state.homeDirectJob.startedAt || ""));
+    const isCurrentRunJob = (entry) => {
+      if (!Number.isFinite(startedAtMs)) {
+        return true;
       }
-      return entry.url === state.homeDirectJob.url;
-    });
+      const updatedAtMs = Date.parse(String(entry?.updated_at || ""));
+      const createdAtMs = Date.parse(String(entry?.created_at || ""));
+      const candidateTs = Number.isFinite(updatedAtMs) ? updatedAtMs : createdAtMs;
+      if (!Number.isFinite(candidateTs)) {
+        return true;
+      }
+      // Small tolerance for clock skew/order.
+      return candidateTs >= (startedAtMs - 5000);
+    };
+    if (playlistId) {
+      const playlistJobs = jobs.filter(
+        (entry) =>
+          entry.origin === "playlist" &&
+          String(entry.origin_id || "") === String(playlistId) &&
+          isCurrentRunJob(entry)
+      );
+      if (playlistJobs.length) {
+        const statuses = new Set(playlistJobs.map((entry) => String(entry.status || "")));
+        let aggregateStatus = "queued";
+        if (statuses.has("downloading") || statuses.has("postprocessing") || statuses.has("claimed")) {
+          aggregateStatus = statuses.has("claimed") && !statuses.has("downloading") && !statuses.has("postprocessing")
+            ? "claimed"
+            : "downloading";
+        } else if (statuses.has("queued")) {
+          aggregateStatus = "queued";
+        } else if (statuses.has("failed")) {
+          aggregateStatus = "failed";
+        } else if (statuses.has("cancelled")) {
+          aggregateStatus = "cancelled";
+        } else {
+          aggregateStatus = "completed";
+        }
+        const failedJob = playlistJobs.find((entry) => String(entry.status || "") === "failed");
+        const representative = failedJob || playlistJobs[0];
+        state.homeDirectJob.status = aggregateStatus;
+        state.homeDirectPreview = {
+          ...state.homeDirectPreview,
+          job_status: aggregateStatus,
+        };
+        container.textContent = "";
+        container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, aggregateStatus));
+        setHomeResultsStatus(formatDirectJobStatus(aggregateStatus));
+        setHomeResultsDetail(representative?.last_error || "", Boolean(representative?.last_error));
+        setHomeResultsState({
+          hasResults: true,
+          terminal: ["completed", "failed", "cancelled"].includes(aggregateStatus),
+        });
+        if (["completed", "failed", "cancelled"].includes(aggregateStatus)) {
+          stopHomeDirectJobPolling();
+          setHomeSearchControlsEnabled(true);
+        }
+        return;
+      }
+    }
+    const job = jobs.find((entry) => entry.url === state.homeDirectJob.url && isCurrentRunJob(entry));
     if (job) {
-      state.homeDirectJob.status = job.status;
+      state.homeDirectJob.status = String(job.status || "queued");
       state.homeDirectPreview = {
         ...state.homeDirectPreview,
-        job_status: job.status,
+        job_status: String(job.status || "queued"),
       };
       container.textContent = "";
-      const card = renderHomeDirectUrlCard(state.homeDirectPreview, job.status);
+      const card = renderHomeDirectUrlCard(state.homeDirectPreview, String(job.status || "queued"));
       container.appendChild(card);
-      setHomeResultsStatus(formatDirectJobStatus(job.status));
+      setHomeResultsStatus(formatDirectJobStatus(String(job.status || "queued")));
       setHomeResultsDetail(job.last_error || "", Boolean(job.last_error));
       setHomeResultsState({
         hasResults: true,
-        terminal: ["completed", "failed", "cancelled"].includes(job.status),
+        terminal: ["completed", "failed", "cancelled"].includes(String(job.status || "")),
       });
-      if (["completed", "failed"].includes(job.status)) {
+      if (["completed", "failed", "cancelled"].includes(String(job.status || ""))) {
         stopHomeDirectJobPolling();
         setHomeSearchControlsEnabled(true);
       }
@@ -4007,6 +4225,9 @@ async function refreshHomeDirectJobStatus() {
     if (runData.state === "error" || runData.error) {
       runStatus = "failed";
       runError = runData.error || "";
+    } else if (playlistId) {
+      // Playlist runs can complete enqueueing before downstream download jobs finish.
+      runStatus = runData.running || runData.state === "running" ? "downloading" : "queued";
     } else if (runData.state === "completed") {
       runStatus = "completed";
     } else if (runData.running || runData.state === "running") {
@@ -4028,7 +4249,7 @@ async function refreshHomeDirectJobStatus() {
       hasResults: true,
       terminal: ["completed", "failed", "cancelled"].includes(runStatus),
     });
-    if (["completed", "failed"].includes(runStatus)) {
+    if (["completed", "failed", "cancelled"].includes(runStatus)) {
       stopHomeDirectJobPolling();
       setHomeSearchControlsEnabled(true);
     }
@@ -4299,6 +4520,15 @@ async function submitHomeSearch(autoEnqueue) {
   }
   try {
     if (isValidHttpUrl(inputValue)) {
+      const playlistId = extractPlaylistIdFromUrl(inputValue);
+      if (playlistId) {
+        if (autoEnqueue) {
+          await handleHomePlaylistUrl(inputValue, playlistId, destinationValue, autoEnqueue, messageEl);
+        } else {
+          await handleHomePlaylistUrlPreview(inputValue, playlistId, messageEl);
+        }
+        return;
+      }
       if (!autoEnqueue) {
         await handleHomeDirectUrlPreview(inputValue, destinationValue, messageEl);
         return;
@@ -4316,6 +4546,161 @@ async function submitHomeSearch(autoEnqueue) {
     setNotice(messageEl, `Search failed: ${err.message}`, true);
     setHomeResultsState({ hasResults: false, terminal: true });
     setHomeSearchActive(false);
+  }
+}
+
+async function handleHomePlaylistUrl(url, playlistId, destination, autoEnqueue, messageEl) {
+  if (!messageEl) return;
+  if (!autoEnqueue) {
+    showHomeDirectUrlError(url, HOME_PLAYLIST_SEARCH_ONLY_MESSAGE, messageEl);
+    setHomeSearchControlsEnabled(true);
+    return;
+  }
+  const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
+  if (deliveryMode === "client") {
+    setNotice(messageEl, "Client delivery is not available for playlist URL runs. Select Server delivery.", true);
+    setHomeSearchControlsEnabled(true);
+    setHomeSearchActive(false);
+    return;
+  }
+  const formatOverride = $("#home-format")?.value.trim();
+  const musicToggle = document.querySelector("#music-mode-toggle");
+  const treatAsMusic = Boolean(state.homeMusicMode && musicToggle?.checked);
+  const payload = {
+    playlist_id: playlistId,
+    music_mode: treatAsMusic,
+  };
+  if (destination) {
+    payload.destination = destination;
+  }
+  if (formatOverride) {
+    payload.final_format_override = formatOverride;
+  }
+  setNotice(messageEl, `Enqueuing playlist ${playlistId}...`, false);
+  try {
+    const runInfo = await startRun(payload);
+    if (!runInfo) {
+      throw new Error("playlist_enqueue_failed");
+    }
+    state.homeSearchMode = "download";
+    state.homeDirectJob = {
+      url,
+      playlistId,
+      startedAt: new Date().toISOString(),
+      runId: runInfo?.run_id || null,
+      status: "queued",
+      deliveryMode,
+      clientDeliveryId: null,
+    };
+    state.homeDirectPreview = {
+      title: `YouTube Playlist (${playlistId})`,
+      url,
+      source: "playlist",
+      uploader: null,
+      thumbnail_url: null,
+      job_status: "queued",
+    };
+    showHomeResults(true);
+    setHomeResultsStatus("Queued");
+    setHomeResultsDetail("Playlist enqueue started. Jobs will appear as they are created.", false);
+    const container = $("#home-results-list");
+    if (container) {
+      container.textContent = "";
+      container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "enqueued"));
+    }
+    // Best-effort: fetch playlist thumbnail from first playlist item.
+    fetchHomePlaylistPreview(playlistId)
+      .then((preview) => {
+        const thumbnailUrl = String(preview?.thumbnail_url || "").trim();
+        const playlistTitle = String(preview?.playlist_title || "").trim();
+        if (!state.homeDirectPreview) {
+          return;
+        }
+        state.homeDirectPreview = {
+          ...state.homeDirectPreview,
+          title: playlistTitle || state.homeDirectPreview.title,
+          thumbnail_url: thumbnailUrl || state.homeDirectPreview.thumbnail_url || null,
+        };
+        const liveContainer = $("#home-results-list");
+        if (!liveContainer) {
+          return;
+        }
+        const currentStatus = String(state.homeDirectJob?.status || "queued");
+        liveContainer.textContent = "";
+        liveContainer.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, currentStatus));
+      })
+      .catch(() => {});
+    setHomeResultsState({ hasResults: true, terminal: false });
+    startHomeDirectJobPolling();
+    setNotice(messageEl, "Playlist enqueue started", false);
+  } catch (err) {
+    setNotice(messageEl, `Playlist enqueue failed: ${err.message}`, true);
+  } finally {
+    setHomeSearchControlsEnabled(true);
+  }
+}
+
+async function fetchHomePlaylistPreview(playlistId) {
+  if (!playlistId) {
+    return {};
+  }
+  return fetchJson(`/api/playlist/preview?playlist_id=${encodeURIComponent(String(playlistId))}`);
+}
+
+async function handleHomePlaylistUrlPreview(url, playlistId, messageEl) {
+  if (!messageEl) return;
+  stopHomeDirectJobPolling();
+  stopHomeResultPolling();
+  stopHomeJobPolling();
+  state.homeSearchMode = "searchOnly";
+  state.homeDirectJob = null;
+  state.homeSearchRequestId = null;
+  state.homeRequestContext = {};
+  state.homeBestScores = {};
+  state.homeCandidateCache = {};
+  state.homeCandidatesLoading = {};
+  state.homeCandidateData = {};
+  state.homeDirectPreview = {
+    title: `YouTube Playlist (${playlistId})`,
+    url,
+    source: "playlist",
+    uploader: null,
+    thumbnail_url: null,
+    allow_download: true,
+    job_status: "",
+  };
+  showHomeResults(true);
+  setHomeResultsStatus("Playlist preview");
+  setHomeResultsDetail("Review playlist preview and click Download to enqueue all videos.", false);
+  const container = $("#home-results-list");
+  if (container) {
+    container.textContent = "";
+    container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "candidate_found", { hideStatusBadge: true }));
+  }
+  setHomeResultsState({ hasResults: true, terminal: false });
+  setHomeSearchActive(false);
+  setHomeSearchControlsEnabled(true);
+  setNotice(messageEl, "Playlist URL detected. Click Download to enqueue all playlist videos.", false);
+  try {
+    const preview = await fetchHomePlaylistPreview(playlistId);
+    const thumbnailUrl = String(preview?.thumbnail_url || "").trim();
+    const playlistTitle = String(preview?.playlist_title || "").trim();
+    if (!state.homeDirectPreview) {
+      return;
+    }
+    state.homeDirectPreview = {
+      ...state.homeDirectPreview,
+      title: playlistTitle || state.homeDirectPreview.title,
+      thumbnail_url: thumbnailUrl || state.homeDirectPreview.thumbnail_url || null,
+    };
+    const liveContainer = $("#home-results-list");
+    if (!liveContainer) {
+      return;
+    }
+    liveContainer.textContent = "";
+    liveContainer.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "candidate_found", { hideStatusBadge: true }));
+  } catch (_err) {
+    // Best-effort only.
   }
 }
 
@@ -4781,19 +5166,15 @@ async function refreshSearchQueue() {
 
     body.textContent = "";
     if (!jobs.length) {
-      renderSearchEmptyRow(body, 9, "No active queue jobs found.");
+      renderSearchEmptyRow(body, 10, "No active queue jobs found.");
       if (messageEl) messageEl.textContent = "";
       return;
     }
 
     jobs.forEach((job) => {
-      const downloaded = Number.isFinite(Number(job.progress_downloaded_bytes))
-        ? Number(job.progress_downloaded_bytes)
-        : null;
-      const total = Number.isFinite(Number(job.progress_total_bytes))
-        ? Number(job.progress_total_bytes)
-        : null;
-      const percent = Number.isFinite(Number(job.progress_percent))
+      const downloaded = toFiniteNumber(job.progress_downloaded_bytes);
+      const total = toFiniteNumber(job.progress_total_bytes);
+      const percent = toFiniteNumber(job.progress_percent) !== null
         ? Math.max(0, Math.min(100, Math.round(Number(job.progress_percent))))
         : ((downloaded !== null && total && total > 0)
           ? Math.max(0, Math.min(100, Math.round((downloaded / total) * 100)))
@@ -4805,16 +5186,27 @@ async function refreshSearchQueue() {
       if (downloaded !== null || total !== null) {
         progressParts.push(`${downloaded !== null ? formatBytes(downloaded) : "-"} / ${total !== null ? formatBytes(total) : "-"}`);
       }
-      if (Number.isFinite(Number(job.progress_speed_bps))) {
-        progressParts.push(formatSpeed(Number(job.progress_speed_bps)));
+      const speedBps = toFiniteNumber(job.progress_speed_bps);
+      if (speedBps !== null) {
+        progressParts.push(formatSpeed(speedBps));
       }
-      if (Number.isFinite(Number(job.progress_eta_seconds))) {
-        progressParts.push(`ETA ${formatDuration(Number(job.progress_eta_seconds))}`);
+      const etaSeconds = toFiniteNumber(job.progress_eta_seconds);
+      if (etaSeconds !== null) {
+        progressParts.push(`ETA ${formatDuration(etaSeconds)}`);
       }
       const progressText = progressParts.length ? progressParts.join(" · ") : "-";
+      const displayTitle = String(job.display_title || "").trim()
+        || String(job.url || "").trim()
+        || String(job.id || "").trim()
+        || "-";
+      const statusValue = String(job.status || "").trim().toLowerCase();
+      const cancellable = ["queued", "claimed", "downloading", "postprocessing"].includes(statusValue);
+      const actionHtml = cancellable
+        ? `<button class="button ghost small" data-action="cancel-queue-job" data-job-id="${job.id || ""}">Cancel</button>`
+        : `<span class="meta">-</span>`;
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td>${job.id || ""}</td>
+        <td>${displayTitle}</td>
         <td>${job.origin || ""}</td>
         <td>${job.source || ""}</td>
         <td>${job.media_intent || ""}</td>
@@ -4823,13 +5215,31 @@ async function refreshSearchQueue() {
         <td>${job.attempts ?? ""}</td>
         <td>${formatTimestamp(job.created_at) || ""}</td>
         <td>${job.last_error || ""}</td>
+        <td>${actionHtml}</td>
       `;
       body.appendChild(tr);
     });
     if (messageEl) messageEl.textContent = "";
   } catch (err) {
-    renderSearchEmptyRow(body, 9, `Failed to load queue: ${err.message}`);
+    renderSearchEmptyRow(body, 10, `Failed to load queue: ${err.message}`);
     setNotice(messageEl, `Failed to load queue: ${err.message}`, true);
+  }
+}
+
+async function clearFailedQueueJobs() {
+  const messageEl = $("#search-queue-message");
+  const confirmed = window.confirm("Clear all failed/cancelled jobs from the queue table?");
+  if (!confirmed) {
+    return;
+  }
+  try {
+    setNotice(messageEl, "Clearing failed/cancelled queue jobs...", false);
+    const data = await fetchJson("/api/download_jobs/clear_failed", { method: "POST" });
+    const deleted = Number.isFinite(Number(data?.deleted)) ? Number(data.deleted) : 0;
+    setNotice(messageEl, `Cleared ${deleted} failed/cancelled job${deleted === 1 ? "" : "s"}.`, false);
+    await refreshSearchQueue();
+  } catch (err) {
+    setNotice(messageEl, `Failed to clear failed/cancelled jobs: ${err.message}`, true);
   }
 }
 
@@ -5810,22 +6220,22 @@ function bindEvents() {
     });
   });
 
-  $("#refresh-all").addEventListener("click", async () => {
-    await refreshStatus();
-    await refreshSchedule();
-    await refreshMetrics();
-    await refreshSearchQueue();
-    await refreshLogs();
-    await refreshHistory();
-    await refreshDownloads();
-  });
-
   $("#logs-refresh").addEventListener("click", refreshLogs);
   $("#logs-auto").addEventListener("change", () => {
     if ($("#logs-auto").checked) {
+      state.logsStickToBottom = true;
       refreshLogs();
     }
   });
+  const logsOutput = $("#logs-output");
+  if (logsOutput) {
+    logsOutput.addEventListener("scroll", () => {
+      const threshold = 24;
+      const distanceFromBottom =
+        logsOutput.scrollHeight - (logsOutput.scrollTop + logsOutput.clientHeight);
+      state.logsStickToBottom = distanceFromBottom <= threshold;
+    });
+  }
   $("#downloads-refresh").addEventListener("click", refreshDownloads);
   $("#downloads-apply").addEventListener("click", refreshDownloads);
   $("#downloads-clear").addEventListener("click", async () => {
@@ -5878,6 +6288,25 @@ function bindEvents() {
     refreshSearchRequests();
   });
   $("#search-queue-refresh").addEventListener("click", refreshSearchQueue);
+  $("#search-queue-clear-failed").addEventListener("click", clearFailedQueueJobs);
+  $("#search-queue-body").addEventListener("click", async (event) => {
+    const button = event.target.closest('button[data-action="cancel-queue-job"]');
+    if (!button) return;
+    const jobId = String(button.dataset.jobId || "").trim();
+    if (!jobId) return;
+    const ok = window.confirm("Cancel this queued/download job?");
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      await cancelJob(jobId);
+      setNotice($("#search-queue-message"), `Cancel requested for job ${jobId}.`, false);
+      await refreshSearchQueue();
+      await refreshStatus();
+    } catch (err) {
+      button.disabled = false;
+      setNotice($("#search-queue-message"), `Cancel failed: ${err.message}`, true);
+    }
+  });
   const sourceList = $("#search-source-list");
   if (sourceList) {
     sourceList.addEventListener("click", (event) => {
@@ -6009,7 +6438,18 @@ function bindEvents() {
         const directUrl = directButton.dataset.directUrl;
         if (!directUrl) return;
         directButton.disabled = true;
-        await handleHomeDirectUrl(directUrl, $("#home-destination")?.value.trim() || "", $("#home-search-message"));
+        const playlistId = extractPlaylistIdFromUrl(directUrl);
+        if (playlistId) {
+          await handleHomePlaylistUrl(
+            directUrl,
+            playlistId,
+            $("#home-destination")?.value.trim() || "",
+            true,
+            $("#home-search-message")
+          );
+        } else {
+          await handleHomeDirectUrl(directUrl, $("#home-destination")?.value.trim() || "", $("#home-search-message"));
+        }
         return;
       }
       const button = event.target.closest('button[data-action="home-download"]');
@@ -6241,11 +6681,6 @@ function bindEvents() {
       setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
     }
   });
-  const musicFailuresRefresh = $("#music-failures-refresh");
-  if (musicFailuresRefresh) {
-    musicFailuresRefresh.addEventListener("click", refreshMusicFailures);
-  }
-
   $("#toggle-theme").addEventListener("click", () => {
     const next = resolveTheme() === "light" ? "dark" : "light";
     applyTheme(next);

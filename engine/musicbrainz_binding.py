@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import urllib.parse
 import unicodedata
 from typing import Any
 
@@ -23,10 +24,6 @@ BUCKET_MULTIPLIERS: dict[str, float] = {
 }
 
 _WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
-_DISALLOWED_VARIANT_RE = re.compile(
-    r"\b(live|acoustic|stripped|cover|karaoke|instrumental|radio\s*edit)\b",
-    re.IGNORECASE,
-)
 _PREVIEW_RE = re.compile(r"\b(preview|snippet|teaser)\b", re.IGNORECASE)
 _BRACKETED_SEGMENT_RE = re.compile(r"\([^)]*\)|\[[^\]]*\]")
 _TRANSPORT_TOKEN_RE = re.compile(
@@ -39,6 +36,61 @@ _TRANSPORT_TOKEN_RE = re.compile(
 _TRAILING_HYPHEN_SUFFIX_RE = re.compile(
     r"\s*-\s*(official video|topic)\s*$",
     re.IGNORECASE,
+)
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+_YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,}$")
+
+_DISALLOWED_VARIANT_TOKENS = {
+    "live",
+    "acoustic",
+    "instrumental",
+    "karaoke",
+    "cover",
+    "tribute",
+    "remix",
+    "nightcore",
+    "stripped",
+}
+_DISALLOWED_VARIANT_PHRASES = (
+    "radio edit",
+    "extended mix",
+    "sped up",
+    "slowed",
+)
+_NEUTRAL_TITLE_PHRASES = (
+    "official video",
+    "official music video",
+    "official audio",
+    "lyric video",
+    "music video",
+    "visualizer",
+    "hd",
+    "4k",
+    "remastered",
+    "remaster",
+)
+_NEUTRAL_SEGMENT_TOKEN_ALLOWLIST = {
+    "official",
+    "video",
+    "music",
+    "audio",
+    "lyric",
+    "visualizer",
+    "hd",
+    "4k",
+    "remastered",
+    "remaster",
+}
+_NEUTRAL_TITLE_PHRASE_RES = tuple(
+    re.compile(rf"\b{re.escape(phrase)}\b", re.IGNORECASE)
+    for phrase in _NEUTRAL_TITLE_PHRASES
+)
+_MB_YOUTUBE_REL_ALLOWED_HINTS = (
+    "streaming music",
+    "official music video",
+    "music video",
+    "video",
+    "streaming",
 )
 
 
@@ -60,6 +112,50 @@ def _safe_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _normalize_for_matching(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).lower()
+    text = _NON_ALNUM_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_variant_triggers(value: Any) -> list[str]:
+    normalized = _normalize_for_matching(value)
+    if not normalized:
+        return []
+    padded = f" {normalized} "
+    tokens = set(normalized.split())
+    triggers: set[str] = set()
+    triggers.update(token for token in tokens if token in _DISALLOWED_VARIANT_TOKENS)
+    for phrase in _DISALLOWED_VARIANT_PHRASES:
+        if f" {phrase} " in padded:
+            triggers.add(phrase)
+    return sorted(triggers)
+
+
+def _strip_neutral_title_phrases(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).lower()
+
+    def _strip_neutral_bracketed_segment(match: re.Match[str]) -> str:
+        segment = match.group(0)
+        inner = segment[1:-1].strip()
+        if not inner:
+            return " "
+        normalized_inner = _normalize_for_matching(inner)
+        if not normalized_inner:
+            return " "
+        inner_tokens = normalized_inner.split()
+        if inner_tokens and all(token.isdigit() or token in _NEUTRAL_SEGMENT_TOKEN_ALLOWLIST for token in inner_tokens):
+            return " "
+        return f" {inner} "
+
+    text = _BRACKETED_SEGMENT_RE.sub(_strip_neutral_bracketed_segment, text)
+    for pattern in _NEUTRAL_TITLE_PHRASE_RES:
+        text = pattern.sub(" ", text)
+    text = _TRAILING_HYPHEN_SUFFIX_RE.sub(" ", text)
+    text = _NON_ALNUM_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _normalize_title_for_mb_lookup(raw_title: str, *, query_flags: dict | None = None) -> str:
@@ -93,6 +189,89 @@ def _score_value(recording: dict[str, Any]) -> float:
     return max(0.0, min(score, 1.0))
 
 
+def _extract_youtube_video_id(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parsed = urllib.parse.urlparse(text)
+    host = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+    if "youtube.com" in host:
+        qs = urllib.parse.parse_qs(parsed.query)
+        for key in ("v", "vi"):
+            raw = qs.get(key)
+            if not raw:
+                continue
+            candidate = str(raw[0] or "").strip()
+            if _YOUTUBE_ID_RE.match(candidate):
+                return candidate
+        parts = [part for part in path.split("/") if part]
+        if len(parts) >= 2 and parts[0] in {"shorts", "embed", "live", "watch"}:
+            candidate = str(parts[1] or "").strip()
+            if _YOUTUBE_ID_RE.match(candidate):
+                return candidate
+    if "youtu.be" in host:
+        candidate = str(path.lstrip("/").split("/")[0] or "").strip()
+        if _YOUTUBE_ID_RE.match(candidate):
+            return candidate
+    return None
+
+
+def _canonicalize_youtube_watch_url(value: Any) -> str | None:
+    video_id = _extract_youtube_video_id(value)
+    if not video_id:
+        return None
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def _extract_youtube_relationship_urls(entity: Any) -> list[str]:
+    if not isinstance(entity, dict):
+        return []
+    relation_lists = []
+    for key in ("url-relation-list", "relation-list"):
+        value = entity.get(key)
+        if isinstance(value, list):
+            relation_lists.extend([entry for entry in value if isinstance(entry, dict)])
+
+    urls: list[str] = []
+    seen = set()
+    for rel in relation_lists:
+        target = str(rel.get("target") or "").strip()
+        normalized_url = _canonicalize_youtube_watch_url(target)
+        if not normalized_url:
+            continue
+        rel_type = str(rel.get("type") or "").strip().lower()
+        rel_attrs = rel.get("attribute-list")
+        rel_attrs_lower = {
+            str(attr or "").strip().lower()
+            for attr in (rel_attrs if isinstance(rel_attrs, list) else [])
+            if str(attr or "").strip()
+        }
+        has_allowed_hint = any(hint in rel_type for hint in _MB_YOUTUBE_REL_ALLOWED_HINTS)
+        # Keep this strict to authoritative media relationships only.
+        if not has_allowed_hint and "official" not in rel_attrs_lower:
+            continue
+        if normalized_url in seen:
+            continue
+        seen.add(normalized_url)
+        urls.append(normalized_url)
+    return urls
+
+
+def _collect_mb_youtube_urls(*entities: Any, max_urls: int = 3) -> list[str]:
+    urls: list[str] = []
+    seen = set()
+    for entity in entities:
+        for url in _extract_youtube_relationship_urls(entity):
+            if url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
+            if len(urls) >= max(1, int(max_urls or 3)):
+                return urls
+    return urls
+
+
 def _artist_credit_string(value: Any) -> str:
     credits = value if isinstance(value, list) else []
     parts: list[str] = []
@@ -119,6 +298,11 @@ def _extract_release_year(value: Any) -> str | None:
     return None
 
 
+def _is_allowed_album_release_group_type(primary_type: Any) -> bool:
+    value = str(primary_type or "").strip().lower()
+    return value in {"album", "ep"}
+
+
 def _classify_release_bucket(release_payload: dict) -> str:
     release = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
     if not isinstance(release, dict):
@@ -135,7 +319,7 @@ def _classify_release_bucket(release_payload: dict) -> str:
         if str(value or "").strip()
     }
 
-    if primary_type == "album":
+    if primary_type in {"album", "ep"}:
         if {"compilation", "retrospective"} & secondary_types:
             return "compilation"
         if {"live", "soundtrack", "remix"} & secondary_types:
@@ -167,6 +351,68 @@ def _resolve_track_position(release_payload: dict[str, Any], recording_mbid: str
             track_number = _safe_int(track.get("position"))
             return track_number, disc_number
     return None, None
+
+
+def _resolve_track_context(
+    release_payload: dict[str, Any],
+    recording_mbid: str,
+) -> tuple[int | None, int | None, dict[str, Any]]:
+    release = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
+    media = release.get("medium-list", []) if isinstance(release, dict) else []
+    if not isinstance(media, list):
+        return None, None, {}
+    for medium in media:
+        if not isinstance(medium, dict):
+            continue
+        disc_number = _safe_int(medium.get("position"))
+        track_list = medium.get("track-list", [])
+        if not isinstance(track_list, list):
+            continue
+        for track in track_list:
+            if not isinstance(track, dict):
+                continue
+            recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
+            if str(recording.get("id") or "").strip() != recording_mbid:
+                continue
+            track_number = _safe_int(track.get("position"))
+            return track_number, disc_number, track
+    return None, None, {}
+
+
+def _collect_mb_title_aliases(*values: Any) -> list[str]:
+    aliases: list[str] = []
+    seen: set[str] = set()
+
+    def _append(value: Any) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        key = text.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        aliases.append(text)
+
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            _append(value)
+            continue
+        if isinstance(value, dict):
+            _append(value.get("name"))
+            _append(value.get("sort-name"))
+            _append(value.get("alias"))
+            continue
+        if isinstance(value, list):
+            for entry in value:
+                if isinstance(entry, dict):
+                    _append(entry.get("name"))
+                    _append(entry.get("sort-name"))
+                    _append(entry.get("alias"))
+                else:
+                    _append(entry)
+    return aliases
 
 
 def search_music_metadata(artist=None, album=None, track=None, mode="auto", offset=0, limit=20):
@@ -272,14 +518,15 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         return response
 
     if resolved_mode == "album":
+        primary_type_clause = "primarytype:(album OR ep)"
         if route_case == "artist_album":
             release_group_query = (
                 f"artist:{_field(artist_value)} AND "
                 f"release:{_field(album_value)} AND "
-                "primarytype:album"
+                f"{primary_type_clause}"
             )
         else:
-            release_group_query = f"release:{_field(album_value)} AND primarytype:album"
+            release_group_query = f"release:{_field(album_value)} AND {primary_type_clause}"
         logger.info(
             "[MUSICBRAINZ] metadata_search endpoint=search_release_groups query=%s",
             release_group_query,
@@ -294,6 +541,8 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         group_list = payload.get("release-group-list", []) if isinstance(payload, dict) else []
         for group in group_list[:limit_value]:
             if not isinstance(group, dict):
+                continue
+            if not _is_allowed_album_release_group_type(group.get("primary-type")):
                 continue
             response["albums"].append(
                 {
@@ -374,7 +623,7 @@ def _collect_isrc(recording: dict[str, Any]) -> bool:
 
 def _is_variant_explicitly_requested(track: str, album: str | None) -> bool:
     combined = f"{track} {album or ''}".strip()
-    return bool(_DISALLOWED_VARIANT_RE.search(combined))
+    return bool(_extract_variant_triggers(combined))
 
 
 def resolve_best_mb_pair(
@@ -416,6 +665,7 @@ def resolve_best_mb_pair(
     expected_artist = str(artist or "").strip()
     expected_track_raw = str(track or "").strip()
     expected_track_lookup = _normalize_title_for_mb_lookup(expected_track_raw)
+    expected_track_for_score = _strip_neutral_title_phrases(expected_track_raw) or expected_track_raw
     expected_track = expected_track_raw
     expected_album = str(album or "").strip() or None
     prefer_country = str(country_preference or "").strip().upper() or None
@@ -430,6 +680,7 @@ def resolve_best_mb_pair(
                 "message": "mb_title_normalized",
                 "original": expected_track_raw,
                 "normalized": expected_track_lookup,
+                "scoring_normalized": expected_track_for_score,
             }
         )
 
@@ -472,13 +723,14 @@ def resolve_best_mb_pair(
             _add_failure("recording_missing_mbid")
             continue
         recording_title = str(recording.get("title") or "").strip()
+        recording_title_for_score = _strip_neutral_title_phrases(recording_title) or recording_title
         recording_artist = _artist_credit_string(recording.get("artist-credit"))
         recording_duration_ms = _safe_int(recording.get("length"))
 
         try:
             recording_payload = mb_service.get_recording(
                 recording_mbid,
-                includes=["releases", "artists", "isrcs"],
+                includes=["releases", "artists", "isrcs", "aliases", "url-rels"],
             )
         except Exception as e:
             logger.error(
@@ -502,7 +754,16 @@ def resolve_best_mb_pair(
                 continue
             release_payload = mb_service.get_release(
                 release_id,
-                includes=["release-groups", "media", "recordings", "artists"],
+                includes=[
+                    "release-groups",
+                    "media",
+                    "recordings",
+                    "artists",
+                    "aliases",
+                    "url-rels",
+                    "recording-rels",
+                    "release-rels",
+                ],
             )
             release = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
             if not isinstance(release, dict):
@@ -536,40 +797,89 @@ def resolve_best_mb_pair(
             release_group_id = str(release_group.get("id") or "").strip() or None
             country = str(release.get("country") or release_item.get("country") or "").strip().upper() or None
 
-            if _DISALLOWED_VARIANT_RE.search(recording_title) and not variant_allowed:
+            _, _, matched_track = _resolve_track_context(release_payload, recording_mbid)
+            recording_disambiguation = str(recording_data.get("disambiguation") or recording.get("disambiguation") or "").strip() or None
+            track_disambiguation = str(matched_track.get("disambiguation") or "").strip() or None
+            release_disambiguation = str(release.get("disambiguation") or release_item.get("disambiguation") or "").strip() or None
+            title_aliases = _collect_mb_title_aliases(
+                recording_title,
+                recording_data.get("alias-list"),
+                recording_data.get("aliases"),
+                matched_track.get("title"),
+                matched_track.get("alias-list"),
+                matched_track.get("aliases"),
+                release.get("title"),
+                release.get("alias-list"),
+                release.get("aliases"),
+                release_item.get("title"),
+                release_item.get("alias-list"),
+                release_item.get("aliases"),
+            )
+            if recording_disambiguation:
+                title_aliases.extend(
+                    _collect_mb_title_aliases(
+                        f"{recording_title} {recording_disambiguation}",
+                        recording_disambiguation,
+                    )
+                )
+            if track_disambiguation and matched_track.get("title"):
+                title_aliases.extend(
+                    _collect_mb_title_aliases(
+                        f"{matched_track.get('title')} {track_disambiguation}",
+                        track_disambiguation,
+                    )
+                )
+            if release_disambiguation and release_title:
+                title_aliases.extend(
+                    _collect_mb_title_aliases(
+                        f"{release_title} {release_disambiguation}",
+                    )
+                )
+            release_item_disambiguation = str(release_item.get("disambiguation") or "").strip() or None
+            if release_item_disambiguation and str(release_item.get("title") or "").strip():
+                title_aliases.extend(
+                    _collect_mb_title_aliases(
+                        f"{release_item.get('title')} {release_item_disambiguation}",
+                    )
+                )
+            title_aliases = _collect_mb_title_aliases(title_aliases)
+            mb_youtube_urls = _collect_mb_youtube_urls(
+                recording_data,
+                matched_track,
+                release,
+                release_item,
+                max_urls=3,
+            )
+
+            variant_triggers = _extract_variant_triggers(recording_title)
+            if variant_triggers and not variant_allowed:
                 _add_failure("disallowed_variant")
+                logger.info(
+                    {
+                        "message": "mb_pair_rejected",
+                        "recording_mbid": recording_mbid,
+                        "release_mbid": release_id,
+                        "reason": "disallowed_variant",
+                        "variant_triggers": variant_triggers,
+                        "normalized_title_for_scoring": recording_title_for_score,
+                    }
+                )
                 if debug:
-                    logger.debug({"message": "mb_pair_rejected", "recording_mbid": recording_mbid, "release_mbid": release_id, "reason": "disallowed_variant"})
+                    logger.debug(
+                        {
+                            "message": "mb_pair_rejected",
+                            "recording_mbid": recording_mbid,
+                            "release_mbid": release_id,
+                            "reason": "disallowed_variant",
+                            "variant_triggers": variant_triggers,
+                            "normalized_title_for_scoring": recording_title_for_score,
+                        }
+                    )
                 continue
 
             duration_delta_ms = None
             if duration_ms is not None and recording_duration_ms is not None:
                 duration_delta_ms = abs(int(duration_ms) - int(recording_duration_ms))
-                if duration_delta_ms > duration_delta_limit_ms:
-                    _add_failure("duration_delta_gt_limit")
-                    if log_duration_reject_detail:
-                        logger.info(
-                            {
-                                "message": "duration_reject_detail",
-                                "recording_mbid": recording_mbid,
-                                "mb_duration_ms": duration_ms,
-                                "candidate_duration_ms": recording_duration_ms,
-                                "delta_ms": duration_delta_ms,
-                                "limit_ms": duration_delta_limit_ms,
-                            }
-                        )
-                    if debug:
-                        logger.debug(
-                            {
-                                "message": "mb_pair_rejected",
-                                "recording_mbid": recording_mbid,
-                                "release_mbid": release_id,
-                                "reason": "duration_delta_gt_limit",
-                                "duration_delta_ms": duration_delta_ms,
-                                "duration_delta_limit_ms": duration_delta_limit_ms,
-                            }
-                        )
-                    continue
             if recording_duration_ms is not None and recording_duration_ms < PREVIEW_REJECT_MS:
                 if duration_ms is None or int(duration_ms) >= 60000:
                     _add_failure("preview_duration")
@@ -590,7 +900,7 @@ def resolve_best_mb_pair(
                     artist_similarity = max(0.6, recording_score)
             else:
                 artist_similarity = 1.0
-            title_similarity = _token_similarity(expected_track, recording_title or expected_track)
+            title_similarity = _token_similarity(expected_track_for_score, recording_title_for_score or expected_track_for_score)
             album_similarity = _token_similarity(expected_album, release_title) if expected_album else 0.0
             if expected_album and bucket == "compilation" and album_similarity < 0.40:
                 _add_failure("compilation_album_mismatch")
@@ -641,6 +951,33 @@ def resolve_best_mb_pair(
             country_bonus = 6.0 if (prefer_country and country == prefer_country) else 0.0
             total = correctness * CORRECTNESS_WEIGHT + completeness * COMPLETENESS_WEIGHT + country_bonus
 
+            if duration_delta_ms is not None and duration_delta_ms > duration_delta_limit_ms:
+                _add_failure("duration_delta_gt_limit")
+                if log_duration_reject_detail:
+                    logger.info(
+                        {
+                            "message": "duration_reject_detail",
+                            "recording_mbid": recording_mbid,
+                            "mb_duration_ms": duration_ms,
+                            "candidate_duration_ms": recording_duration_ms,
+                            "delta_ms": duration_delta_ms,
+                            "limit_ms": duration_delta_limit_ms,
+                        }
+                    )
+                if debug:
+                    logger.debug(
+                        {
+                            "message": "mb_pair_rejected",
+                            "recording_mbid": recording_mbid,
+                            "release_mbid": release_id,
+                            "reason": "duration_delta_gt_limit",
+                            "duration_delta_ms": duration_delta_ms,
+                            "duration_delta_limit_ms": duration_delta_limit_ms,
+                            "normalized_title_for_scoring": recording_title_for_score,
+                        }
+                    )
+                continue
+
             candidate = {
                 "recording_mbid": recording_mbid,
                 "mb_release_id": release_id,
@@ -658,6 +995,10 @@ def resolve_best_mb_pair(
                 "total": total,
                 "bucket": bucket,
                 "duration_delta_ms": duration_delta_ms if duration_delta_ms is not None else 999999999,
+                "mb_recording_title": recording_title or None,
+                "track_disambiguation": recording_disambiguation or track_disambiguation,
+                "track_aliases": title_aliases,
+                "mb_youtube_urls": mb_youtube_urls,
             }
             if debug:
                 logger.debug(
@@ -673,6 +1014,8 @@ def resolve_best_mb_pair(
                         "duration_delta_ms": duration_delta_ms,
                         "country": country,
                         "album": release_title,
+                        "expected_track_scoring_normalized": expected_track_for_score,
+                        "candidate_track_scoring_normalized": recording_title_for_score,
                     }
                 )
             all_candidates.append(candidate)
@@ -779,6 +1122,7 @@ def resolve_best_mb_pair(
             "album": selected.get("album"),
             "bucket": selected.get("bucket"),
             "bucket_multiplier": selected.get("bucket_multiplier"),
+            "mb_youtube_urls": selected.get("mb_youtube_urls") or [],
         }
     )
     resolve_best_mb_pair.last_failure_reasons = []
@@ -791,4 +1135,8 @@ def resolve_best_mb_pair(
         "track_number": selected.get("track_number"),
         "disc_number": selected.get("disc_number"),
         "duration_ms": selected.get("duration_ms"),
+        "mb_recording_title": selected.get("mb_recording_title"),
+        "track_disambiguation": selected.get("track_disambiguation"),
+        "track_aliases": selected.get("track_aliases"),
+        "mb_youtube_urls": selected.get("mb_youtube_urls") or [],
     }

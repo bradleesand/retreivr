@@ -8,7 +8,12 @@
   Self-hosted media acquisition that stays deterministic, tidy, and boring in the best way.
 </p>
 
+<p align="center">
+  Follow us on X: <a href="https://x.com/sudoStacks">https://x.com/sudoStacks</a>
+</p>
+
 ---
+
 
 ## What Is Retreivr?
 Retreivr is a self-hosted download engine for building and maintaining a clean local media archive.
@@ -23,37 +28,38 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - MusicBrainz-first metadata authority for music workflows
 - Unified queue + scheduler + watcher flows
 - Web UI and API for control and automation
+- Used for intentional media consumption... avoid getting sucked into the algorithms
 - Optional Telegram summaries
 
-## 0.9.5 Highlights
-- Background playlist import with progress tracking
-- Queue/status UI refresh with richer live progress signals
-- Album-mode consistency improvements (path/tag/artwork behavior)
-- Scheduler/watcher safeguards during import activity
-- Better short-term UX guardrails for heavy operations
+## 0.9.6 Highlights
+- Runtime release workflow for versioned GHCR publishing
+- Minimal runtime bundle zip assets for simplified Docker deployment
+- Music matching robustness improvements across discovery/scoring/retry paths
 
 ---
 
-## Quick Start (Docker Recommended)
+## Quick Start (Local Workstation)
 
-### 1) Prepare files
+### Option A) Docker Compose (Manual)
+
+#### 1) Prepare files
 ```bash
 cp docker/docker-compose.yml.example docker/docker-compose.yml
 cp .env.example .env
 ```
 
-### 2) Start Retreivr
+#### 2) Start Retreivr
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-### 3) Open Web UI
+#### 3) Open Web UI
 ```text
 http://localhost:8090
 ```
 Default mapping is `8090:8000` (`host:container`).
 
-### 4) Initial setup in UI
+#### 4) Initial setup in UI
 - Open `Config` page
 - Add your playlist/search settings
 - Set destination folders (under `/downloads` in container)
@@ -103,7 +109,7 @@ http://localhost:8000
 ---
 
 ## Upgrade Notes
-If you are upgrading to `0.9.5`, pull latest image and restart:
+If you are upgrading to `0.9.6`, pull latest image and restart:
 ```bash
 docker compose -f docker/docker-compose.yml pull
 docker compose -f docker/docker-compose.yml up -d
@@ -123,3 +129,8 @@ Retreivr does not:
 - Stream media
 - Replace Plex/Jellyfin players
 - Bypass DRM/protected content
+
+## License
+
+Retreivr is licensed under the GNU Affero General Public License v3.0 (AGPLv3).
+See the LICENSE file for full details.
