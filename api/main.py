@@ -6982,9 +6982,9 @@ async def clear_failed_download_jobs():
     conn = sqlite3.connect(app.state.paths.db_path)
     try:
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM download_jobs WHERE status=?", ("failed",))
+        cur.execute("SELECT COUNT(*) FROM download_jobs WHERE status IN (?, ?)", ("failed", "cancelled"))
         before_count = int((cur.fetchone() or [0])[0] or 0)
-        cur.execute("DELETE FROM download_jobs WHERE status=?", ("failed",))
+        cur.execute("DELETE FROM download_jobs WHERE status IN (?, ?)", ("failed", "cancelled"))
         deleted_count = int(cur.rowcount or 0)
         conn.commit()
     finally:
