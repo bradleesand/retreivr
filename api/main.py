@@ -89,6 +89,7 @@ from engine.core import (
     build_youtube_clients,
     extract_playlist_id,
     get_playlist_videos,
+    get_playlist_videos_fallback,
     get_status,
     init_db,
     is_video_downloaded,
@@ -104,6 +105,7 @@ from engine.core import (
     run_direct_url_self_test,
     run_archive,
     run_single_playlist,
+    resolve_cookie_file,
     telegram_notify,
     telegram_notify_result,
     validate_config,
@@ -4940,6 +4942,36 @@ async def api_direct_url_preview(request: DirectUrlPreviewRequest):
         logging.exception("Direct URL preview failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return safe_json({"preview": preview})
+
+
+@app.get("/api/playlist/preview")
+async def api_playlist_preview(playlist_id: str = Query(..., min_length=2, max_length=200)):
+    normalized_playlist_id = extract_playlist_id(playlist_id) or str(playlist_id or "").strip()
+    if not normalized_playlist_id:
+        raise HTTPException(status_code=400, detail="playlist_id_required")
+    config = get_loaded_config() or _read_config_or_404()
+    cookie_file = resolve_cookie_file(config)
+    videos, _fallback_error = get_playlist_videos_fallback(
+        normalized_playlist_id,
+        cookie_file=cookie_file,
+    )
+    first_video_id = ""
+    if isinstance(videos, list):
+        for entry in videos:
+            if not isinstance(entry, dict):
+                continue
+            candidate = str(entry.get("videoId") or "").strip()
+            if candidate:
+                first_video_id = candidate
+                break
+    thumbnail_url = f"https://i.ytimg.com/vi/{first_video_id}/hqdefault.jpg" if first_video_id else None
+    return safe_json(
+        {
+            "playlist_id": normalized_playlist_id,
+            "first_video_id": first_video_id or None,
+            "thumbnail_url": thumbnail_url,
+        }
+    )
 
 
 @app.post("/api/cancel")

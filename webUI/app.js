@@ -4550,6 +4550,26 @@ async function handleHomePlaylistUrl(url, playlistId, destination, autoEnqueue, 
       container.textContent = "";
       container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "enqueued"));
     }
+    // Best-effort: fetch playlist thumbnail from first playlist item.
+    fetchHomePlaylistPreview(playlistId)
+      .then((preview) => {
+        const thumbnailUrl = String(preview?.thumbnail_url || "").trim();
+        if (!thumbnailUrl || !state.homeDirectPreview) {
+          return;
+        }
+        state.homeDirectPreview = {
+          ...state.homeDirectPreview,
+          thumbnail_url: thumbnailUrl,
+        };
+        const liveContainer = $("#home-results-list");
+        if (!liveContainer) {
+          return;
+        }
+        const currentStatus = String(state.homeDirectJob?.status || "queued");
+        liveContainer.textContent = "";
+        liveContainer.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, currentStatus));
+      })
+      .catch(() => {});
     setHomeResultsState({ hasResults: true, terminal: false });
     startHomeDirectJobPolling();
     setNotice(messageEl, "Playlist enqueue started", false);
@@ -4558,6 +4578,13 @@ async function handleHomePlaylistUrl(url, playlistId, destination, autoEnqueue, 
   } finally {
     setHomeSearchControlsEnabled(true);
   }
+}
+
+async function fetchHomePlaylistPreview(playlistId) {
+  if (!playlistId) {
+    return {};
+  }
+  return fetchJson(`/api/playlist/preview?playlist_id=${encodeURIComponent(String(playlistId))}`);
 }
 
 async function importHomePlaylistFile() {
