@@ -1264,7 +1264,8 @@ async function refreshStatus() {
     $("#status-queue-summary").textContent = queueSummary.join(" · ");
 
     const importState = data.playlist_import || {};
-    const importCurrent = importState.current_job || {};
+    const importActive = !!importState.active;
+    const importCurrent = importActive ? (importState.current_job || {}) : {};
     const importActiveCount = Number.isFinite(Number(importState.active_count))
       ? Number(importState.active_count)
       : 0;
@@ -1283,7 +1284,7 @@ async function refreshStatus() {
     const importResolved = Number.isFinite(Number(importCurrent.resolved))
       ? Number(importCurrent.resolved)
       : 0;
-    const importStateText = importCurrent.state || (importState.active ? "running" : "idle");
+    const importStateText = importCurrent.state || (importActive ? "running" : "idle");
     const importPercent = importTotal > 0
       ? Math.max(0, Math.min(100, Math.round((importProcessed / importTotal) * 100)))
       : 0;
@@ -1293,15 +1294,17 @@ async function refreshStatus() {
     $("#status-import-enqueued").textContent = String(importEnqueued);
     $("#status-import-failed").textContent = String(importFailed);
     $("#status-import-progress-bar").style.width = `${importPercent}%`;
-    const importSummaryParts = [
-      `${importPercent}% processed`,
-      `${importResolved} resolved`,
-      `${importEnqueued} enqueued`,
-    ];
-    if (importCurrent.message) {
+    const importSummaryParts = importActive
+      ? [
+        `${importPercent}% processed`,
+        `${importResolved} resolved`,
+        `${importEnqueued} enqueued`,
+      ]
+      : ["Idle"];
+    if (importActive && importCurrent.message) {
       importSummaryParts.push(importCurrent.message);
     }
-    if (importCurrent.error) {
+    if (importActive && importCurrent.error) {
       importSummaryParts.push(`error: ${importCurrent.error}`);
     }
     $("#status-import-progress-text").textContent = importSummaryParts.join(" · ");
@@ -5179,18 +5182,18 @@ async function refreshSearchQueue() {
 
 async function clearFailedQueueJobs() {
   const messageEl = $("#search-queue-message");
-  const confirmed = window.confirm("Clear all failed jobs from the queue table?");
+  const confirmed = window.confirm("Clear all failed/cancelled jobs from the queue table?");
   if (!confirmed) {
     return;
   }
   try {
-    setNotice(messageEl, "Clearing failed queue jobs...", false);
+    setNotice(messageEl, "Clearing failed/cancelled queue jobs...", false);
     const data = await fetchJson("/api/download_jobs/clear_failed", { method: "POST" });
     const deleted = Number.isFinite(Number(data?.deleted)) ? Number(data.deleted) : 0;
-    setNotice(messageEl, `Cleared ${deleted} failed job${deleted === 1 ? "" : "s"}.`, false);
+    setNotice(messageEl, `Cleared ${deleted} failed/cancelled job${deleted === 1 ? "" : "s"}.`, false);
     await refreshSearchQueue();
   } catch (err) {
-    setNotice(messageEl, `Failed to clear failed jobs: ${err.message}`, true);
+    setNotice(messageEl, `Failed to clear failed/cancelled jobs: ${err.message}`, true);
   }
 }
 

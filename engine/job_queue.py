@@ -6182,33 +6182,61 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
             _MP4_ENFORCEMENT_TIMEOUT_SECONDS,
         )
         try:
-            subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
-                check=True,
-                timeout=_MP4_ENFORCEMENT_TIMEOUT_SECONDS,
             )
+            stderr_chunks: list[str] = []
+            heartbeat_interval_seconds = 15
+            while True:
+                try:
+                    _stdout, stderr_output = proc.communicate(timeout=heartbeat_interval_seconds)
+                    if stderr_output:
+                        stderr_chunks.append(stderr_output)
+                    break
+                except subprocess.TimeoutExpired as exc:
+                    if exc.stderr:
+                        stderr_chunks.append(str(exc.stderr))
+                    elapsed_seconds = time.time() - started_at
+                    logger.info(
+                        "mp4_enforcement_running file=%s include_subtitles=%s elapsed_seconds=%.1f",
+                        local_file,
+                        bool(include_subtitles),
+                        elapsed_seconds,
+                    )
+                    if elapsed_seconds >= _MP4_ENFORCEMENT_TIMEOUT_SECONDS:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        _stdout, final_stderr = proc.communicate()
+                        if final_stderr:
+                            stderr_chunks.append(str(final_stderr))
+                        stderr_text = "".join(stderr_chunks).strip()
+                        if len(stderr_text) > 1200:
+                            stderr_text = stderr_text[-1200:]
+                        raise RuntimeError(
+                            f"ffmpeg_timeout={_MP4_ENFORCEMENT_TIMEOUT_SECONDS}s stderr={stderr_text or '<empty>'}"
+                        ) from exc
+            if proc.returncode != 0:
+                stderr_text = "".join(stderr_chunks).strip()
+                if len(stderr_text) > 1200:
+                    stderr_text = stderr_text[-1200:]
+                raise RuntimeError(
+                    f"ffmpeg_exit={proc.returncode} stderr={stderr_text or '<empty>'}"
+                )
             logger.info(
                 "mp4_enforcement_completed file=%s include_subtitles=%s elapsed_seconds=%.2f",
                 local_file,
                 bool(include_subtitles),
                 time.time() - started_at,
             )
-        except subprocess.TimeoutExpired as exc:
-            stderr_text = (exc.stderr or exc.stdout or "").strip()
-            if len(stderr_text) > 1200:
-                stderr_text = stderr_text[-1200:]
-            raise RuntimeError(
-                f"ffmpeg_timeout={_MP4_ENFORCEMENT_TIMEOUT_SECONDS}s stderr={stderr_text or '<empty>'}"
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            stderr_text = (exc.stderr or exc.stdout or "").strip()
-            if len(stderr_text) > 1200:
-                stderr_text = stderr_text[-1200:]
-            raise RuntimeError(
-                f"ffmpeg_exit={exc.returncode} stderr={stderr_text or '<empty>'}"
-            ) from exc
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"ffmpeg_enforcement_exec_failed: {exc}") from exc
 
     first_error = None
     try:
