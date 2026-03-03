@@ -499,10 +499,16 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
         )
 
     def _entry_dedupe_key(entry: dict[str, Any]) -> tuple[str, str, str]:
+        def _normalized(value: Any) -> str:
+            text = str(value or "").strip().lower()
+            if not text:
+                return ""
+            return " ".join(text.split())
+
         return (
-            str(entry.get("artist") or ""),
-            str(entry.get("title") or ""),
-            str(entry.get("album") or ""),
+            _normalized(entry.get("artist")),
+            _normalized(entry.get("title")),
+            _normalized(entry.get("album")),
         )
 
     _emit_progress(phase="resolving", processed_tracks=processed_tracks)
