@@ -6118,8 +6118,13 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
     profile = _probe_media_profile(local_file)
     if container != "mp4":
         return local_file, profile
+    compatible_video_codecs = {"h264", "avc1"}
+    compatible_audio_codecs = {"aac", "mp4a"}
+    video_codec = str(profile.get("final_video_codec") or "").strip().lower()
     audio_codec = str(profile.get("final_audio_codec") or "").strip().lower()
-    if audio_codec == "aac":
+    needs_video_transcode = video_codec not in compatible_video_codecs
+    needs_audio_transcode = audio_codec not in compatible_audio_codecs
+    if not needs_video_transcode and not needs_audio_transcode:
         return local_file, profile
 
     mp4_compatible_path = f"{local_file}.mp4compat"
@@ -6139,12 +6144,16 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
             cmd.extend(["-map", "0:s?", "-c:s", "copy"])
         else:
             cmd.append("-sn")
+        if needs_video_transcode:
+            cmd.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"])
+        else:
+            cmd.extend(["-c:v", "copy"])
+        if needs_audio_transcode:
+            cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+        else:
+            cmd.extend(["-c:a", "copy"])
         cmd.extend(
             [
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
                 "-movflags",
                 "+faststart",
                 mp4_compatible_path,
@@ -6171,8 +6180,13 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
 
     os.replace(mp4_compatible_path, local_file)
     updated = _probe_media_profile(local_file)
+    updated_video = str(updated.get("final_video_codec") or "").strip().lower()
     updated_audio = str(updated.get("final_audio_codec") or "").strip().lower()
-    if updated_audio != "aac":
+    if needs_video_transcode and updated_video not in compatible_video_codecs:
+        raise RuntimeError(
+            f"mp4_video_codec_enforcement_failed: expected_h264 got={updated_video or 'unknown'}"
+        )
+    if needs_audio_transcode and updated_audio not in compatible_audio_codecs:
         raise RuntimeError(
             f"mp4_audio_codec_enforcement_failed: expected_aac got={updated_audio or 'unknown'}"
         )

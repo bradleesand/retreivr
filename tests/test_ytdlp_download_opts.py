@@ -143,6 +143,8 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
         ffmpeg_args = mock_run.call_args[0][0]
         self.assertIn("-c:a", ffmpeg_args)
         self.assertIn("aac", ffmpeg_args)
+        self.assertIn("-c:v", ffmpeg_args)
+        self.assertIn("copy", ffmpeg_args)
 
     def test_mkv_target_preserves_opus_without_transcode(self):
         with patch(
@@ -197,3 +199,30 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
         self.assertIn("-c:s", first_args)
         self.assertIn("copy", first_args)
         self.assertIn("-sn", second_args)
+
+    def test_mp4_target_transcodes_video_to_h264_when_probe_reports_vp9(self):
+        with patch(
+            "engine.job_queue._probe_media_profile",
+            side_effect=[
+                {
+                    "final_container": "mp4",
+                    "final_video_codec": "vp9",
+                    "final_audio_codec": "opus",
+                },
+                {
+                    "final_container": "mp4",
+                    "final_video_codec": "h264",
+                    "final_audio_codec": "aac",
+                },
+            ],
+        ), patch("engine.job_queue.subprocess.run") as mock_run, patch("engine.job_queue.os.replace"):
+            _path, profile = _enforce_video_codec_container_rules(
+                "/tmp/source.mp4",
+                target_container="mp4",
+            )
+
+        self.assertEqual(profile.get("final_video_codec"), "h264")
+        self.assertEqual(profile.get("final_audio_codec"), "aac")
+        ffmpeg_args = mock_run.call_args[0][0]
+        self.assertIn("libx264", ffmpeg_args)
+        self.assertIn("aac", ffmpeg_args)
