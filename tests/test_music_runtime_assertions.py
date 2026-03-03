@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 from subprocess import CalledProcessError
@@ -1206,3 +1209,300 @@ def test_music_resolve_uses_in_memory_resolution_cache_for_same_mb_pair() -> Non
         assert resolved_a.url == "https://www.youtube.com/watch?v=abc123xyz00"
         assert resolved_b.url == "https://www.youtube.com/watch?v=abc123xyz00"
         assert fake_search.calls == 1
+
+
+def test_same_source_parallel_execute_respects_source_concurrency(monkeypatch) -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={"max_concurrent_jobs_per_source": 2, "max_concurrent_jobs_total": 4},
+            paths=paths,
+            adapters={},
+            search_service=None,
+        )
+
+        for idx in range(2):
+            engine.store.enqueue_job(
+                origin="test",
+                origin_id="same-source-parallel",
+                media_type="video",
+                media_intent="episode",
+                source="youtube_music",
+                url=f"https://www.youtube.com/watch?v=samesource{idx}",
+                output_template={"output_dir": tmp, "final_format": "mkv"},
+            )
+
+        counter_lock = threading.Lock()
+        release_event = threading.Event()
+        both_started = threading.Event()
+        state = {"active": 0, "max_active": 0}
+
+        def _execute_stub(job, *, stop_event=None):
+            _ = stop_event
+            with counter_lock:
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+                if state["active"] >= 2:
+                    both_started.set()
+            release_event.wait(timeout=2.0)
+            engine.store.mark_completed(job.id, file_path=str(Path(tmp) / f"{job.id}.bin"))
+            with counter_lock:
+                state["active"] -= 1
+
+        monkeypatch.setattr(engine, "_execute_job", _execute_stub)
+
+        source_lock = engine._get_source_lock("youtube_music")
+        assert source_lock.acquire(blocking=False) is True
+        runner = threading.Thread(
+            target=engine._run_source_once,
+            args=("youtube_music", source_lock, None),
+            daemon=False,
+        )
+        runner.start()
+        assert both_started.wait(timeout=2.0), "expected two same-source jobs to execute in parallel"
+        release_event.set()
+        runner.join(timeout=3.0)
+        assert runner.is_alive() is False
+
+        assert state["max_active"] >= 2
+
+
+def test_cross_source_parallel_execute(monkeypatch) -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={"max_concurrent_jobs_per_source": 1, "max_concurrent_jobs_total": 4},
+            paths=paths,
+            adapters={},
+            search_service=None,
+        )
+
+        engine.store.enqueue_job(
+            origin="test",
+            origin_id="cross-source-parallel",
+            media_type="video",
+            media_intent="episode",
+            source="youtube_music",
+            url="https://www.youtube.com/watch?v=crosssource1",
+            output_template={"output_dir": tmp, "final_format": "mkv"},
+        )
+        engine.store.enqueue_job(
+            origin="test",
+            origin_id="cross-source-parallel",
+            media_type="video",
+            media_intent="episode",
+            source="soundcloud",
+            url="https://soundcloud.com/test/crosssource2",
+            output_template={"output_dir": tmp, "final_format": "mkv"},
+        )
+
+        counter_lock = threading.Lock()
+        release_event = threading.Event()
+        both_started = threading.Event()
+        state = {"active": 0, "max_active": 0}
+
+        def _execute_stub(job, *, stop_event=None):
+            _ = stop_event
+            with counter_lock:
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+                if state["active"] >= 2:
+                    both_started.set()
+            release_event.wait(timeout=2.0)
+            engine.store.mark_completed(job.id, file_path=str(Path(tmp) / f"{job.id}.bin"))
+            with counter_lock:
+                state["active"] -= 1
+
+        monkeypatch.setattr(engine, "_execute_job", _execute_stub)
+
+        lock_yt = engine._get_source_lock("youtube_music")
+        lock_sc = engine._get_source_lock("soundcloud")
+        assert lock_yt.acquire(blocking=False) is True
+        assert lock_sc.acquire(blocking=False) is True
+        runner_yt = threading.Thread(
+            target=engine._run_source_once,
+            args=("youtube_music", lock_yt, None),
+            daemon=False,
+        )
+        runner_sc = threading.Thread(
+            target=engine._run_source_once,
+            args=("soundcloud", lock_sc, None),
+            daemon=False,
+        )
+        runner_yt.start()
+        runner_sc.start()
+        assert both_started.wait(timeout=2.0), "expected cross-source jobs to execute in parallel"
+        release_event.set()
+        runner_yt.join(timeout=3.0)
+        runner_sc.join(timeout=3.0)
+        assert runner_yt.is_alive() is False
+        assert runner_sc.is_alive() is False
+        assert state["max_active"] >= 2
+
+
+def test_preresolve_lookahead_handles_source_reassignment_race(monkeypatch) -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+
+        class _FakeSearchService:
+            last_music_track_search = {}
+
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={
+                "music_preresolve_enabled": True,
+                "music_preresolve_lookahead": 3,
+                "music_preresolve_pool_workers": 2,
+            },
+            paths=paths,
+            adapters={},
+            search_service=_FakeSearchService(),
+        )
+
+        queued_ids: list[str] = []
+        for idx in range(3):
+            job_id, created, _reason = engine.store.enqueue_job(
+                origin="test",
+                origin_id="preresolve-race",
+                media_type="music",
+                media_intent="music_track",
+                source="music_import",
+                url=f"musicbrainz://recording/rec-race-{idx}",
+                output_template={
+                    "artist": "Artist",
+                    "track": f"Song {idx}",
+                    "album": "Album",
+                    "recording_mbid": f"rec-race-{idx}",
+                    "mb_release_id": f"rel-race-{idx}",
+                    "canonical_metadata": {
+                        "artist": "Artist",
+                        "track": f"Song {idx}",
+                        "album": "Album",
+                        "recording_mbid": f"rec-race-{idx}",
+                        "mb_release_id": f"rel-race-{idx}",
+                    },
+                },
+            )
+            assert created is True
+            queued_ids.append(job_id)
+
+        race_job_id = queued_ids[1]
+        status_calls: dict[str, int] = {}
+        original_get_status = engine.store.get_job_status
+
+        def _get_status_racy(job_id):
+            current = status_calls.get(job_id, 0) + 1
+            status_calls[job_id] = current
+            if job_id == race_job_id and current >= 2:
+                return jq.JOB_STATUS_CLAIMED
+            return original_get_status(job_id)
+
+        monkeypatch.setattr(engine.store, "get_job_status", _get_status_racy)
+
+        def _resolve_stub(job, *, persist_failures=True):
+            _ = persist_failures
+            return jq.replace(
+                job,
+                source="youtube_music",
+                url=f"https://www.youtube.com/watch?v={job.id[:11]}",
+                input_url=f"https://www.youtube.com/watch?v={job.id[:11]}",
+                canonical_url=f"https://www.youtube.com/watch?v={job.id[:11]}",
+            )
+
+        monkeypatch.setattr(engine, "_resolve_music_track_job", _resolve_stub)
+
+        current_job = jq.DownloadJob(
+            id="current-preresolve-job",
+            origin="test",
+            origin_id="preresolve-race",
+            media_type="music",
+            media_intent="music_track",
+            source="music_import",
+            url="musicbrainz://recording/current",
+            input_url="musicbrainz://recording/current",
+            canonical_url="musicbrainz://recording/current",
+            external_id=None,
+            status=jq.JOB_STATUS_DOWNLOADING,
+            queued=None,
+            claimed=None,
+            downloading=None,
+            postprocessing=None,
+            completed=None,
+            failed=None,
+            canceled=None,
+            attempts=0,
+            max_attempts=3,
+            created_at=None,
+            updated_at=None,
+            last_error=None,
+            trace_id="trace-current-preresolve",
+            output_template={
+                "recording_mbid": "current",
+                "mb_release_id": "rel-current",
+                "canonical_metadata": {"recording_mbid": "current", "mb_release_id": "rel-current"},
+            },
+            resolved_destination=tmp,
+            canonical_id="music_track:current:rel-current:disc-1",
+            file_path=None,
+        )
+
+        engine._maybe_preresolve_next_music_job(current_job)
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            with engine._pre_resolve_lock:
+                if not engine._pre_resolve_inflight:
+                    break
+            time.sleep(0.05)
+
+        with engine._pre_resolve_lock:
+            assert not engine._pre_resolve_inflight
+
+        conn = engine.store._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id, source, output_template FROM download_jobs WHERE id IN (?, ?, ?)", tuple(queued_ids))
+            rows = {row["id"]: row for row in cur.fetchall()}
+        finally:
+            conn.close()
+
+        assert rows[race_job_id]["source"] == "music_import"
+        updated_ids = [job_id for job_id in queued_ids if job_id != race_job_id]
+        for job_id in updated_ids:
+            assert rows[job_id]["source"] == "youtube_music"
+            payload = json.loads(rows[job_id]["output_template"] or "{}")
+            runtime = payload.get("runtime_pre_resolved") if isinstance(payload, dict) else None
+            assert isinstance(runtime, dict)
+            assert str(runtime.get("resolved_source") or "") == "youtube_music"
