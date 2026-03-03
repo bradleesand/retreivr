@@ -41,6 +41,7 @@ This release focuses on three themes: faster music retrieval/download throughput
   - wider/scrollable queue table using user-facing title column
   - `Clear Failed` queue action
   - `Metrics` panel moved to Info
+  - Home search now routes YouTube playlist URLs through playlist enqueue on `Search & Download` (instead of direct-URL mode), while `Search` shows a clear prompt to use download mode for playlist URLs
 
 ### Fixed
 - Reduced false-negative music rejects tied to featured-credit tokenization and missing album metadata.
