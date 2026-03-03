@@ -60,34 +60,68 @@ def merge_candidates(existing, extra):
 
 def select_best_match(source, candidates, duration):
     best = None
-    best_score = 0
+    best_score = 0.0
+    best_breakdown = {}
     for candidate in candidates or []:
-        score = score_match(source, candidate, duration)
+        breakdown = score_match(source, candidate, duration)
+        score = float(breakdown.get("total_score") or 0.0)
         if score > best_score:
             best = candidate
             best_score = score
-    return best, best_score
+            best_breakdown = breakdown
+    return best, int(round(best_score)), best_breakdown
 
 
 def score_match(source, candidate, duration):
-    score = 0
-    artist_score = _fuzzy_score(source.get("artist"), candidate.get("artist"))
-    if artist_score >= 80:
-        score += 40
-    title_score = _fuzzy_score(source.get("title"), candidate.get("title"))
-    if title_score >= 80:
-        score += 30
-    album_score = _fuzzy_score(source.get("album"), candidate.get("album"))
-    if source.get("album") and album_score >= 80:
-        score += 10
+    source_artist = source.get("artist")
+    source_title = source.get("title")
+    source_album = source.get("album")
+
+    candidate_artist = candidate.get("artist")
+    candidate_title = candidate.get("track") or candidate.get("title")
+    candidate_album = candidate.get("album")
+
+    artist_score = _fuzzy_score(source_artist, candidate_artist)
+    title_score = _fuzzy_score(source_title, candidate_title)
+    album_score = _fuzzy_score(source_album, candidate_album) if source_album else 0
+
+    # Per-field weighted points (0-100 total):
+    # - artist: 45
+    # - track/title: 40
+    # - album: 10
+    # - duration: 5
+    artist_points = (artist_score / 100.0) * 45.0 if source_artist else 0.0
+    title_points = (title_score / 100.0) * 40.0 if source_title else 0.0
+    album_points = (album_score / 100.0) * 10.0 if source_album else 0.0
+
+    duration_points = 0.0
+    duration_score = 0
     if duration and candidate.get("duration"):
         try:
             cand_duration = int(round(candidate["duration"]))
         except Exception:
             cand_duration = None
-        if cand_duration is not None and abs(cand_duration - duration) <= 2:
-            score += 20
-    return score
+        if cand_duration is not None:
+            diff = abs(cand_duration - duration)
+            if diff <= 2:
+                duration_points = 5.0
+                duration_score = 100
+            elif diff <= 5:
+                duration_points = 2.5
+                duration_score = 50
+
+    total_score = artist_points + title_points + album_points + duration_points
+    return {
+        "artist_score": int(round(artist_score)),
+        "track_score": int(round(title_score)),
+        "album_score": int(round(album_score)),
+        "duration_score": int(round(duration_score)),
+        "artist_points": artist_points,
+        "track_points": title_points,
+        "album_points": album_points,
+        "duration_points": duration_points,
+        "total_score": total_score,
+    }
 
 
 def _fuzzy_score(left, right):
