@@ -1171,6 +1171,48 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def update_job_source_if_queued(
+        self,
+        job_id,
+        *,
+        source,
+        url=None,
+        input_url=None,
+        canonical_url=None,
+        external_id=None,
+    ):
+        """Update source/url fields only while job is still queued."""
+        now = utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE download_jobs
+                SET source=?,
+                    url=COALESCE(?, url),
+                    input_url=COALESCE(?, input_url),
+                    canonical_url=COALESCE(?, canonical_url),
+                    external_id=COALESCE(?, external_id),
+                    updated_at=?
+                WHERE id=? AND status=?
+                """,
+                (
+                    source,
+                    url,
+                    input_url,
+                    canonical_url,
+                    external_id,
+                    now,
+                    job_id,
+                    JOB_STATUS_QUEUED,
+                ),
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        finally:
+            conn.close()
+
     def mark_canceled(self, job_id, *, reason=None):
         now = utc_now()
         conn = self._connect()
@@ -2205,7 +2247,6 @@ class DownloadWorkerEngine:
 
     def run_once(self, *, stop_event=None):
         sources = self.store.list_sources_with_queued_jobs()
-        threads = []
         for source in sources:
             if stop_event and stop_event.is_set():
                 break
@@ -2218,9 +2259,6 @@ class DownloadWorkerEngine:
                 daemon=False,
             )
             thread.start()
-            threads.append(thread)
-        for thread in threads:
-            thread.join()
 
     def run_loop(self, *, poll_seconds=5, stop_event=None):
         json_sanity_check()
@@ -2394,6 +2432,17 @@ class DownloadWorkerEngine:
                 resolved_source = str(getattr(resolved_job, "source", "") or resolve_source(resolved_url)).strip() or None
                 if self.store.get_job_status(next_job.id) != JOB_STATUS_QUEUED:
                     return
+                resolved_external_id = extract_video_id(resolved_url) if resolved_source in {"youtube", "youtube_music"} else None
+                resolved_canonical_url = canonicalize_url(resolved_source or "", resolved_url, resolved_external_id)
+                if resolved_source:
+                    self.store.update_job_source_if_queued(
+                        next_job.id,
+                        source=resolved_source,
+                        url=resolved_url,
+                        input_url=resolved_url,
+                        canonical_url=resolved_canonical_url,
+                        external_id=resolved_external_id,
+                    )
 
                 self.store.merge_output_template_fields(
                     next_job.id,
