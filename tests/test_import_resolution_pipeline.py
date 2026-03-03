@@ -301,6 +301,46 @@ def test_import_pipeline_uses_single_batch_id_for_all_enqueued_items() -> None:
     assert second == result.import_batch_id
 
 
+def test_import_pipeline_dedupes_exact_track_lookup_before_mb_binding() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-dedupe-1",
+                        "title": "Repeat Song",
+                        "ext:score": "96",
+                        "artist-credit": [{"name": "Artist Repeat"}],
+                        "release-list": [{"id": "release-dedupe-1"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    intents = [
+        TrackIntent(artist="Artist Repeat", title="Repeat Song", album="Same Album", raw_line="", source_format="m3u"),
+        TrackIntent(artist="Artist Repeat", title="Repeat Song", album="Same Album", raw_line="", source_format="m3u"),
+    ]
+
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+        },
+    )
+
+    assert result.total_tracks == 2
+    assert result.resolved_count == 2
+    assert result.enqueued_count == 2
+    assert result.failed_count == 0
+    assert len(queue_store.enqueued) == 2
+    assert len(mb.calls) == 1
+
+
 def test_import_pipeline_threshold_uses_app_config_when_wrapper_passed() -> None:
     mb = FakeMusicBrainzService(
         [
