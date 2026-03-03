@@ -225,6 +225,7 @@ _MUSIC_DEFAULT_CONCURRENT_FRAGMENT_DOWNLOADS = 2
 _MUSIC_RESOLUTION_CACHE_MAX_ENTRIES = 256
 _MUSIC_DEFAULT_PRERESOLVE_LOOKAHEAD = 3
 _MUSIC_MAX_PRERESOLVE_LOOKAHEAD = 4
+_WORKER_DEFAULT_POLL_SECONDS = 1
 
 
 @dataclass(frozen=True)
@@ -2294,7 +2295,7 @@ class DownloadWorkerEngine:
             )
             thread.start()
 
-    def run_loop(self, *, poll_seconds=5, stop_event=None):
+    def run_loop(self, *, poll_seconds=_WORKER_DEFAULT_POLL_SECONDS, stop_event=None):
         json_sanity_check()
         _log_event(logging.INFO, "worker_started")
         _log_event(logging.INFO, "queue_polling_started")
