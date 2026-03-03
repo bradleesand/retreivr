@@ -907,8 +907,16 @@ class DownloadJobStore:
         if canonical_url is None:
             canonical_url = canonicalize_url(source, input_url, external_id)
 
-        if force_requeue and canonical_id:
-            duplicate_job = self.get_job_by_canonical_id(canonical_id)
+        if force_requeue:
+            duplicate_job = None
+            if canonical_id:
+                duplicate_job = self.get_job_by_canonical_id(canonical_id)
+            if duplicate_job is None and url:
+                duplicate_job = self.find_duplicate_job(
+                    canonical_id=None,
+                    url=url,
+                    destination=destination,
+                )
             if duplicate_job:
                 if duplicate_job.status in {
                     JOB_STATUS_QUEUED,
