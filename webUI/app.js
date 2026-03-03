@@ -4059,30 +4059,68 @@ async function refreshHomeDirectJobStatus() {
   const container = $("#home-results-list");
   if (!container) return;
   try {
-    const data = await fetchJson("/api/download_jobs?limit=50");
+    const data = await fetchJson("/api/download_jobs?limit=500");
     const jobs = data.jobs || [];
-    const job = jobs.find((entry) => {
-      if (state.homeDirectJob.playlistId) {
-        return entry.origin === "playlist" && entry.origin_id === state.homeDirectJob.playlistId;
+    const playlistId = state.homeDirectJob.playlistId || null;
+    if (playlistId) {
+      const playlistJobs = jobs.filter(
+        (entry) => entry.origin === "playlist" && String(entry.origin_id || "") === String(playlistId)
+      );
+      if (playlistJobs.length) {
+        const statuses = new Set(playlistJobs.map((entry) => String(entry.status || "")));
+        let aggregateStatus = "queued";
+        if (statuses.has("downloading") || statuses.has("postprocessing") || statuses.has("claimed")) {
+          aggregateStatus = statuses.has("claimed") && !statuses.has("downloading") && !statuses.has("postprocessing")
+            ? "claimed"
+            : "downloading";
+        } else if (statuses.has("queued")) {
+          aggregateStatus = "queued";
+        } else if (statuses.has("failed")) {
+          aggregateStatus = "failed";
+        } else if (statuses.has("cancelled")) {
+          aggregateStatus = "cancelled";
+        } else {
+          aggregateStatus = "completed";
+        }
+        const failedJob = playlistJobs.find((entry) => String(entry.status || "") === "failed");
+        const representative = failedJob || playlistJobs[0];
+        state.homeDirectJob.status = aggregateStatus;
+        state.homeDirectPreview = {
+          ...state.homeDirectPreview,
+          job_status: aggregateStatus,
+        };
+        container.textContent = "";
+        container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, aggregateStatus));
+        setHomeResultsStatus(formatDirectJobStatus(aggregateStatus));
+        setHomeResultsDetail(representative?.last_error || "", Boolean(representative?.last_error));
+        setHomeResultsState({
+          hasResults: true,
+          terminal: ["completed", "failed", "cancelled"].includes(aggregateStatus),
+        });
+        if (["completed", "failed", "cancelled"].includes(aggregateStatus)) {
+          stopHomeDirectJobPolling();
+          setHomeSearchControlsEnabled(true);
+        }
+        return;
       }
-      return entry.url === state.homeDirectJob.url;
-    });
+    }
+    const job = jobs.find((entry) => entry.url === state.homeDirectJob.url);
     if (job) {
-      state.homeDirectJob.status = job.status;
+      state.homeDirectJob.status = String(job.status || "queued");
       state.homeDirectPreview = {
         ...state.homeDirectPreview,
-        job_status: job.status,
+        job_status: String(job.status || "queued"),
       };
       container.textContent = "";
-      const card = renderHomeDirectUrlCard(state.homeDirectPreview, job.status);
+      const card = renderHomeDirectUrlCard(state.homeDirectPreview, String(job.status || "queued"));
       container.appendChild(card);
-      setHomeResultsStatus(formatDirectJobStatus(job.status));
+      setHomeResultsStatus(formatDirectJobStatus(String(job.status || "queued")));
       setHomeResultsDetail(job.last_error || "", Boolean(job.last_error));
       setHomeResultsState({
         hasResults: true,
-        terminal: ["completed", "failed", "cancelled"].includes(job.status),
+        terminal: ["completed", "failed", "cancelled"].includes(String(job.status || "")),
       });
-      if (["completed", "failed"].includes(job.status)) {
+      if (["completed", "failed", "cancelled"].includes(String(job.status || ""))) {
         stopHomeDirectJobPolling();
         setHomeSearchControlsEnabled(true);
       }
@@ -4136,6 +4174,9 @@ async function refreshHomeDirectJobStatus() {
     if (runData.state === "error" || runData.error) {
       runStatus = "failed";
       runError = runData.error || "";
+    } else if (playlistId) {
+      // Playlist runs can complete enqueueing before downstream download jobs finish.
+      runStatus = runData.running || runData.state === "running" ? "downloading" : "queued";
     } else if (runData.state === "completed") {
       runStatus = "completed";
     } else if (runData.running || runData.state === "running") {
@@ -4157,7 +4198,7 @@ async function refreshHomeDirectJobStatus() {
       hasResults: true,
       terminal: ["completed", "failed", "cancelled"].includes(runStatus),
     });
-    if (["completed", "failed"].includes(runStatus)) {
+    if (["completed", "failed", "cancelled"].includes(runStatus)) {
       stopHomeDirectJobPolling();
       setHomeSearchControlsEnabled(true);
     }
