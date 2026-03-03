@@ -4,6 +4,7 @@ import importlib.util
 import logging
 import sqlite3
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,8 @@ except Exception:
     resolve_best_mb_pair = _BINDING_MODULE.resolve_best_mb_pair
 
 _DEFAULT_CONFIDENCE_THRESHOLD = 0.78
+_DEFAULT_MB_BINDING_WORKERS = 4
+_MAX_MB_BINDING_WORKERS = 5
 logger = logging.getLogger(__name__)
 
 
@@ -452,6 +455,19 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     enqueued_count = 0
     failed_count = 0
     resolved_mbids: list[str] = []
+    processed_tracks = 0
+
+    mb_binding_workers = _DEFAULT_MB_BINDING_WORKERS
+    if isinstance(runtime_config, dict):
+        worker_value = runtime_config.get("import_mb_binding_workers")
+        if worker_value is None and isinstance(config, dict):
+            worker_value = config.get("import_mb_binding_workers")
+        if worker_value is not None:
+            try:
+                mb_binding_workers = int(worker_value)
+            except (TypeError, ValueError):
+                mb_binding_workers = _DEFAULT_MB_BINDING_WORKERS
+    mb_binding_workers = max(1, min(int(mb_binding_workers), _MAX_MB_BINDING_WORKERS))
 
     def _emit_progress(*, phase: str, processed_tracks: int) -> None:
         if not callable(progress_callback):
@@ -471,128 +487,172 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
         except Exception:
             logger.exception("import_progress_callback_failed")
 
-    _emit_progress(phase="resolving", processed_tracks=0)
+    def _resolve_intent(entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "idx": entry["idx"],
+            "selected_pair": _resolve_bound_mb_pair(
+                mb_service,
+                artist=entry["artist"],
+                track=entry["title"],
+                album=entry["album"],
+                duration_ms=entry["duration_ms"],
+                country_preference="US",
+                threshold=confidence_threshold,
+            ),
+        }
+
+    _emit_progress(phase="resolving", processed_tracks=processed_tracks)
+    entries: list[dict[str, Any]] = []
     for idx, intent in enumerate(track_intents, start=1):
         query = _build_query(intent)
         artist = str(intent.artist or "").strip() or None
         title = str(intent.title or "").strip() or query
-        if not query:
-            failed_count += 1
-            _emit_progress(phase="resolving", processed_tracks=idx)
-            continue
         album = str(intent.album or "").strip() or None
         duration_ms = getattr(intent, "duration_ms", None)
         try:
             duration_ms = int(duration_ms) if duration_ms is not None else None
         except (TypeError, ValueError):
             duration_ms = None
+        entries.append(
+            {
+                "idx": idx,
+                "query": query,
+                "artist": artist,
+                "title": title,
+                "album": album,
+                "duration_ms": duration_ms,
+            }
+        )
 
-        try:
-            selected_pair = _resolve_bound_mb_pair(
-                mb_service,
-                artist=artist,
-                track=title,
-                album=album,
-                duration_ms=duration_ms,
-                country_preference="US",
-                threshold=confidence_threshold,
-            )
-            if not selected_pair:
-                unresolved_count += 1
-                reasons = []
-                try:
-                    last = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
-                    if isinstance(last, list):
-                        reasons = [str(item) for item in last if str(item or "").strip()]
-                except Exception:
-                    reasons = []
+    pending: dict[Any, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(mb_binding_workers, max(1, total_tracks))) as pool:
+        for entry in entries:
+            if not entry["query"]:
+                failed_count += 1
+                processed_tracks += 1
+                _emit_progress(phase="resolving", processed_tracks=processed_tracks)
+                continue
+            future = pool.submit(_resolve_intent, entry)
+            pending[future] = entry
+
+        for future in as_completed(pending):
+            entry = pending[future]
+            idx = int(entry["idx"])
+            query = str(entry["query"] or "").strip()
+            artist = entry["artist"]
+            title = str(entry["title"] or "").strip() or query
+            album = entry["album"]
+            try:
+                result = future.result()
+                selected_pair = result.get("selected_pair") if isinstance(result, dict) else None
+            except Exception as exc:
+                selected_pair = None
+                failed_count += 1
                 _record_music_failure(
                     db_path=failure_db_path,
                     origin_batch_id=import_batch_id,
                     artist=artist,
                     track=title,
-                    reasons=reasons or ["mb_pair_not_found"],
+                    reasons=["import_exception", str(exc)],
                     recording_mbid_attempted=None,
                     last_query=query,
                 )
-                _emit_progress(phase="resolving", processed_tracks=idx)
+                processed_tracks += 1
+                _emit_progress(phase="resolving", processed_tracks=processed_tracks)
                 continue
-            recording_mbid = str(selected_pair.get("recording_mbid") or "").strip()
-            if not recording_mbid:
-                unresolved_count += 1
+            try:
+                if not selected_pair:
+                    unresolved_count += 1
+                    _record_music_failure(
+                        db_path=failure_db_path,
+                        origin_batch_id=import_batch_id,
+                        artist=artist,
+                        track=title,
+                        reasons=["mb_pair_not_found"],
+                        recording_mbid_attempted=None,
+                        last_query=query,
+                    )
+                    processed_tracks += 1
+                    _emit_progress(phase="resolving", processed_tracks=processed_tracks)
+                    continue
+                recording_mbid = str(selected_pair.get("recording_mbid") or "").strip()
+                if not recording_mbid:
+                    unresolved_count += 1
+                    _record_music_failure(
+                        db_path=failure_db_path,
+                        origin_batch_id=import_batch_id,
+                        artist=artist,
+                        track=title,
+                        reasons=["missing_recording_mbid"],
+                        recording_mbid_attempted=None,
+                        last_query=query,
+                    )
+                    processed_tracks += 1
+                    _emit_progress(phase="resolving", processed_tracks=processed_tracks)
+                    continue
+                release_mbid = str(selected_pair.get("mb_release_id") or "").strip() or None
+                release_group_mbid = str(selected_pair.get("mb_release_group_id") or "").strip() or None
+                canonical_artist = artist or ""
+                canonical_title = title
+                canonical_album = str(selected_pair.get("album") or album or "").strip() or None
+                release_date_raw = str(selected_pair.get("release_date") or "").strip() or None
+                release_date = _extract_release_year(release_date_raw) or release_date_raw
+                track_number = _safe_int(selected_pair.get("track_number"))
+                disc_number = _safe_int(selected_pair.get("disc_number")) or 1
+                resolved_duration_ms = _safe_int(selected_pair.get("duration_ms"))
+                selected_track_aliases = selected_pair.get("track_aliases")
+                if isinstance(selected_track_aliases, (list, tuple, set)):
+                    normalized_aliases = [str(value).strip() for value in selected_track_aliases if str(value or "").strip()]
+                else:
+                    normalized_aliases = []
+                selected_track_disambiguation = str(selected_pair.get("track_disambiguation") or "").strip() or None
+                selected_recording_title = str(selected_pair.get("mb_recording_title") or "").strip() or None
+                selected_mb_youtube_urls = selected_pair.get("mb_youtube_urls")
+                if isinstance(selected_mb_youtube_urls, (list, tuple, set)):
+                    normalized_mb_youtube_urls = [str(value).strip() for value in selected_mb_youtube_urls if str(value or "").strip()]
+                else:
+                    normalized_mb_youtube_urls = []
+                created = _enqueue_music_track_job(
+                    queue_store,
+                    job_payload_builder,
+                    runtime_config=runtime_config,
+                    base_dir=base_dir,
+                    destination=destination,
+                    final_format_override=final_format_override,
+                    import_batch_id=import_batch_id,
+                    source_index=idx - 1,
+                    recording_mbid=recording_mbid,
+                    release_mbid=release_mbid,
+                    release_group_mbid=release_group_mbid,
+                    artist=canonical_artist,
+                    title=canonical_title,
+                    album=canonical_album,
+                    release_date=release_date,
+                    track_number=track_number,
+                    disc_number=disc_number,
+                    duration_ms=resolved_duration_ms,
+                    track_aliases=normalized_aliases,
+                    track_disambiguation=selected_track_disambiguation,
+                    mb_recording_title=selected_recording_title,
+                    mb_youtube_urls=normalized_mb_youtube_urls,
+                )
+                resolved_count += 1
+                resolved_mbids.append(recording_mbid)
+                if created:
+                    enqueued_count += 1
+            except Exception as exc:
+                failed_count += 1
                 _record_music_failure(
                     db_path=failure_db_path,
                     origin_batch_id=import_batch_id,
                     artist=artist,
                     track=title,
-                    reasons=["missing_recording_mbid"],
+                    reasons=["import_exception", str(exc)],
                     recording_mbid_attempted=None,
                     last_query=query,
                 )
-                _emit_progress(phase="resolving", processed_tracks=idx)
-                continue
-            release_mbid = str(selected_pair.get("mb_release_id") or "").strip() or None
-            release_group_mbid = str(selected_pair.get("mb_release_group_id") or "").strip() or None
-            canonical_artist = artist or ""
-            canonical_title = title
-            canonical_album = str(selected_pair.get("album") or album or "").strip() or None
-            release_date_raw = str(selected_pair.get("release_date") or "").strip() or None
-            release_date = _extract_release_year(release_date_raw) or release_date_raw
-            track_number = _safe_int(selected_pair.get("track_number"))
-            disc_number = _safe_int(selected_pair.get("disc_number")) or 1
-            resolved_duration_ms = _safe_int(selected_pair.get("duration_ms"))
-            selected_track_aliases = selected_pair.get("track_aliases")
-            if isinstance(selected_track_aliases, (list, tuple, set)):
-                normalized_aliases = [str(value).strip() for value in selected_track_aliases if str(value or "").strip()]
-            else:
-                normalized_aliases = []
-            selected_track_disambiguation = str(selected_pair.get("track_disambiguation") or "").strip() or None
-            selected_recording_title = str(selected_pair.get("mb_recording_title") or "").strip() or None
-            selected_mb_youtube_urls = selected_pair.get("mb_youtube_urls")
-            if isinstance(selected_mb_youtube_urls, (list, tuple, set)):
-                normalized_mb_youtube_urls = [str(value).strip() for value in selected_mb_youtube_urls if str(value or "").strip()]
-            else:
-                normalized_mb_youtube_urls = []
-            created = _enqueue_music_track_job(
-                queue_store,
-                job_payload_builder,
-                runtime_config=runtime_config,
-                base_dir=base_dir,
-                destination=destination,
-                final_format_override=final_format_override,
-                import_batch_id=import_batch_id,
-                source_index=idx - 1,
-                recording_mbid=recording_mbid,
-                release_mbid=release_mbid,
-                release_group_mbid=release_group_mbid,
-                artist=canonical_artist,
-                title=canonical_title,
-                album=canonical_album,
-                release_date=release_date,
-                track_number=track_number,
-                disc_number=disc_number,
-                duration_ms=resolved_duration_ms,
-                track_aliases=normalized_aliases,
-                track_disambiguation=selected_track_disambiguation,
-                mb_recording_title=selected_recording_title,
-                mb_youtube_urls=normalized_mb_youtube_urls,
-            )
-            resolved_count += 1
-            resolved_mbids.append(recording_mbid)
-            if created:
-                enqueued_count += 1
-        except Exception as exc:
-            failed_count += 1
-            _record_music_failure(
-                db_path=failure_db_path,
-                origin_batch_id=import_batch_id,
-                artist=artist,
-                track=title,
-                reasons=["import_exception", str(exc)],
-                recording_mbid_attempted=None,
-                last_query=query,
-            )
-        _emit_progress(phase="resolving", processed_tracks=idx)
+            processed_tracks += 1
+            _emit_progress(phase="resolving", processed_tracks=processed_tracks)
 
     unresolved_count = max(unresolved_count, total_tracks - resolved_count - failed_count)
     _emit_progress(phase="finalizing", processed_tracks=total_tracks)
