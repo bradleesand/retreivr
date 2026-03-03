@@ -1498,8 +1498,13 @@ async function refreshStatus() {
 async function refreshMusicFailures() {
   const countEl = $("#music-failures-count");
   const listEl = $("#music-failures-list");
+  const messageEl = $("#music-failures-message");
   if (!countEl || !listEl) {
     return;
+  }
+  if (messageEl) {
+    messageEl.textContent = "";
+    messageEl.classList.remove("error");
   }
   try {
     const data = await fetchJson("/api/music/failures?limit=25");
@@ -1530,21 +1535,49 @@ async function refreshMusicFailures() {
     failed.className = "meta";
     failed.textContent = `Failed to load music failures: ${err.message}`;
     listEl.appendChild(failed);
+    if (messageEl) {
+      messageEl.textContent = "Failed to refresh music failures.";
+      messageEl.classList.add("error");
+    }
   }
 }
 
 async function clearMusicFailures() {
+  const messageEl = $("#music-failures-message");
+  const clearBtn = $("#music-failures-clear");
   const ok = confirm("Clear stored music failure diagnostics?");
   if (!ok) {
     return;
   }
   try {
-    const result = await fetchJson("/api/music/failures", { method: "DELETE" });
+    if (clearBtn) {
+      clearBtn.disabled = true;
+    }
+    if (messageEl) {
+      messageEl.textContent = "Clearing music failures...";
+      messageEl.classList.remove("error");
+    }
+    let result = null;
+    try {
+      result = await fetchJson("/api/music/failures", { method: "DELETE" });
+    } catch (_err) {
+      result = await fetchJson("/api/music/failures/clear", { method: "POST" });
+    }
     const deleted = Number.isFinite(Number(result?.deleted)) ? Number(result.deleted) : 0;
-    setNotice($("#home-search-message"), `Cleared ${deleted} music failure record(s).`, false);
+    if (messageEl) {
+      messageEl.textContent = `Cleared ${deleted} music failure record(s).`;
+      messageEl.classList.remove("error");
+    }
     await refreshMusicFailures();
   } catch (err) {
-    setNotice($("#home-search-message"), `Clear music failures failed: ${err.message}`, true);
+    if (messageEl) {
+      messageEl.textContent = `Clear music failures failed: ${err.message}`;
+      messageEl.classList.add("error");
+    }
+  } finally {
+    if (clearBtn) {
+      clearBtn.disabled = false;
+    }
   }
 }
 

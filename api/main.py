@@ -7000,6 +7000,14 @@ async def delete_music_failures(
     )
 
 
+@app.post("/api/music/failures/clear")
+async def clear_music_failures_compat(
+    before: str | None = Query(None),
+    keep_latest: int | None = Query(None, ge=0),
+):
+    return await delete_music_failures(before=before, keep_latest=keep_latest)
+
+
 
 
 
