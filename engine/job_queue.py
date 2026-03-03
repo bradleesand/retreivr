@@ -226,6 +226,8 @@ _MUSIC_RESOLUTION_CACHE_MAX_ENTRIES = 256
 _MUSIC_DEFAULT_PRERESOLVE_LOOKAHEAD = 3
 _MUSIC_MAX_PRERESOLVE_LOOKAHEAD = 4
 _WORKER_DEFAULT_POLL_SECONDS = 1
+_SOURCE_DEFAULT_CONCURRENCY = 2
+_SOURCE_MAX_CONCURRENCY = 4
 
 
 @dataclass(frozen=True)
@@ -1067,17 +1069,22 @@ class DownloadJobStore:
         finally:
             conn.close()
 
-    def claim_next_job(self, source, *, now=None):
+    def claim_next_job(self, source, *, now=None, max_active_per_source=1):
         now = now or utc_now()
+        try:
+            active_limit = max(1, int(max_active_per_source or 1))
+        except (TypeError, ValueError):
+            active_limit = 1
         conn = self._connect()
         try:
             cur = conn.cursor()
             cur.execute("BEGIN IMMEDIATE")
             cur.execute(
-                "SELECT 1 FROM download_jobs WHERE status=? AND source=? LIMIT 1",
-                (JOB_STATUS_DOWNLOADING, source),
+                "SELECT COUNT(1) FROM download_jobs WHERE status IN (?, ?) AND source=?",
+                (JOB_STATUS_CLAIMED, JOB_STATUS_DOWNLOADING, source),
             )
-            if cur.fetchone():
+            active_count = int((cur.fetchone() or [0])[0] or 0)
+            if active_count >= active_limit:
                 conn.commit()
                 return None
             cur.execute(
@@ -1458,6 +1465,8 @@ class DownloadWorkerEngine:
         self._pre_resolve_inflight = set()
         self._music_resolution_cache_lock = threading.Lock()
         self._music_resolution_cache = OrderedDict()
+        self._source_semaphores = {}
+        self._source_concurrency_limits = {}
 
     def _extract_resolved_candidate(self, resolved):
         if not resolved:
@@ -2313,6 +2322,42 @@ class DownloadWorkerEngine:
                 self._locks[source] = lock
             return lock
 
+    def _source_concurrency(self, source) -> int:
+        with self._locks_lock:
+            existing = self._source_concurrency_limits.get(source)
+            if isinstance(existing, int) and existing > 0:
+                return existing
+        cfg = self.config if isinstance(self.config, dict) else {}
+        configured = cfg.get("source_concurrency") if isinstance(cfg.get("source_concurrency"), dict) else {}
+        source_key = str(source or "").strip()
+        value = configured.get(source_key)
+        if value is None:
+            value = cfg.get("max_concurrent_jobs_per_source")
+        if value is None:
+            value = _SOURCE_DEFAULT_CONCURRENCY
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            limit = _SOURCE_DEFAULT_CONCURRENCY
+        limit = max(1, min(limit, _SOURCE_MAX_CONCURRENCY))
+        with self._locks_lock:
+            self._source_concurrency_limits[source] = limit
+        return limit
+
+    def _get_source_semaphore(self, source):
+        with self._locks_lock:
+            semaphore = self._source_semaphores.get(source)
+            if semaphore:
+                return semaphore
+        limit = self._source_concurrency(source)
+        with self._locks_lock:
+            semaphore = self._source_semaphores.get(source)
+            if semaphore:
+                return semaphore
+            semaphore = threading.BoundedSemaphore(value=limit)
+            self._source_semaphores[source] = semaphore
+            return semaphore
+
     def cancel_job(self, job_id: str, *, reason: str | None = None) -> bool:
         """
         Request cancellation of a specific job.
@@ -2540,50 +2585,88 @@ class DownloadWorkerEngine:
     def _run_source_once(self, source, lock, stop_event):
         try:
             # Drain all ready jobs for this source while holding the source lock.
-            # This avoids a fixed poll delay between same-source jobs.
-            while True:
-                if stop_event and stop_event.is_set():
-                    return
-                job = self.store.claim_next_job(source)
-                if not job:
-                    return
-                # If a cancel request came in while this job was queued, honor it immediately.
-                if self._is_job_cancelled(job.id, stop_event):
+            # Dispatch up to per-source concurrency and backfill as workers complete.
+            source_limit = self._source_concurrency(source)
+            source_semaphore = self._get_source_semaphore(source)
+            active_workers = []
+
+            def _spawn(job):
+                def _runner():
                     try:
-                        self.store.mark_canceled(job.id, reason="Cancelled by user")
-                        _log_event(logging.INFO, "job_cancelled", job_id=job.id, trace_id=job.trace_id, source=job.source)
-                    except Exception as persist_exc:
-                        logging.error(
-                            "[WORKER] persistence_failed job_id=%s status=%s err=%s",
-                            job.id,
-                            JOB_STATUS_CANCELLED,
-                            persist_exc,
-                        )
+                        self._execute_job(job, stop_event=stop_event)
+                    finally:
+                        source_semaphore.release()
+
+                thread = threading.Thread(
+                    target=_runner,
+                    name=f"source-worker-{source}-{job.id[:8]}",
+                    daemon=False,
+                )
+                thread.start()
+                active_workers.append(thread)
+
+            while True:
+                if stop_event and stop_event.is_set() and not active_workers:
+                    return
+                active_workers = [thread for thread in active_workers if thread.is_alive()]
+
+                claimed_any = False
+                while True:
+                    if stop_event and stop_event.is_set():
+                        break
+                    if not source_semaphore.acquire(blocking=False):
+                        break
+                    job = self.store.claim_next_job(
+                        source,
+                        max_active_per_source=source_limit,
+                    )
+                    if not job:
+                        source_semaphore.release()
+                        break
+                    claimed_any = True
+                    # If a cancel request came in while this job was queued, honor it immediately.
+                    if self._is_job_cancelled(job.id, stop_event):
                         try:
-                            self.store.record_failure(
-                                job,
-                                error_message=f"cancel_persistence_failed:{persist_exc}",
-                                retryable=False,
-                                retry_delay_seconds=self.retry_delay_seconds,
-                            )
-                        except Exception as fallback_exc:
+                            self.store.mark_canceled(job.id, reason="Cancelled by user")
+                            _log_event(logging.INFO, "job_cancelled", job_id=job.id, trace_id=job.trace_id, source=job.source)
+                        except Exception as persist_exc:
                             logging.error(
                                 "[WORKER] persistence_failed job_id=%s status=%s err=%s",
                                 job.id,
-                                JOB_STATUS_FAILED,
-                                fallback_exc,
+                                JOB_STATUS_CANCELLED,
+                                persist_exc,
                             )
-                    continue
-                _log_event(
-                    logging.INFO,
-                    "job_claimed",
-                    job_id=job.id,
-                    trace_id=job.trace_id,
-                    source=job.source,
-                    origin=job.origin,
-                    media_intent=job.media_intent,
-                )
-                self._execute_job(job, stop_event=stop_event)
+                            try:
+                                self.store.record_failure(
+                                    job,
+                                    error_message=f"cancel_persistence_failed:{persist_exc}",
+                                    retryable=False,
+                                    retry_delay_seconds=self.retry_delay_seconds,
+                                )
+                            except Exception as fallback_exc:
+                                logging.error(
+                                    "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                                    job.id,
+                                    JOB_STATUS_FAILED,
+                                    fallback_exc,
+                                )
+                        source_semaphore.release()
+                        continue
+                    _log_event(
+                        logging.INFO,
+                        "job_claimed",
+                        job_id=job.id,
+                        trace_id=job.trace_id,
+                        source=job.source,
+                        origin=job.origin,
+                        media_intent=job.media_intent,
+                    )
+                    _spawn(job)
+
+                if not active_workers and not claimed_any:
+                    return
+                for thread in list(active_workers):
+                    thread.join(timeout=0.1)
         finally:
             lock.release()
 
