@@ -1,11 +1,10 @@
 name: verify-branch-protection
 
 on:
-  push:
+  pull_request:
     branches:
       - main
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
