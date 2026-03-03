@@ -2183,48 +2183,51 @@ class DownloadWorkerEngine:
 
     def _run_source_once(self, source, lock, stop_event):
         try:
-            if stop_event and stop_event.is_set():
-                return
-            job = self.store.claim_next_job(source)
-            if not job:
-                return
-            # If a cancel request came in while this job was queued, honor it immediately.
-            if self._is_job_cancelled(job.id, stop_event):
-                try:
-                    self.store.mark_canceled(job.id, reason="Cancelled by user")
-                    _log_event(logging.INFO, "job_cancelled", job_id=job.id, trace_id=job.trace_id, source=job.source)
-                except Exception as persist_exc:
-                    logging.error(
-                        "[WORKER] persistence_failed job_id=%s status=%s err=%s",
-                        job.id,
-                        JOB_STATUS_CANCELLED,
-                        persist_exc,
-                    )
+            # Drain all ready jobs for this source while holding the source lock.
+            # This avoids a fixed poll delay between same-source jobs.
+            while True:
+                if stop_event and stop_event.is_set():
+                    return
+                job = self.store.claim_next_job(source)
+                if not job:
+                    return
+                # If a cancel request came in while this job was queued, honor it immediately.
+                if self._is_job_cancelled(job.id, stop_event):
                     try:
-                        self.store.record_failure(
-                            job,
-                            error_message=f"cancel_persistence_failed:{persist_exc}",
-                            retryable=False,
-                            retry_delay_seconds=self.retry_delay_seconds,
-                        )
-                    except Exception as fallback_exc:
+                        self.store.mark_canceled(job.id, reason="Cancelled by user")
+                        _log_event(logging.INFO, "job_cancelled", job_id=job.id, trace_id=job.trace_id, source=job.source)
+                    except Exception as persist_exc:
                         logging.error(
                             "[WORKER] persistence_failed job_id=%s status=%s err=%s",
                             job.id,
-                            JOB_STATUS_FAILED,
-                            fallback_exc,
+                            JOB_STATUS_CANCELLED,
+                            persist_exc,
                         )
-                return
-            _log_event(
-                logging.INFO,
-                "job_claimed",
-                job_id=job.id,
-                trace_id=job.trace_id,
-                source=job.source,
-                origin=job.origin,
-                media_intent=job.media_intent,
-            )
-            self._execute_job(job, stop_event=stop_event)
+                        try:
+                            self.store.record_failure(
+                                job,
+                                error_message=f"cancel_persistence_failed:{persist_exc}",
+                                retryable=False,
+                                retry_delay_seconds=self.retry_delay_seconds,
+                            )
+                        except Exception as fallback_exc:
+                            logging.error(
+                                "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                                job.id,
+                                JOB_STATUS_FAILED,
+                                fallback_exc,
+                            )
+                    continue
+                _log_event(
+                    logging.INFO,
+                    "job_claimed",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    origin=job.origin,
+                    media_intent=job.media_intent,
+                )
+                self._execute_job(job, stop_event=stop_event)
         finally:
             lock.release()
 
