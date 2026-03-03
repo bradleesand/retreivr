@@ -1498,6 +1498,16 @@ class DownloadWorkerEngine:
         self._source_semaphores = {}
         self._source_concurrency_limits = {}
         self._global_concurrency_limit_cache = "__unset__"
+        self._runtime_metrics_lock = threading.Lock()
+        self._runtime_metrics = {
+            "source_active_slots": {},
+            "source_max_active_slots": {},
+            "resolve_latency_count": 0,
+            "resolve_latency_total_ms": 0.0,
+            "resolve_latency_last_ms": None,
+            "resolution_cache_hits": 0,
+            "resolution_cache_misses": 0,
+        }
         self._preresolve_executor = ThreadPoolExecutor(
             max_workers=self._preresolve_pool_workers(),
             thread_name_prefix="music-preresolve",
@@ -1904,6 +1914,7 @@ class DownloadWorkerEngine:
                 retry_start_rung = 0
         # Music-track acquisition must go through SearchService for deterministic orchestration/logging.
         if self.search_service and not resolved:
+            search_started = time.perf_counter()
             try:
                 resolved = self.search_service.search_music_track_best_match(
                     artist,
@@ -1920,6 +1931,7 @@ class DownloadWorkerEngine:
                     is_ep_release=is_ep_release,
                 )
             except Exception as exc:
+                self._metric_record_resolve_latency((time.perf_counter() - search_started) * 1000.0)
                 logging.exception("Music track search service failed query=%s", search_query)
                 retryable = is_retryable_error(exc)
                 _log_event(
@@ -1940,6 +1952,7 @@ class DownloadWorkerEngine:
                         retry_delay_seconds=self.retry_delay_seconds,
                     )
                 return None
+            self._metric_record_resolve_latency((time.perf_counter() - search_started) * 1000.0)
 
         resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
         search_meta = (
@@ -2424,6 +2437,109 @@ class DownloadWorkerEngine:
             workers = _MUSIC_PRERESOLVE_POOL_DEFAULT_WORKERS
         return max(1, min(workers, _MUSIC_PRERESOLVE_POOL_MAX_WORKERS))
 
+    def _metric_set_source_active(self, source, delta: int) -> None:
+        source_key = str(source or "unknown").strip() or "unknown"
+        with self._runtime_metrics_lock:
+            current = int(self._runtime_metrics["source_active_slots"].get(source_key, 0))
+            updated = max(0, current + int(delta))
+            self._runtime_metrics["source_active_slots"][source_key] = updated
+            peak = int(self._runtime_metrics["source_max_active_slots"].get(source_key, 0))
+            if updated > peak:
+                self._runtime_metrics["source_max_active_slots"][source_key] = updated
+
+    def _metric_record_resolve_latency(self, elapsed_ms: float) -> None:
+        try:
+            value = float(elapsed_ms)
+        except (TypeError, ValueError):
+            return
+        if value < 0:
+            return
+        with self._runtime_metrics_lock:
+            self._runtime_metrics["resolve_latency_count"] = int(self._runtime_metrics["resolve_latency_count"]) + 1
+            self._runtime_metrics["resolve_latency_total_ms"] = float(self._runtime_metrics["resolve_latency_total_ms"]) + value
+            self._runtime_metrics["resolve_latency_last_ms"] = value
+
+    def _metric_note_resolution_cache(self, *, hit: bool) -> None:
+        with self._runtime_metrics_lock:
+            key = "resolution_cache_hits" if bool(hit) else "resolution_cache_misses"
+            self._runtime_metrics[key] = int(self._runtime_metrics[key]) + 1
+
+    def _collect_queue_age_metrics(self) -> dict:
+        now = datetime.now(timezone.utc)
+        summary = {
+            "oldest_queued_age_seconds": None,
+            "oldest_queued_by_source_seconds": {},
+        }
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT source, MIN(created_at) AS oldest_created_at
+                FROM download_jobs
+                WHERE status=?
+                GROUP BY source
+                """,
+                (JOB_STATUS_QUEUED,),
+            )
+            oldest_global = None
+            per_source = {}
+            for row in cur.fetchall():
+                source = str(row["source"] or "unknown").strip() or "unknown"
+                created_at = str(row["oldest_created_at"] or "").strip()
+                if not created_at:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(created_at)
+                except Exception:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age_seconds = max(0.0, (now - ts.astimezone(timezone.utc)).total_seconds())
+                per_source[source] = round(age_seconds, 3)
+                if oldest_global is None or age_seconds > oldest_global:
+                    oldest_global = age_seconds
+            summary["oldest_queued_age_seconds"] = round(oldest_global, 3) if oldest_global is not None else None
+            summary["oldest_queued_by_source_seconds"] = per_source
+            return summary
+        except Exception:
+            logger.exception("worker_queue_age_metrics_failed")
+            return summary
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def get_runtime_metrics(self) -> dict:
+        with self._runtime_metrics_lock:
+            source_active_slots = dict(self._runtime_metrics.get("source_active_slots") or {})
+            source_max_active_slots = dict(self._runtime_metrics.get("source_max_active_slots") or {})
+            resolve_count = int(self._runtime_metrics.get("resolve_latency_count") or 0)
+            resolve_total = float(self._runtime_metrics.get("resolve_latency_total_ms") or 0.0)
+            resolve_last = self._runtime_metrics.get("resolve_latency_last_ms")
+            cache_hits = int(self._runtime_metrics.get("resolution_cache_hits") or 0)
+            cache_misses = int(self._runtime_metrics.get("resolution_cache_misses") or 0)
+        cache_total = cache_hits + cache_misses
+        return {
+            "source_active_slots": source_active_slots,
+            "source_max_active_slots": source_max_active_slots,
+            "resolve_latency_ms": {
+                "count": resolve_count,
+                "last": round(float(resolve_last), 3) if resolve_last is not None else None,
+                "avg": round(resolve_total / resolve_count, 3) if resolve_count > 0 else None,
+            },
+            "resolution_cache": {
+                "hits": cache_hits,
+                "misses": cache_misses,
+                "hit_rate": round(cache_hits / cache_total, 4) if cache_total > 0 else None,
+            },
+            "queue_age_seconds": self._collect_queue_age_metrics(),
+        }
+
     def _get_source_semaphore(self, source):
         with self._locks_lock:
             semaphore = self._source_semaphores.get(source)
@@ -2516,12 +2632,15 @@ class DownloadWorkerEngine:
     def _get_cached_music_resolution(self, *, recording_mbid, release_mbid):
         key = self._music_resolution_cache_key(recording_mbid=recording_mbid, release_mbid=release_mbid)
         if key is None:
+            self._metric_note_resolution_cache(hit=False)
             return None
         with self._music_resolution_cache_lock:
             payload = self._music_resolution_cache.get(key)
             if not isinstance(payload, dict):
+                self._metric_note_resolution_cache(hit=False)
                 return None
             self._music_resolution_cache.move_to_end(key)
+            self._metric_note_resolution_cache(hit=True)
             return dict(payload)
 
     def _put_cached_music_resolution(self, *, recording_mbid, release_mbid, resolved):
@@ -2670,10 +2789,13 @@ class DownloadWorkerEngine:
             active_workers = []
 
             def _spawn(job):
+                self._metric_set_source_active(source, +1)
+
                 def _runner():
                     try:
                         self._execute_job(job, stop_event=stop_event)
                     finally:
+                        self._metric_set_source_active(source, -1)
                         source_semaphore.release()
 
                 thread = threading.Thread(

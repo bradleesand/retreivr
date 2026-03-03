@@ -1211,6 +1211,176 @@ def test_music_resolve_uses_in_memory_resolution_cache_for_same_mb_pair() -> Non
         assert fake_search.calls == 1
 
 
+def test_worker_runtime_metrics_capture_cache_hit_rate_and_resolve_latency() -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+
+        class _FakeSearchService:
+            def __init__(self):
+                self.calls = 0
+                self.last_music_track_search = {}
+
+            def search_music_track_best_match(self, *args, **kwargs):
+                _ = args, kwargs
+                self.calls += 1
+                return {
+                    "url": "https://www.youtube.com/watch?v=abc123xyz00",
+                    "source": "youtube_music",
+                    "candidate_id": "cand-metrics-1",
+                    "final_score": 0.95,
+                    "duration_ms": 200000,
+                }
+
+        fake_search = _FakeSearchService()
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={},
+            paths=paths,
+            adapters={},
+            search_service=fake_search,
+        )
+
+        template = {
+            "artist": "Artist",
+            "track": "Song",
+            "album": "Album",
+            "recording_mbid": "rec-metrics-1",
+            "mb_release_id": "rel-metrics-1",
+            "canonical_metadata": {
+                "artist": "Artist",
+                "track": "Song",
+                "album": "Album",
+                "recording_mbid": "rec-metrics-1",
+                "mb_release_id": "rel-metrics-1",
+            },
+        }
+        job_a = jq.DownloadJob(
+            id="job-metrics-a",
+            origin="music_album",
+            origin_id="album-run-metrics",
+            media_type="music",
+            media_intent="music_track",
+            source="youtube_music",
+            url="musicbrainz://recording/rec-metrics-1",
+            input_url="musicbrainz://recording/rec-metrics-1",
+            canonical_url="musicbrainz://recording/rec-metrics-1",
+            external_id=None,
+            status=jq.JOB_STATUS_QUEUED,
+            queued=None,
+            claimed=None,
+            downloading=None,
+            postprocessing=None,
+            completed=None,
+            failed=None,
+            canceled=None,
+            attempts=0,
+            max_attempts=3,
+            created_at=None,
+            updated_at=None,
+            last_error=None,
+            trace_id="trace-metrics-a",
+            output_template=dict(template),
+            resolved_destination=tmp,
+            canonical_id="music_track:rec-metrics-1:rel-metrics-1:disc-1:a",
+            file_path=None,
+        )
+        job_b = jq.replace(
+            job_a,
+            id="job-metrics-b",
+            trace_id="trace-metrics-b",
+            canonical_id="music_track:rec-metrics-1:rel-metrics-1:disc-1:b",
+        )
+
+        assert engine._resolve_music_track_job(job_a) is not None
+        assert engine._resolve_music_track_job(job_b) is not None
+
+        metrics = engine.get_runtime_metrics()
+        cache = metrics.get("resolution_cache") if isinstance(metrics, dict) else {}
+        latency = metrics.get("resolve_latency_ms") if isinstance(metrics, dict) else {}
+        assert fake_search.calls == 1
+        assert int(cache.get("hits") or 0) >= 1
+        assert int(cache.get("misses") or 0) >= 1
+        assert float(cache.get("hit_rate") or 0.0) > 0.0
+        assert int(latency.get("count") or 0) >= 1
+        assert latency.get("avg") is not None
+
+
+def test_worker_runtime_metrics_track_source_active_slots(monkeypatch) -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={"max_concurrent_jobs_per_source": 1, "max_concurrent_jobs_total": 2},
+            paths=paths,
+            adapters={},
+            search_service=None,
+        )
+
+        engine.store.enqueue_job(
+            origin="test",
+            origin_id="runtime-metrics-active",
+            media_type="video",
+            media_intent="episode",
+            source="youtube_music",
+            url="https://www.youtube.com/watch?v=metricsactive1",
+            output_template={"output_dir": tmp, "final_format": "mkv"},
+        )
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _execute_stub(job, *, stop_event=None):
+            _ = job, stop_event
+            entered.set()
+            release.wait(timeout=2.0)
+
+        monkeypatch.setattr(engine, "_execute_job", _execute_stub)
+
+        lock = engine._get_source_lock("youtube_music")
+        assert lock.acquire(blocking=False) is True
+        runner = threading.Thread(
+            target=engine._run_source_once,
+            args=("youtube_music", lock, None),
+            daemon=False,
+        )
+        runner.start()
+        assert entered.wait(timeout=2.0)
+
+        live_metrics = engine.get_runtime_metrics()
+        active_slots = live_metrics.get("source_active_slots") if isinstance(live_metrics, dict) else {}
+        assert int(active_slots.get("youtube_music") or 0) >= 1
+
+        release.set()
+        runner.join(timeout=3.0)
+        assert runner.is_alive() is False
+
+        final_metrics = engine.get_runtime_metrics()
+        final_active_slots = final_metrics.get("source_active_slots") if isinstance(final_metrics, dict) else {}
+        max_slots = final_metrics.get("source_max_active_slots") if isinstance(final_metrics, dict) else {}
+        assert int(final_active_slots.get("youtube_music") or 0) == 0
+        assert int(max_slots.get("youtube_music") or 0) >= 1
+
+
 def test_same_source_parallel_execute_respects_source_concurrency(monkeypatch) -> None:
     jq = _load_job_queue()
     with tempfile.TemporaryDirectory() as tmp:

@@ -310,6 +310,7 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
         },
         "active_count": 0,
         "active_jobs": [],
+        "runtime_metrics": {},
     }
     db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
     if not db_path:
@@ -385,6 +386,12 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
             logging.exception("Failed to build download queue snapshot")
     finally:
         conn.close()
+    engine = getattr(app.state, "worker_engine", None)
+    if engine is not None and callable(getattr(engine, "get_runtime_metrics", None)):
+        try:
+            summary["runtime_metrics"] = safe_json(engine.get_runtime_metrics() or {})
+        except Exception:
+            logging.exception("Failed to load worker runtime metrics")
     return summary
 
 
