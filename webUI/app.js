@@ -1266,35 +1266,29 @@ async function refreshStatus() {
     const importState = data.playlist_import || {};
     const importActive = !!importState.active;
     const importCurrent = importActive ? (importState.current_job || {}) : {};
-    const importActiveCount = Number.isFinite(Number(importState.active_count))
+    let importActiveCount = Number.isFinite(Number(importState.active_count))
       ? Number(importState.active_count)
       : 0;
-    const importProcessed = Number.isFinite(Number(importCurrent.processed_tracks))
+    let importProcessed = Number.isFinite(Number(importCurrent.processed_tracks))
       ? Number(importCurrent.processed_tracks)
       : 0;
-    const importTotal = Number.isFinite(Number(importCurrent.total_tracks))
+    let importTotal = Number.isFinite(Number(importCurrent.total_tracks))
       ? Number(importCurrent.total_tracks)
       : 0;
-    const importEnqueued = Number.isFinite(Number(importCurrent.enqueued))
+    let importEnqueued = Number.isFinite(Number(importCurrent.enqueued))
       ? Number(importCurrent.enqueued)
       : 0;
-    const importFailed = Number.isFinite(Number(importCurrent.failed))
+    let importFailed = Number.isFinite(Number(importCurrent.failed))
       ? Number(importCurrent.failed)
       : 0;
-    const importResolved = Number.isFinite(Number(importCurrent.resolved))
+    let importResolved = Number.isFinite(Number(importCurrent.resolved))
       ? Number(importCurrent.resolved)
       : 0;
-    const importStateText = importCurrent.state || (importActive ? "running" : "idle");
-    const importPercent = importTotal > 0
+    let importStateText = importCurrent.state || (importActive ? "running" : "idle");
+    let importPercent = importTotal > 0
       ? Math.max(0, Math.min(100, Math.round((importProcessed / importTotal) * 100)))
       : 0;
-    $("#status-import-state").textContent = importStateText;
-    $("#status-import-active-count").textContent = String(importActiveCount);
-    $("#status-import-processed").textContent = `${importProcessed} / ${importTotal}`;
-    $("#status-import-enqueued").textContent = String(importEnqueued);
-    $("#status-import-failed").textContent = String(importFailed);
-    $("#status-import-progress-bar").style.width = `${importPercent}%`;
-    const importSummaryParts = importActive
+    let importSummaryParts = importActive
       ? [
         `${importPercent}% processed`,
         `${importResolved} resolved`,
@@ -1307,6 +1301,42 @@ async function refreshStatus() {
     if (importActive && importCurrent.error) {
       importSummaryParts.push(`error: ${importCurrent.error}`);
     }
+
+    // Fallback when no playlist-import job is active:
+    // surface live queue download progress so this status block does not sit at 0% during playlist runs.
+    if (!importActive && activeQueueCount > 0) {
+      const leadJob = downloadingJobs[0] || activeJobs[0] || null;
+      const leadPercentRaw = toFiniteNumber(leadJob?.progress_percent);
+      const leadDownloaded = toFiniteNumber(leadJob?.progress_downloaded_bytes);
+      const leadTotal = toFiniteNumber(leadJob?.progress_total_bytes);
+      const leadPercent = leadPercentRaw !== null
+        ? Math.max(0, Math.min(100, Math.round(leadPercentRaw)))
+        : ((leadDownloaded !== null && leadTotal !== null && leadTotal > 0)
+          ? Math.max(0, Math.min(100, Math.round((leadDownloaded / leadTotal) * 100)))
+          : 0);
+      importStateText = "downloading";
+      importActiveCount = activeQueueCount;
+      importProcessed = downloadingCount;
+      importTotal = activeQueueCount;
+      importEnqueued = queuedCount + claimedCount;
+      importFailed = failedCount;
+      importResolved = downloadingCount + postprocessingCount;
+      importPercent = leadPercent;
+      importSummaryParts = [
+        `${importPercent}% current`,
+        `${downloadingCount} downloading`,
+        `${queuedCount + claimedCount} pending`,
+      ];
+      if (postprocessingCount > 0) {
+        importSummaryParts.push(`${postprocessingCount} postprocessing`);
+      }
+    }
+    $("#status-import-state").textContent = importStateText;
+    $("#status-import-active-count").textContent = String(importActiveCount);
+    $("#status-import-processed").textContent = `${importProcessed} / ${importTotal}`;
+    $("#status-import-enqueued").textContent = String(importEnqueued);
+    $("#status-import-failed").textContent = String(importFailed);
+    $("#status-import-progress-bar").style.width = `${importPercent}%`;
     $("#status-import-progress-text").textContent = importSummaryParts.join(" · ");
 
     const watcherStatus = data.watcher_status || {};
