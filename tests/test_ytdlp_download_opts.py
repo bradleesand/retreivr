@@ -160,3 +160,40 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
 
         self.assertEqual(profile.get("final_audio_codec"), "opus")
         self.assertEqual(mock_run.call_count, 0)
+
+    def test_mp4_target_retries_without_subtitles_on_ffmpeg_failure(self):
+        with patch(
+            "engine.job_queue._probe_media_profile",
+            side_effect=[
+                {
+                    "final_container": "mp4",
+                    "final_video_codec": "h264",
+                    "final_audio_codec": "opus",
+                },
+                {
+                    "final_container": "mp4",
+                    "final_video_codec": "h264",
+                    "final_audio_codec": "aac",
+                },
+            ],
+        ), patch(
+            "engine.job_queue.subprocess.run",
+            side_effect=[
+                RuntimeError("subtitle copy failed"),
+                None,
+            ],
+        ) as mock_run, patch("engine.job_queue.os.replace"):
+            _path, profile = _enforce_video_codec_container_rules(
+                "/tmp/source.mp4",
+                target_container="mp4",
+            )
+
+        self.assertEqual(profile.get("final_audio_codec"), "aac")
+        self.assertEqual(mock_run.call_count, 2)
+        first_args = mock_run.call_args_list[0][0][0]
+        second_args = mock_run.call_args_list[1][0][0]
+        self.assertIn("-map", first_args)
+        self.assertIn("0:s?", first_args)
+        self.assertIn("-c:s", first_args)
+        self.assertIn("copy", first_args)
+        self.assertIn("-sn", second_args)

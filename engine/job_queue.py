@@ -6123,31 +6123,51 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
         return local_file, profile
 
     mp4_compatible_path = f"{local_file}.mp4compat"
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(local_file),
-        "-map",
-        "0:v?",
-        "-map",
-        "0:a?",
-        "-map",
-        "0:s?",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-c:s",
-        "copy",
-        "-movflags",
-        "+faststart",
-        mp4_compatible_path,
-    ]
-    try:
+
+    def _run_enforcement(*, include_subtitles: bool):
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(local_file),
+            "-map",
+            "0:v?",
+            "-map",
+            "0:a?",
+        ]
+        if include_subtitles:
+            cmd.extend(["-map", "0:s?", "-c:s", "copy"])
+        else:
+            cmd.append("-sn")
+        cmd.extend(
+            [
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                mp4_compatible_path,
+            ]
+        )
         subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+    first_error = None
+    try:
+        _run_enforcement(include_subtitles=True)
     except Exception as exc:
-        raise RuntimeError(f"mp4_audio_codec_enforcement_failed: {exc}") from exc
+        first_error = exc
+        logger.warning(
+            "mp4 audio enforcement retrying without subtitles for %s: %s",
+            local_file,
+            exc,
+        )
+        try:
+            _run_enforcement(include_subtitles=False)
+        except Exception as retry_exc:
+            raise RuntimeError(
+                f"mp4_audio_codec_enforcement_failed: first={first_error}; retry_without_subtitles={retry_exc}"
+            ) from retry_exc
 
     os.replace(mp4_compatible_path, local_file)
     updated = _probe_media_profile(local_file)
