@@ -3639,7 +3639,8 @@ function renderHomeCandidateRow(candidate, item) {
   return row;
 }
 
-function renderHomeDirectUrlCard(preview, status) {
+function renderHomeDirectUrlCard(preview, status, options = {}) {
+  const hideStatusBadge = !!options.hideStatusBadge;
   const card = document.createElement("article");
   card.className = "home-result-card";
   card.dataset.directUrl = preview.url || "";
@@ -3649,7 +3650,9 @@ function renderHomeDirectUrlCard(preview, status) {
   const summary = preview.title || preview.url || "Direct URL";
   title.innerHTML = `<strong>${summary}</strong>`;
   header.appendChild(title);
-  header.appendChild(renderHomeStatusBadge(status));
+  if (!hideStatusBadge) {
+    header.appendChild(renderHomeStatusBadge(status));
+  }
   card.appendChild(header);
   const detail = document.createElement("div");
   detail.className = "home-candidate-title";
@@ -4471,7 +4474,11 @@ async function submitHomeSearch(autoEnqueue) {
     if (isValidHttpUrl(inputValue)) {
       const playlistId = extractPlaylistIdFromUrl(inputValue);
       if (playlistId) {
-        await handleHomePlaylistUrl(inputValue, playlistId, destinationValue, autoEnqueue, messageEl);
+        if (autoEnqueue) {
+          await handleHomePlaylistUrl(inputValue, playlistId, destinationValue, autoEnqueue, messageEl);
+        } else {
+          await handleHomePlaylistUrlPreview(inputValue, playlistId, messageEl);
+        }
         return;
       }
       if (!autoEnqueue) {
@@ -4585,6 +4592,61 @@ async function fetchHomePlaylistPreview(playlistId) {
     return {};
   }
   return fetchJson(`/api/playlist/preview?playlist_id=${encodeURIComponent(String(playlistId))}`);
+}
+
+async function handleHomePlaylistUrlPreview(url, playlistId, messageEl) {
+  if (!messageEl) return;
+  stopHomeDirectJobPolling();
+  stopHomeResultPolling();
+  stopHomeJobPolling();
+  state.homeSearchMode = "searchOnly";
+  state.homeDirectJob = null;
+  state.homeSearchRequestId = null;
+  state.homeRequestContext = {};
+  state.homeBestScores = {};
+  state.homeCandidateCache = {};
+  state.homeCandidatesLoading = {};
+  state.homeCandidateData = {};
+  state.homeDirectPreview = {
+    title: `YouTube Playlist (${playlistId})`,
+    url,
+    source: "playlist",
+    uploader: null,
+    thumbnail_url: null,
+    allow_download: true,
+    job_status: "",
+  };
+  showHomeResults(true);
+  setHomeResultsStatus("Playlist preview");
+  setHomeResultsDetail("Review playlist preview and click Download to enqueue all videos.", false);
+  const container = $("#home-results-list");
+  if (container) {
+    container.textContent = "";
+    container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "candidate_found", { hideStatusBadge: true }));
+  }
+  setHomeResultsState({ hasResults: true, terminal: false });
+  setHomeSearchActive(false);
+  setHomeSearchControlsEnabled(true);
+  setNotice(messageEl, "Playlist URL detected. Click Download to enqueue all playlist videos.", false);
+  try {
+    const preview = await fetchHomePlaylistPreview(playlistId);
+    const thumbnailUrl = String(preview?.thumbnail_url || "").trim();
+    if (!thumbnailUrl || !state.homeDirectPreview) {
+      return;
+    }
+    state.homeDirectPreview = {
+      ...state.homeDirectPreview,
+      thumbnail_url: thumbnailUrl,
+    };
+    const liveContainer = $("#home-results-list");
+    if (!liveContainer) {
+      return;
+    }
+    liveContainer.textContent = "";
+    liveContainer.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "candidate_found", { hideStatusBadge: true }));
+  } catch (_err) {
+    // Best-effort only.
+  }
 }
 
 async function importHomePlaylistFile() {
@@ -6287,7 +6349,18 @@ function bindEvents() {
         const directUrl = directButton.dataset.directUrl;
         if (!directUrl) return;
         directButton.disabled = true;
-        await handleHomeDirectUrl(directUrl, $("#home-destination")?.value.trim() || "", $("#home-search-message"));
+        const playlistId = extractPlaylistIdFromUrl(directUrl);
+        if (playlistId) {
+          await handleHomePlaylistUrl(
+            directUrl,
+            playlistId,
+            $("#home-destination")?.value.trim() || "",
+            true,
+            $("#home-search-message")
+          );
+        } else {
+          await handleHomeDirectUrl(directUrl, $("#home-destination")?.value.trim() || "", $("#home-search-message"));
+        }
         return;
       }
       const button = event.target.closest('button[data-action="home-download"]');
