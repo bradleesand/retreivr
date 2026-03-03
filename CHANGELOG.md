@@ -13,6 +13,17 @@ All notable changes to this project will be documented here.
 
 ### Changed
 - Music search pipeline hardened without relaxing gates: deterministic multi-rung fallback, bounded duration expansion, and cleaner retry escalation.
+- Music search retrieval throughput improved for album/music runs:
+  - per-rung adapter retrieval now runs in parallel across `youtube_music`, `youtube`, `soundcloud`, and `bandcamp` (deterministic source-priority merge preserved)
+  - import/runtime search now overlaps candidate pre-resolution with active downloads
+  - pre-resolution lookahead expanded from a single next track to a bounded window (`music_preresolve_lookahead`, default `3`, cap `4`)
+  - in-process MB-bound resolution cache reuse strengthened for repeated `(recording_mbid, release_mbid)` lookups in the same runtime
+  - conservative music download fragment concurrency default added (`yt_dlp_opts.concurrent_fragment_downloads=2`, still overrideable)
+- Import pipeline throughput improved for large library files:
+  - MusicBrainz binding now resolves in bounded parallel workers (`import_mb_binding_workers`, default `4`, cap `5`)
+  - exact duplicate track rows in one import (`artist/title/album`) are deduped before MB lookup and fan out to per-track enqueue/progress updates
+  - worker queue poll interval reduced from `5s` to `1s` to cut dispatch latency
+  - same-source worker execution now supports bounded concurrency with per-source semaphores (default `2`, cap `4`; configurable via `max_concurrent_jobs_per_source` or `source_concurrency`)
 - EP album runs now use a bounded EP-only retrieval refinement rung (`{artist} - {track} audio topic`) with no scoring/threshold changes.
 - Search normalization/parenthetical handling consolidated into shared scoring utilities (search influence only; canonical metadata unchanged).
 - Music track artist scoring now handles featured credits more robustly (`feat/ft/featuring`): primary-artist and `album_artist` variants are considered for artist similarity and channel-authority matching.
@@ -35,6 +46,9 @@ All notable changes to this project will be documented here.
 
 ### Fixed
 - False negatives where strong YouTube/SoundCloud matches were rejected mainly due to featured-credit artist tokenization and missing album metadata.
+- Playlist/library import progress accuracy regressions:
+  - progress snapshots now reflect completed work units (no pre-item off-by-one drift)
+  - finalization phase is treated as active in Home import status rendering/polling
 - Album metadata search now includes EP release groups alongside albums (`primarytype:album OR ep`) for artist+album and album-only flows.
 - MusicBrainz pair resolution no longer rejects EP releases as `invalid_release_type`/`no_official_album` in album-run binding paths.
 - Release enrichment fallback now accepts official EP releases (not only albums) when completing canonical music-track metadata.
