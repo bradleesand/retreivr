@@ -881,6 +881,7 @@ def run_single_download(
     video_url,
     destination=None,
     final_format_override=None,
+    force_redownload=False,
     *,
     paths: EnginePaths,
     status=None,
@@ -957,6 +958,7 @@ def run_single_download(
             return False
         job_id, created, _dedupe_reason = store.enqueue_job(
             log_duplicate_event=False,
+            force_requeue=bool(force_redownload),
             **enqueue_payload,
         )
         if created:
@@ -1014,6 +1016,7 @@ def run_single_playlist(
     destination=None,
     account=None,
     final_format_override=None,
+    force_redownload=False,
     *,
     paths: EnginePaths,
     status=None,
@@ -1047,11 +1050,12 @@ def run_single_playlist(
         run_config,
         paths=paths,
         status=status,
+        force_redownload=bool(force_redownload),
     )
     return status
 
 
-def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ignored):
+def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, force_redownload=False, **_ignored):
     if status is None:
         status = EngineStatus()
 
@@ -1136,7 +1140,7 @@ def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ign
                 if not vid:
                     continue
                 video_id = extract_video_id(vid) or vid
-                if is_video_downloaded(conn, video_id):
+                if not force_redownload and is_video_downloaded(conn, video_id):
                     continue
 
                 video_url = build_video_url(vid)
@@ -1168,6 +1172,7 @@ def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ign
                     continue
 
                 job_id, created, _dedupe_reason = store.enqueue_job(
+                    force_requeue=bool(force_redownload),
                     **enqueue_payload,
                 )
                 if created:
@@ -1199,6 +1204,7 @@ def run_archive(
     delivery_mode=None,
     stop_event=None,
     run_source="manual",
+    force_redownload=False,
     music_mode=None,
     **_ignored,
 ):
@@ -1224,6 +1230,7 @@ def run_archive(
             single_url,
             destination,
             final_format_override,
+            force_redownload=force_redownload,
             paths=paths,
             status=status,
             stop_event=stop_event,
@@ -1232,5 +1239,11 @@ def run_archive(
         status.single_download_ok = ok
         return status
 
-    run_once(config, paths=paths, status=status, stop_event=stop_event)
+    run_once(
+        config,
+        paths=paths,
+        status=status,
+        stop_event=stop_event,
+        force_redownload=bool(force_redownload),
+    )
     return status

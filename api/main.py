@@ -3077,6 +3077,7 @@ async def _start_run_with_config(
                 else:
                     _log_transition("RUN_START", source=run_source, run_id=app.state.run_id)
                     logging.info("Manual run starting (source=%s)", run_source)
+                manual_force_redownload = bool(run_source == "api")
                 if playlist_id:
                     run_callable = functools.partial(
                         run_single_playlist,
@@ -3085,6 +3086,7 @@ async def _start_run_with_config(
                         destination,
                         playlist_account,
                         effective_final_format_override,
+                        manual_force_redownload,
                         paths=app.state.paths,
                         status=status,
                         js_runtime_override=js_runtime,
@@ -3151,6 +3153,7 @@ async def _start_run_with_config(
                             music_mode=bool(music_mode) if music_mode is not None else False,
                             skip_downtime=skip_downtime,
                             delivery_mode=delivery_mode or "server",
+                            force_redownload=manual_force_redownload,
                         )
                 await anyio.to_thread.run_sync(run_callable)
                 if (
