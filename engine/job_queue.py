@@ -15,7 +15,7 @@ import time
 import urllib.parse
 import unicodedata
 import hashlib
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -221,6 +221,8 @@ _MUSIC_SOURCE_PRIORITY_WEIGHTS = {
 _VIDEO_CONTAINERS = {"mkv", "mp4", "webm"}
 _MUSIC_AUDIO_FORMAT_WARNED = False
 _MUSIC_REVIEW_FOLDER_NAME = "Needs Review"
+_MUSIC_DEFAULT_CONCURRENT_FRAGMENT_DOWNLOADS = 2
+_MUSIC_RESOLUTION_CACHE_MAX_ENTRIES = 256
 
 
 @dataclass(frozen=True)
@@ -1377,6 +1379,8 @@ class DownloadWorkerEngine:
         self._cancel_lock = threading.Lock()
         self._pre_resolve_lock = threading.Lock()
         self._pre_resolve_inflight = set()
+        self._music_resolution_cache_lock = threading.Lock()
+        self._music_resolution_cache = OrderedDict()
 
     def _extract_resolved_candidate(self, resolved):
         if not resolved:
@@ -1738,6 +1742,12 @@ class DownloadWorkerEngine:
             release_mbid=release_mbid,
         )
         used_pre_resolved = bool(resolved)
+        if not resolved:
+            resolved = self._get_cached_music_resolution(
+                recording_mbid=recording_mbid,
+                release_mbid=release_mbid,
+            )
+        used_cached_resolved = bool(resolved) and not used_pre_resolved
         retry_start_rung = 0
         track_total_value = None
         for candidate_total in (
@@ -1813,7 +1823,7 @@ class DownloadWorkerEngine:
         resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
         search_meta = (
             getattr(self.search_service, "last_music_track_search", {})
-            if self.search_service and not used_pre_resolved
+            if self.search_service and not used_pre_resolved and not used_cached_resolved
             else {}
         )
         if isinstance(search_meta, dict):
@@ -1934,6 +1944,15 @@ class DownloadWorkerEngine:
                 self.store.merge_output_template_fields(job.id, {"runtime_pre_resolved": None})
             except Exception:
                 logger.exception("[MUSIC] failed clearing runtime_pre_resolved job_id=%s", job.id)
+        elif used_cached_resolved:
+            _log_event(
+                logging.INFO,
+                "music_track_resolution_cache_hit",
+                job_id=job.id,
+                recording_mbid=recording_mbid,
+                release_mbid=release_mbid,
+                candidate_url=resolved_url,
+            )
 
         source = resolved_source or resolve_source(resolved_url)
         if str(source or "").strip().lower() == "mb_relationship":
@@ -1950,6 +1969,17 @@ class DownloadWorkerEngine:
             candidate_id,
             duration_delta_ms,
             "<pending>",
+        )
+        self._put_cached_music_resolution(
+            recording_mbid=recording_mbid,
+            release_mbid=release_mbid,
+            resolved={
+                "url": resolved_url,
+                "source": source,
+                "candidate_id": candidate_id,
+                "final_score": selected_score,
+                "duration_delta_ms": duration_delta_ms,
+            },
         )
         external_id = extract_video_id(resolved_url) if source in {"youtube", "youtube_music"} else None
         canonical_url = canonicalize_url(source, resolved_url, external_id)
@@ -2277,6 +2307,45 @@ class DownloadWorkerEngine:
             "final_score": runtime.get("selected_score"),
             "duration_delta_ms": runtime.get("duration_delta_ms"),
         }
+
+    def _music_resolution_cache_key(self, *, recording_mbid, release_mbid):
+        rec = str(recording_mbid or "").strip().lower()
+        rel = str(release_mbid or "").strip().lower()
+        if not rec or not rel:
+            return None
+        return rec, rel
+
+    def _get_cached_music_resolution(self, *, recording_mbid, release_mbid):
+        key = self._music_resolution_cache_key(recording_mbid=recording_mbid, release_mbid=release_mbid)
+        if key is None:
+            return None
+        with self._music_resolution_cache_lock:
+            payload = self._music_resolution_cache.get(key)
+            if not isinstance(payload, dict):
+                return None
+            self._music_resolution_cache.move_to_end(key)
+            return dict(payload)
+
+    def _put_cached_music_resolution(self, *, recording_mbid, release_mbid, resolved):
+        key = self._music_resolution_cache_key(recording_mbid=recording_mbid, release_mbid=release_mbid)
+        if key is None or not isinstance(resolved, dict):
+            return
+        url = str(resolved.get("url") or "").strip()
+        if not _is_http_url(url):
+            return
+        source = str(resolved.get("source") or "").strip() or resolve_source(url)
+        payload = {
+            "url": url,
+            "source": source,
+            "candidate_id": resolved.get("candidate_id"),
+            "final_score": resolved.get("final_score"),
+            "duration_delta_ms": resolved.get("duration_delta_ms"),
+        }
+        with self._music_resolution_cache_lock:
+            self._music_resolution_cache[key] = payload
+            self._music_resolution_cache.move_to_end(key)
+            while len(self._music_resolution_cache) > _MUSIC_RESOLUTION_CACHE_MAX_ENTRIES:
+                self._music_resolution_cache.popitem(last=False)
 
     def _maybe_preresolve_next_music_job(self, current_job, *, stop_event=None):
         if not self.search_service:
@@ -4064,6 +4133,9 @@ def build_ytdlp_opts(context):
             opts["addmetadata"] = True
             opts["embedthumbnail"] = True
             opts["writethumbnail"] = True
+            # Conservative throughput boost for music downloads; callers can still override
+            # via yt_dlp_opts.concurrent_fragment_downloads.
+            opts["concurrent_fragment_downloads"] = _MUSIC_DEFAULT_CONCURRENT_FRAGMENT_DOWNLOADS
         else:
             # Video mode strategy:
             # - Keep download selector stable and quality-first across all final containers.

@@ -76,6 +76,31 @@ def test_music_job_builds_audio_ytdlp_opts(jq) -> None:
     extract_pp = next((pp for pp in postprocessors if pp.get("key") == "FFmpegExtractAudio"), None)
     assert extract_pp is not None
     assert extract_pp.get("preferredcodec") == "mp3"
+    assert opts.get("concurrent_fragment_downloads") == 2
+
+
+def test_music_job_allows_override_of_fragment_concurrency(jq) -> None:
+    context = {
+        "operation": "download",
+        "url": "https://www.youtube.com/watch?v=abc123xyz00",
+        "media_type": "music",
+        "media_intent": "music_track",
+        "final_format": "mkv",
+        "output_template": "%(id)s.%(ext)s",
+        "output_template_meta": {
+            "final_format": "mkv",
+            "music_final_format": "mp3",
+        },
+        "config": {
+            "final_format": "mkv",
+            "music_final_format": "mp3",
+        },
+        "overrides": {
+            "concurrent_fragment_downloads": 3,
+        },
+    }
+    opts = jq.build_ytdlp_opts(context)
+    assert opts.get("concurrent_fragment_downloads") == 3
 
 
 def test_video_job_builds_video_ytdlp_opts(jq) -> None:
