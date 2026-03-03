@@ -1080,3 +1080,129 @@ def test_music_resolve_uses_runtime_preresolved_candidate_without_search() -> No
         assert resolved.url == "https://www.youtube.com/watch?v=abc123xyz00"
         assert resolved.source in {"youtube", "youtube_music"}
         assert fake_search.calls == 0
+
+
+def test_music_resolve_uses_in_memory_resolution_cache_for_same_mb_pair() -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+
+        class _FakeSearchService:
+            def __init__(self):
+                self.calls = 0
+                self.last_music_track_search = {}
+
+            def search_music_track_best_match(self, *args, **kwargs):
+                _ = args, kwargs
+                self.calls += 1
+                return {
+                    "url": "https://www.youtube.com/watch?v=abc123xyz00",
+                    "source": "youtube_music",
+                    "candidate_id": "cand-1",
+                    "final_score": 0.95,
+                    "duration_ms": 200000,
+                }
+
+        fake_search = _FakeSearchService()
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={},
+            paths=paths,
+            adapters={},
+            search_service=fake_search,
+        )
+
+        template = {
+            "artist": "Artist",
+            "track": "Song",
+            "album": "Album",
+            "recording_mbid": "rec-cache-1",
+            "mb_release_id": "rel-cache-1",
+            "canonical_metadata": {
+                "artist": "Artist",
+                "track": "Song",
+                "album": "Album",
+                "recording_mbid": "rec-cache-1",
+                "mb_release_id": "rel-cache-1",
+            },
+        }
+
+        job_a = jq.DownloadJob(
+            id="job-cache-a",
+            origin="music_album",
+            origin_id="album-run-cache",
+            media_type="music",
+            media_intent="music_track",
+            source="youtube_music",
+            url="musicbrainz://recording/rec-cache-1",
+            input_url="musicbrainz://recording/rec-cache-1",
+            canonical_url="musicbrainz://recording/rec-cache-1",
+            external_id=None,
+            status=jq.JOB_STATUS_QUEUED,
+            queued=None,
+            claimed=None,
+            downloading=None,
+            postprocessing=None,
+            completed=None,
+            failed=None,
+            canceled=None,
+            attempts=0,
+            max_attempts=3,
+            created_at=None,
+            updated_at=None,
+            last_error=None,
+            trace_id="trace-cache-a",
+            output_template=dict(template),
+            resolved_destination=tmp,
+            canonical_id="music_track:rec-cache-1:rel-cache-1:disc-1:a",
+            file_path=None,
+        )
+
+        job_b = jq.DownloadJob(
+            id="job-cache-b",
+            origin="music_album",
+            origin_id="album-run-cache",
+            media_type="music",
+            media_intent="music_track",
+            source="youtube_music",
+            url="musicbrainz://recording/rec-cache-1",
+            input_url="musicbrainz://recording/rec-cache-1",
+            canonical_url="musicbrainz://recording/rec-cache-1",
+            external_id=None,
+            status=jq.JOB_STATUS_QUEUED,
+            queued=None,
+            claimed=None,
+            downloading=None,
+            postprocessing=None,
+            completed=None,
+            failed=None,
+            canceled=None,
+            attempts=0,
+            max_attempts=3,
+            created_at=None,
+            updated_at=None,
+            last_error=None,
+            trace_id="trace-cache-b",
+            output_template=dict(template),
+            resolved_destination=tmp,
+            canonical_id="music_track:rec-cache-1:rel-cache-1:disc-1:b",
+            file_path=None,
+        )
+
+        resolved_a = engine._resolve_music_track_job(job_a)
+        resolved_b = engine._resolve_music_track_job(job_b)
+
+        assert resolved_a is not None
+        assert resolved_b is not None
+        assert resolved_a.url == "https://www.youtube.com/watch?v=abc123xyz00"
+        assert resolved_b.url == "https://www.youtube.com/watch?v=abc123xyz00"
+        assert fake_search.calls == 1
