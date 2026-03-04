@@ -4908,7 +4908,15 @@ async function runSearchResolutionOnce({ preferRequestId = null, showMessage = t
     if (showMessage) {
       setNotice(messageEl, "Running resolution...", false);
     }
-    const data = await fetchJson("/api/search/resolve/once", { method: "POST" });
+    const payload = {};
+    if (preferRequestId) {
+      payload.request_id = preferRequestId;
+    }
+    const data = await fetchJson("/api/search/resolve/once", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
     const resolvedId = data.request_id || preferRequestId || null;
     if (showMessage) {
       if (data.request_id) {
