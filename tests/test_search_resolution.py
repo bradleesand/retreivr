@@ -145,6 +145,56 @@ class SearchResolutionTests(unittest.TestCase):
         self.assertGreaterEqual(int(items[0].get("candidate_count") or 0), 1)
         self.assertEqual(items[0].get("status"), "candidate_found")
 
+    def test_seeded_candidates_remain_visible_after_adapter_batches(self):
+        service = SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"stub": StubAdapter()},
+            config={"search_cache_enabled": True},
+            paths=self.paths,
+            canonical_resolver=StubCanonicalResolver(),
+        )
+        payload = {
+            "intent": "track",
+            "artist": "Example Artist",
+            "track": "Example Track",
+            "source_priority": ["stub"],
+            "auto_enqueue": False,
+        }
+        request_id_a = service.create_search_request(payload)
+        row_a = service.store.get_request_row(request_id_a)
+        service.store.create_items_for_request(row_a)
+        item_a = service.store.list_items(request_id_a)[0]
+        cache_key, query = service._search_cache_key_for_item(item_a, row_a)  # type: ignore[attr-defined]
+        service.store.replace_search_cache(
+            cache_key=cache_key,
+            query_text=query,
+            media_type="generic",
+            candidates=[
+                {
+                    "source": "stub",
+                    "url": "https://example.test/cached-media",
+                    "title": "Cached Candidate",
+                    "uploader": "Cached Uploader",
+                    "duration_sec": 201,
+                    "candidate_id": "cached-1",
+                }
+            ],
+        )
+
+        request_id_b = service.create_search_request(payload)
+        response_b = service.get_search_request(request_id_b) or {}
+        item_b = (response_b.get("items") or [None])[0]
+        self.assertIsNotNone(item_b)
+        item_id = item_b["id"]
+        seeded_urls = {row.get("url") for row in service.list_item_candidates(item_id)}
+        self.assertIn("https://example.test/cached-media", seeded_urls)
+
+        service.run_search_resolution_once(request_id=request_id_b)
+        final_urls = {row.get("url") for row in service.list_item_candidates(item_id)}
+        self.assertIn("https://example.test/cached-media", final_urls)
+        self.assertIn("https://example.test/media", final_urls)
+
     def test_reverse_lookup_annotation_in_search_candidates(self):
         dataset_root = os.path.join(self.tmpdir.name, "community_cache_dataset")
         os.makedirs(os.path.join(dataset_root, "youtube", "recording", "aa"), exist_ok=True)

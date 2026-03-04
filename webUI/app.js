@@ -122,6 +122,7 @@ const HOME_STATUS_CLASS_MAP = {
 };
 const HOME_FINAL_STATUSES = new Set(["completed", "completed_with_skips", "failed"]);
 const HOME_RESULT_TIMEOUT_MS = 18000;
+const HOME_RESULT_POLL_INTERVAL_MS = 1000;
 const DIRECT_URL_PLAYLIST_ERROR =
   "Playlist URLs are not supported in Direct URL mode. Please add this playlist via Scheduler or Playlist settings.";
 const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
@@ -4445,7 +4446,7 @@ function startHomeResultPolling(requestId) {
       stopHomeResultPolling();
     }
   };
-  state.homeResultsTimer = setInterval(tick, 4000);
+  state.homeResultsTimer = setInterval(tick, HOME_RESULT_POLL_INTERVAL_MS);
   tick();
 }
 

@@ -3118,6 +3118,20 @@ class SearchResolutionService:
             source_priority = _parse_source_priority(request_row.get("source_priority_json"))
             max_candidates = int(request_row.get("max_candidates_per_source") or 5)
             scored = []
+            # Keep cache-seeded candidates in the working set so they remain visible
+            # while adapter batches arrive.
+            try:
+                seeded_rows = self.store.list_candidates(item["id"])
+            except Exception:
+                seeded_rows = []
+            for seeded in seeded_rows or []:
+                if not isinstance(seeded, dict):
+                    continue
+                if not _is_http_url(seeded.get("url")):
+                    continue
+                seeded_candidate = dict(seeded)
+                seeded_candidate["id"] = str(seeded_candidate.get("id") or uuid4().hex)
+                scored.append(seeded_candidate)
 
             # --- Parallel adapter execution (bounded) ---
             futures = {}
