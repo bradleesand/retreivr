@@ -2836,7 +2836,8 @@ async function handleHomeStandardSearch(autoEnqueue, inputValue, messageEl) {
   setNotice(messageEl, `${modeLabel}: created ${data.request_id}`, false);
   showHomeResults(true);
   startHomeResultPolling(data.request_id);
-  await runSearchResolutionOnce({ preferRequestId: data.request_id, showMessage: false });
+  // Home search should remain non-blocking so progressive candidate updates can
+  // render while the background resolver processes the queue.
 }
 
 function normalizeMusicAlbumCandidates(rawCandidates) {
