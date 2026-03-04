@@ -3491,12 +3491,6 @@ async function loadHomeCandidates(item, container) {
       placeholder.remove();
     }
     const requestId = item.request_id || state.homeSearchRequestId;
-    let jobSnapshot = null;
-    try {
-      jobSnapshot = await fetchHomeJobSnapshot(requestId);
-    } catch (err) {
-      jobSnapshot = null;
-    }
     setHomeResultsState({ hasResults: true, terminal: false });
     let rendered = state.homeCandidateCache[item.id];
     if (!rendered) {
@@ -3522,23 +3516,39 @@ async function loadHomeCandidates(item, container) {
         row = renderHomeCandidateRow(candidate, item);
         container.appendChild(row);
       }
-      const job = candidate.url ? jobSnapshot?.jobsByUrl?.get(candidate.url) : null;
-      updateHomeCandidateRowState(row, candidate, item, job);
+      updateHomeCandidateRowState(row, candidate, item, null);
       if (candidate.id) {
         state.homeCandidateData[candidate.id] = { candidate, item };
       }
     });
-    if (jobSnapshot && !state.homeJobTimer) {
-      const hasActive = Array.from(jobSnapshot.jobsByUrl.values()).some((job) =>
-        ["queued", "claimed", "downloading", "postprocessing"].includes(job.status)
-      );
-      if (hasActive) {
-        startHomeJobPolling(requestId);
-      }
-    }
     state.homeCandidateCache[item.id] = rendered;
     if (Number.isFinite(bestScore)) {
       recordHomeCandidateScore(requestId, bestScore);
+    }
+    // Enrich with job-state after candidate rows are visible.
+    let jobSnapshot = null;
+    try {
+      jobSnapshot = await fetchHomeJobSnapshot(requestId);
+    } catch (err) {
+      jobSnapshot = null;
+    }
+    if (jobSnapshot) {
+      candidates.forEach((candidate) => {
+        if (!candidate?.id) return;
+        const selector = `[data-candidate-id="${CSS.escape(candidate.id)}"]`;
+        const row = container.querySelector(selector);
+        if (!row) return;
+        const job = candidate.url ? jobSnapshot.jobsByUrl.get(candidate.url) : null;
+        updateHomeCandidateRowState(row, candidate, item, job || null);
+      });
+      if (!state.homeJobTimer) {
+        const hasActive = Array.from(jobSnapshot.jobsByUrl.values()).some((job) =>
+          ["queued", "claimed", "downloading", "postprocessing"].includes(job.status)
+        );
+        if (hasActive) {
+          startHomeJobPolling(requestId);
+        }
+      }
     }
   } catch (err) {
     container.textContent = "";
