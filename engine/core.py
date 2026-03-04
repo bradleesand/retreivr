@@ -229,10 +229,32 @@ def _finalize_client_delivery(delivery_id, *, timeout=False):
     return bool(entry.get("delivered"))
 
 
-def load_config(path):
+def _write_config_atomic(path, config):
+    target_dir = os.path.dirname(path) or "."
+    os.makedirs(target_dir, exist_ok=True)
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w") as handle:
+        json.dump(config, handle, indent=4, sort_keys=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, path)
+
+
+def load_config(path, *, write_back_defaults=False):
     with open(path, "r") as f:
         loaded = json.load(f)
-    return apply_config_defaults(loaded)
+    normalized = apply_config_defaults(loaded)
+    if (
+        write_back_defaults
+        and isinstance(loaded, dict)
+        and isinstance(normalized, dict)
+        and normalized != loaded
+    ):
+        try:
+            _write_config_atomic(path, normalized)
+        except Exception:
+            logging.warning("Failed to persist config defaults to %s", path, exc_info=True)
+    return normalized
 
 
 def apply_config_defaults(config):

@@ -2918,7 +2918,7 @@ def _read_config_or_404():
     if not os.path.exists(config_path):
         raise HTTPException(status_code=404, detail=f"Config not found: {config_path}")
     try:
-        config = load_config(config_path)
+        config = load_config(config_path, write_back_defaults=True)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON in config: {exc}") from exc
     except OSError as exc:
@@ -2973,7 +2973,7 @@ def _read_config_for_scheduler():
         logging.error("Schedule skipped: config not found at %s", config_path)
         return None
     try:
-        config = load_config(config_path)
+        config = load_config(config_path, write_back_defaults=True)
     except json.JSONDecodeError as exc:
         logging.error("Schedule skipped: invalid JSON in config: %s", exc)
         return None
@@ -2998,7 +2998,7 @@ def _read_config_for_watcher():
         logging.error("Watcher skipped: config not found at %s", config_path)
         return cached
     try:
-        config = load_config(config_path)
+        config = load_config(config_path, write_back_defaults=True)
     except json.JSONDecodeError as exc:
         logging.error("Watcher skipped: invalid JSON in config: %s", exc)
         return cached
@@ -4870,7 +4870,7 @@ async def api_put_config_path(payload: ConfigPathRequest):
     if not os.path.exists(target):
         raise HTTPException(status_code=404, detail=f"Config not found: {target}")
     try:
-        config = load_config(target)
+        config = load_config(target, write_back_defaults=True)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON in config: {exc}") from exc
     except OSError as exc:
