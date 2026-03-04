@@ -724,6 +724,64 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
                 continue
             self.assertEqual(normalized, reference)
 
+    def test_retrieve_candidates_merges_same_transport_identity_and_preserves_provenance(self):
+        query = '"Artist" "Song" "Album" audio official topic'
+        adapter = _QueryAwareAdapter(
+            "youtube",
+            {
+                query: [
+                    {
+                        "source": "youtube",
+                        "candidate_id": "adapter-rich",
+                        "url": "https://youtu.be/abc123xyz00",
+                        "title": "Artist - Song (Official Audio)",
+                        "uploader": "Artist - Topic",
+                        "artist_detected": "Artist",
+                        "track_detected": "Song",
+                        "album_detected": "Album",
+                        "duration_sec": 200,
+                        "official": True,
+                    }
+                ]
+            },
+        )
+        service = self.se.SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"youtube": adapter},
+            config={},
+            paths=None,
+            canonical_resolver=_StubCanonicalResolver(),
+        )
+        retrieved = service.retrieve_candidates(
+            {
+                "query": query,
+                "limit": 6,
+                "query_label": "rung_0",
+                "rung": 0,
+                "first_rung": 0,
+                "mb_injected_candidates": [],
+                "community_seeded_candidates": [
+                    {
+                        "source": "youtube",
+                        "candidate_id": "community-seed",
+                        "url": "https://www.youtube.com/watch?v=abc123xyz00",
+                        "title": "",
+                        "uploader": "",
+                        "duration_sec": None,
+                        "community_seeded": True,
+                    }
+                ],
+            }
+        )
+        self.assertEqual(len(retrieved), 1)
+        merged = retrieved[0]
+        self.assertTrue(bool(merged.get("community_seeded")))
+        self.assertEqual(merged.get("title"), "Artist - Song (Official Audio)")
+        self.assertEqual(merged.get("uploader"), "Artist - Topic")
+        self.assertEqual(int(merged.get("duration_sec") or 0), 200)
+        self.assertIn("youtube", merged.get("provenance_sources") or [])
+
     def test_topic_channel_with_strong_artist_overlap_gets_authority_bonus(self):
         expected = {
             "artist": "Kenny Chesney",
@@ -1529,6 +1587,123 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         rejections = meta.get("mb_injected_rejections") or {}
         self.assertGreaterEqual(int(rejections.get("mb_injected_failed_variant") or 0), 1)
 
+    def test_community_cache_seed_candidate_can_win_when_enabled(self):
+        service = self.se.SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"youtube_music": _StubAdapter("youtube_music", [])},
+            config={"community_cache_enabled": True},
+            paths=None,
+            canonical_resolver=_StubCanonicalResolver(),
+        )
+        original_lookup = self.se.community_cache.cached_lookup
+        try:
+            self.se.community_cache.cached_lookup = lambda _mbid: {
+                "video_id": "community12345",
+                "duration_ms": 200000,
+                "confidence": 0.98,
+            }
+            service._probe_mb_relationship_candidate = (  # type: ignore[attr-defined]
+                lambda url, **kwargs: (
+                    {
+                        "source": "mb_relationship",
+                        "candidate_id": "community-win",
+                        "url": str(url),
+                        "title": "Artist - Song",
+                        "uploader": "Artist - Topic",
+                        "artist_detected": "Artist",
+                        "track_detected": "Song",
+                        "album_detected": "Album",
+                        "duration_sec": 200,
+                        "official": True,
+                    },
+                    None,
+                )
+            )
+            best = service.search_music_track_best_match(
+                "Artist",
+                "Song",
+                album="Album",
+                duration_ms=200000,
+                limit=6,
+                recording_mbid="rec-community-1",
+            )
+        finally:
+            self.se.community_cache.cached_lookup = original_lookup
+        self.assertIsNotNone(best)
+        self.assertEqual(best.get("candidate_id"), "community-win")
+        self.assertTrue(best.get("community_seeded"))
+        meta = service.last_music_track_search or {}
+        self.assertEqual(int(meta.get("community_seeded_candidates") or 0), 1)
+        self.assertTrue(meta.get("community_seeded_selected"))
+
+    def test_community_cache_duration_mismatch_falls_back_to_ladder(self):
+        service = self.se.SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={
+                "youtube_music": _StubAdapter(
+                    "youtube_music",
+                    [
+                        _candidate(
+                            source="youtube_music",
+                            candidate_id="ladder-ok-community",
+                            title="Artist - Song",
+                            uploader="Artist - Topic",
+                            artist="Artist",
+                            track="Song",
+                            album="Album",
+                            duration_sec=200,
+                        )
+                    ],
+                )
+            },
+            config={"community_cache_enabled": True},
+            paths=None,
+            canonical_resolver=_StubCanonicalResolver(),
+        )
+        original_lookup = self.se.community_cache.cached_lookup
+        try:
+            self.se.community_cache.cached_lookup = lambda _mbid: {
+                "video_id": "community-mismatch",
+                "duration_ms": 320000,
+                "confidence": 0.93,
+            }
+            best = service.search_music_track_best_match(
+                "Artist",
+                "Song",
+                album="Album",
+                duration_ms=200000,
+                limit=6,
+                recording_mbid="rec-community-2",
+            )
+        finally:
+            self.se.community_cache.cached_lookup = original_lookup
+        self.assertIsNotNone(best)
+        self.assertEqual(best.get("candidate_id"), "ladder-ok-community")
+        meta = service.last_music_track_search or {}
+        rejections = meta.get("community_seeded_rejections") or {}
+        self.assertGreaterEqual(int(rejections.get("community_seeded_failed_duration") or 0), 1)
+
+    def test_community_cache_disabled_does_not_query_lookup(self):
+        service = self._service({"youtube_music": []})
+        original_lookup = self.se.community_cache.cached_lookup
+        try:
+            self.se.community_cache.cached_lookup = lambda _mbid: (_ for _ in ()).throw(RuntimeError("should-not-call"))
+            best = service.search_music_track_best_match(
+                "Artist",
+                "Song",
+                album="Album",
+                duration_ms=200000,
+                limit=6,
+                recording_mbid="rec-community-3",
+            )
+        finally:
+            self.se.community_cache.cached_lookup = original_lookup
+        self.assertIsNone(best)
+        meta = service.last_music_track_search or {}
+        self.assertEqual(int(meta.get("community_seeded_candidates") or 0), 0)
+
     def test_mb_relationship_region_blocked_probe_is_classified_unavailable(self):
         service = self._service(
             {
@@ -1563,6 +1738,34 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         meta = service.last_music_track_search or {}
         rejections = meta.get("mb_injected_rejections") or {}
         self.assertGreaterEqual(int(rejections.get("mb_injected_failed_unavailable") or 0), 1)
+
+    def test_mb_relationship_probe_cached_failure_returns_tuple_reason(self):
+        service = self._service({"youtube_music": []})
+        url = "https://www.youtube.com/watch?v=abc123xyz00"
+        cache_key = url.strip().lower()
+        with service._mb_injected_probe_lock:  # type: ignore[attr-defined]
+            service._mb_injected_probe_cache[cache_key] = {  # type: ignore[attr-defined]
+                self.se._PROBE_FAILURE_CACHE_KEY: "mb_injected_failed_unavailable"
+            }
+
+        candidate, reason = service._probe_mb_relationship_candidate(  # type: ignore[attr-defined]
+            url,
+            artist="Artist",
+            track="Song",
+            album="Album",
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(reason, "mb_injected_failed_unavailable")
+
+        injected, rejection_counts = service._resolve_mb_relationship_candidates(  # type: ignore[attr-defined]
+            mb_youtube_urls=[url],
+            artist="Artist",
+            track="Song",
+            album="Album",
+            recording_mbid="rec-cache-fail",
+        )
+        self.assertEqual(injected, [])
+        self.assertGreaterEqual(int((rejection_counts or {}).get("mb_injected_failed_unavailable") or 0), 1)
 
 
 if __name__ == "__main__":

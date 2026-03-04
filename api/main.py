@@ -2998,9 +2998,7 @@ def _read_config_for_watcher():
         logging.error("Watcher skipped: config not found at %s", config_path)
         return cached
     try:
-        with open(config_path, "r") as handle:
-            data = handle.read()
-        config = json.loads(data)
+        config = load_config(config_path)
     except json.JSONDecodeError as exc:
         logging.error("Watcher skipped: invalid JSON in config: %s", exc)
         return cached

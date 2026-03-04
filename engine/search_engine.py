@@ -72,6 +72,7 @@ from engine.job_queue import (
     canonicalize_url,
     extract_video_id,
 )
+from engine import community_cache
 from engine.json_utils import safe_json_dumps
 from engine.paths import DATA_DIR
 from engine.search_adapters import default_adapters
@@ -118,6 +119,8 @@ _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY = 0.92
 _ALBUM_COHERENCE_MAX_BOOST = 0.03
 _ALBUM_COHERENCE_TIE_WINDOW = 0.03
 _MB_INJECTED_MAX_URLS = 3
+_COMMUNITY_CACHE_MAX_URLS = 1
+_PROBE_FAILURE_CACHE_KEY = "__probe_failure_reason__"
 
 
 @dataclass(frozen=True)
@@ -144,6 +147,7 @@ class MusicTrackSelectionResult:
     failure_reason: str
     coherence_boost_applied: int
     mb_injected_rejections: dict[str, int]
+    community_seeded_rejections: dict[str, int]
     rejected_candidates: list[dict]
     accepted_selection: dict | None
     final_rejection: dict | None
@@ -429,6 +433,44 @@ def ensure_search_tables(conn):
     existing = {row[1] for row in cur.fetchall()}
     if "canonical_json" not in existing:
         cur.execute("ALTER TABLE search_candidates ADD COLUMN canonical_json TEXT")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS search_query_cache (
+            id TEXT PRIMARY KEY,
+            cache_key TEXT NOT NULL,
+            query_text TEXT,
+            media_type TEXT,
+            source TEXT,
+            video_id TEXT,
+            url TEXT,
+            title TEXT,
+            uploader TEXT,
+            duration_sec INTEGER,
+            canonical_json TEXT,
+            raw_meta_json TEXT,
+            cached_at TEXT,
+            suspect INTEGER DEFAULT 0,
+            fail_count INTEGER DEFAULT 0,
+            last_failure_reason TEXT
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_key ON search_query_cache (cache_key)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_video_id ON search_query_cache (video_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_cached_at ON search_query_cache (cached_at)")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS community_video_index (
+            video_id TEXT PRIMARY KEY,
+            recording_mbid TEXT,
+            confidence REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_community_video_index_recording ON community_video_index (recording_mbid)")
 
     conn.commit()
 
@@ -747,6 +789,167 @@ class SearchJobStore:
         finally:
             conn.close()
 
+    def list_search_cache(self, *, cache_key, max_age_seconds=None, limit=50):
+        if not cache_key:
+            return []
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            params = [cache_key]
+            query = """
+                SELECT *
+                FROM search_query_cache
+                WHERE cache_key=?
+            """
+            if max_age_seconds is not None and float(max_age_seconds) > 0:
+                cutoff_iso = datetime.fromtimestamp(
+                    datetime.now(timezone.utc).timestamp() - float(max_age_seconds),
+                    tz=timezone.utc,
+                ).isoformat()
+                query += " AND cached_at >= ?"
+                params.append(cutoff_iso)
+            query += " ORDER BY suspect ASC, cached_at DESC, id ASC"
+            query += " LIMIT ?"
+            params.append(int(limit))
+            cur.execute(query, tuple(params))
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def replace_search_cache(self, *, cache_key, query_text, media_type, candidates):
+        if not cache_key:
+            return
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM search_query_cache WHERE cache_key=?", (cache_key,))
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for candidate in candidates or []:
+                if not isinstance(candidate, dict):
+                    continue
+                url = _coerce_http_url(candidate.get("url"))
+                if not url:
+                    continue
+                candidate_id = str(candidate.get("candidate_id") or uuid4().hex)
+                video_id = extract_video_id(url) or extract_video_id(candidate.get("video_id"))
+                cur.execute(
+                    """
+                    INSERT INTO search_query_cache (
+                        id, cache_key, query_text, media_type, source, video_id, url,
+                        title, uploader, duration_sec, canonical_json, raw_meta_json,
+                        cached_at, suspect, fail_count, last_failure_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        candidate_id,
+                        cache_key,
+                        query_text,
+                        media_type,
+                        str(candidate.get("source") or ""),
+                        str(video_id or "").strip() or None,
+                        url,
+                        candidate.get("title"),
+                        candidate.get("uploader"),
+                        candidate.get("duration_sec"),
+                        candidate.get("canonical_json"),
+                        candidate.get("raw_meta_json"),
+                        now_iso,
+                        0,
+                        0,
+                        None,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def enforce_search_cache_max_entries(self, *, max_entries):
+        try:
+            max_allowed = int(max_entries)
+        except Exception:
+            return
+        if max_allowed <= 0:
+            return
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM search_query_cache")
+            total = int(cur.fetchone()[0] or 0)
+            overflow = total - max_allowed
+            if overflow <= 0:
+                return
+            cur.execute(
+                """
+                SELECT id
+                FROM search_query_cache
+                ORDER BY cached_at ASC, id ASC
+                LIMIT ?
+                """,
+                (overflow,),
+            )
+            stale_ids = [str(row[0]) for row in cur.fetchall() if row and row[0]]
+            if not stale_ids:
+                return
+            placeholders = ",".join("?" for _ in stale_ids)
+            cur.execute(f"DELETE FROM search_query_cache WHERE id IN ({placeholders})", tuple(stale_ids))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def prune_search_cache_for_url(self, *, url, failure_reason=None, delete=False):
+        canonical_url = _coerce_http_url(url)
+        if not canonical_url:
+            return 0
+        normalized_video_id = extract_video_id(canonical_url)
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            if delete:
+                if normalized_video_id:
+                    cur.execute(
+                        "DELETE FROM search_query_cache WHERE video_id=?",
+                        (normalized_video_id.lower(),),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM search_query_cache WHERE lower(url)=?",
+                        (canonical_url.lower(),),
+                    )
+                affected = int(cur.rowcount or 0)
+                conn.commit()
+                return affected
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if normalized_video_id:
+                cur.execute(
+                    """
+                    UPDATE search_query_cache
+                    SET suspect=1,
+                        fail_count=COALESCE(fail_count, 0) + 1,
+                        last_failure_reason=?,
+                        cached_at=?
+                    WHERE video_id=?
+                    """,
+                    (failure_reason, now_iso, normalized_video_id.lower()),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE search_query_cache
+                    SET suspect=1,
+                        fail_count=COALESCE(fail_count, 0) + 1,
+                        last_failure_reason=?,
+                        cached_at=?
+                    WHERE lower(url)=?
+                    """,
+                    (failure_reason, now_iso, canonical_url.lower()),
+                )
+            affected = int(cur.rowcount or 0)
+            conn.commit()
+            return affected
+        finally:
+            conn.close()
+
     def reset_candidates_for_item(self, item_id):
         conn = self._connect()
         try:
@@ -884,6 +1087,23 @@ class SearchResolutionService:
         self._album_coherence_lock = threading.Lock()
         self._mb_injected_probe_cache = {}
         self._mb_injected_probe_lock = threading.Lock()
+        self.community_cache_lookup_enabled = self._as_bool(
+            self.config.get(
+                "community_cache_lookup_enabled",
+                self.config.get("community_cache_enabled", True),
+            )
+        )
+        self.search_cache_enabled = self._as_bool(self.config.get("search_cache_enabled", True))
+        self.search_cache_prune_on_failure = self._as_bool(
+            self.config.get("search_cache_prune_on_failure", True)
+        )
+        self.search_cache_ttl_days = self._parse_cache_ttl_days(
+            self.config.get("search_cache_ttl_days", 0)
+        )
+        self.search_cache_max_entries = self._parse_search_cache_max_entries(
+            self.config.get("search_cache_max_entries", 50000)
+        )
+        self._maybe_rebuild_community_reverse_index()
 
     def _as_bool(self, value):
         if isinstance(value, bool):
@@ -893,6 +1113,56 @@ class SearchResolutionService:
         if isinstance(value, (int, float)):
             return bool(value)
         return False
+
+    def _parse_cache_ttl_days(self, value):
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = 0
+        return max(0, parsed)
+
+    def _search_cache_ttl_seconds(self):
+        if int(self.search_cache_ttl_days or 0) <= 0:
+            return None
+        return int(self.search_cache_ttl_days) * 86400
+
+    def _parse_search_cache_max_entries(self, value):
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = 50000
+        return max(1000, parsed)
+
+    def _community_dataset_root(self):
+        configured = str(self.config.get("community_cache_dataset_dir") or "").strip()
+        if configured:
+            return configured
+        return str(DATA_DIR / "community_cache_dataset")
+
+    def _maybe_rebuild_community_reverse_index(self):
+        if not bool(self.community_cache_lookup_enabled):
+            return
+        dataset_root = self._community_dataset_root()
+        try:
+            stats = community_cache.rebuild_reverse_index_from_dataset(
+                db_path=self.search_db_path,
+                dataset_root=dataset_root,
+            )
+        except Exception as exc:
+            _log_event(
+                logging.WARNING,
+                "community_reverse_index_rebuild_failed",
+                dataset_root=dataset_root,
+                error=str(exc),
+            )
+            return
+        _log_event(
+            logging.INFO,
+            "community_reverse_index_rebuilt",
+            dataset_root=dataset_root,
+            files_scanned=int(stats.get("files_scanned") or 0),
+            video_ids_indexed=int(stats.get("video_ids_indexed") or 0),
+        )
 
     def ensure_schema(self):
         """
@@ -992,7 +1262,15 @@ class SearchResolutionService:
             with self._mb_injected_probe_lock:
                 cached = self._mb_injected_probe_cache.get(cache_key, "__missing__")
             if cached != "__missing__":
-                return dict(cached) if isinstance(cached, dict) else None
+                if isinstance(cached, dict):
+                    cached_failure = str(cached.get(_PROBE_FAILURE_CACHE_KEY) or "").strip()
+                    if cached_failure:
+                        return None, cached_failure
+                    return dict(cached), None
+                if isinstance(cached, str) and cached.strip():
+                    return None, str(cached).strip()
+                # Backward compatibility for previously cached bare `None`.
+                return None, "mb_injected_failed_unavailable"
         opts = {
             "quiet": True,
             "no_warnings": True,
@@ -1015,13 +1293,18 @@ class SearchResolutionService:
             )
             if cache_key:
                 with self._mb_injected_probe_lock:
-                    self._mb_injected_probe_cache[cache_key] = None
+                    self._mb_injected_probe_cache[cache_key] = {
+                        _PROBE_FAILURE_CACHE_KEY: failure_kind
+                    }
             return None, failure_kind
         if not isinstance(info, dict):
+            failure_kind = "mb_injected_failed_unavailable"
             if cache_key:
                 with self._mb_injected_probe_lock:
-                    self._mb_injected_probe_cache[cache_key] = None
-            return None, "mb_injected_failed_unavailable"
+                    self._mb_injected_probe_cache[cache_key] = {
+                        _PROBE_FAILURE_CACHE_KEY: failure_kind
+                    }
+            return None, failure_kind
         resolved_url = str(info.get("webpage_url") or info.get("original_url") or url).strip() or url
         video_id = extract_video_id(resolved_url) or extract_video_id(url)
         canonical_url = canonicalize_url("youtube", resolved_url, video_id) or resolved_url
@@ -1108,6 +1391,120 @@ class SearchResolutionService:
         if value in {"low_artist_similarity"}:
             return "mb_injected_failed_artist"
         return f"mb_injected_failed_{value}"
+
+    def _classify_community_seeded_rejection(self, reason):
+        value = str(reason or "").strip().lower()
+        if not value:
+            return "community_seeded_failed_unknown"
+        if value in {"duration_out_of_bounds", "duration_over_hard_cap", "preview_duration", "community_duration_mismatch"}:
+            return "community_seeded_failed_duration"
+        if value in {"disallowed_variant", "preview_variant", "session_variant", "cover_artist_mismatch"}:
+            return "community_seeded_failed_variant"
+        if value in {"low_title_similarity"}:
+            return "community_seeded_failed_title"
+        if value in {"low_artist_similarity"}:
+            return "community_seeded_failed_artist"
+        if value in {"community_cache_unavailable", "community_cache_miss", "community_no_candidate"}:
+            return "community_seeded_failed_unavailable"
+        return f"community_seeded_failed_{value}"
+
+    def _resolve_community_cache_candidates(
+        self,
+        *,
+        recording_mbid=None,
+        artist=None,
+        track=None,
+        album=None,
+        expected_duration_ms=None,
+    ):
+        if not bool(self.community_cache_lookup_enabled):
+            return [], {}
+        normalized_mbid = str(recording_mbid or "").strip()
+        if not normalized_mbid:
+            return [], {"community_seeded_failed_no_recording_mbid": 1}
+
+        try:
+            record = community_cache.cached_lookup(normalized_mbid)
+        except Exception as exc:
+            _log_event(
+                logging.WARNING,
+                "community_cache_error",
+                recording_mbid=normalized_mbid,
+                error=str(exc),
+            )
+            return [], {"community_seeded_failed_unavailable": 1}
+
+        if not isinstance(record, dict):
+            _log_event(logging.INFO, "community_cache_miss", recording_mbid=normalized_mbid)
+            return [], {"community_seeded_failed_unavailable": 1}
+        _log_event(logging.INFO, "community_cache_hit", recording_mbid=normalized_mbid)
+
+        video_id = extract_video_id(record.get("video_id")) or str(record.get("video_id") or "").strip()
+        if not video_id:
+            _log_event(logging.INFO, "community_candidate_rejected", recording_mbid=normalized_mbid, rejection_reason="community_no_candidate")
+            return [], {"community_seeded_failed_unavailable": 1}
+
+        duration_ms = record.get("duration_ms")
+        try:
+            duration_ms = int(duration_ms) if duration_ms is not None else None
+        except Exception:
+            duration_ms = None
+        expected_ms = None
+        try:
+            expected_ms = int(expected_duration_ms) if expected_duration_ms is not None else None
+        except Exception:
+            expected_ms = None
+        if expected_ms is not None and duration_ms is not None:
+            delta_ms = abs(int(duration_ms) - int(expected_ms))
+            if delta_ms > int(_MUSIC_DURATION_HARD_CAP_MS):
+                _log_event(
+                    logging.INFO,
+                    "community_candidate_rejected",
+                    recording_mbid=normalized_mbid,
+                    video_id=video_id,
+                    rejection_reason="community_duration_mismatch",
+                    duration_delta_ms=delta_ms,
+                )
+                return [], {"community_seeded_failed_duration": 1}
+
+        seed_url = canonicalize_url("youtube", f"https://www.youtube.com/watch?v={video_id}", video_id)
+        if not seed_url:
+            _log_event(logging.INFO, "community_candidate_rejected", recording_mbid=normalized_mbid, rejection_reason="community_no_candidate")
+            return [], {"community_seeded_failed_unavailable": 1}
+
+        candidate, probe_failure = self._probe_mb_relationship_candidate(
+            seed_url,
+            artist=artist,
+            track=track,
+            album=album,
+        )
+        if not isinstance(candidate, dict):
+            failure = self._classify_community_seeded_rejection(probe_failure or "community_cache_unavailable")
+            _log_event(
+                logging.INFO,
+                "community_candidate_rejected",
+                recording_mbid=normalized_mbid,
+                video_id=video_id,
+                rejection_reason=probe_failure or "community_cache_unavailable",
+                classified_reason=failure,
+            )
+            return [], {failure: 1}
+
+        seeded = dict(candidate)
+        seeded["source"] = "youtube"
+        seeded["community_seeded"] = True
+        seeded["community_confidence"] = record.get("confidence")
+        seeded["community_recording_mbid"] = normalized_mbid
+        seeded["community_video_id"] = video_id
+        _log_event(
+            logging.INFO,
+            "community_candidate_seed",
+            recording_mbid=normalized_mbid,
+            video_id=video_id,
+            candidate_id=seeded.get("candidate_id"),
+            confidence=seeded.get("community_confidence"),
+        )
+        return [seeded][: _COMMUNITY_CACHE_MAX_URLS], {}
 
     def _apply_album_coherence_tiebreak(self, ranked, *, coherence_key, pass_name, query_label):
         if not ranked:
@@ -1366,6 +1763,217 @@ class SearchResolutionService:
             unique_ladder.append(entry)
         return unique_ladder
 
+    def _build_search_cache_query(self, item, request_row):
+        if not isinstance(item, dict):
+            return ""
+        artist = str(item.get("artist") or "").strip()
+        track = str(item.get("track") or "").strip()
+        album = str(item.get("album") or "").strip()
+        item_type = str(item.get("item_type") or "").strip().lower()
+        if item_type == "track":
+            return " ".join(part for part in [artist, track] if part).strip()
+        return " ".join(part for part in [artist, album] if part).strip()
+
+    def _search_cache_key_for_item(self, item, request_row):
+        query = self._build_search_cache_query(item, request_row)
+        media_type = str((request_row or {}).get("media_type") or "generic").strip().lower()
+        source_priority = _parse_source_priority((request_row or {}).get("source_priority_json"))
+        key_payload = {
+            "query": query.lower(),
+            "media_type": media_type,
+            "sources": [str(s).strip().lower() for s in source_priority if str(s).strip()],
+            "item_type": str((item or {}).get("item_type") or "").strip().lower(),
+        }
+        return hashlib.sha1(safe_json_dumps(key_payload, sort_keys=True).encode("utf-8")).hexdigest(), query
+
+    def _search_cache_candidates_for_item(self, item, request_row, *, limit):
+        cache_key, _query = self._search_cache_key_for_item(item, request_row)
+        try:
+            rows = self.store.list_search_cache(
+                cache_key=cache_key,
+                max_age_seconds=self._search_cache_ttl_seconds(),
+                limit=max(1, int(limit)),
+            )
+        except Exception as exc:
+            _log_event(
+                logging.WARNING,
+                "search_cache_read_failed",
+                cache_key=cache_key,
+                error=str(exc),
+            )
+            return []
+        candidates = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            url = _coerce_http_url(row.get("url"))
+            if not url:
+                continue
+            candidate = {
+                "source": row.get("source") or "youtube",
+                "url": url,
+                "title": row.get("title"),
+                "uploader": row.get("uploader"),
+                "artist_detected": row.get("uploader"),
+                "track_detected": row.get("title"),
+                "duration_sec": row.get("duration_sec"),
+                "candidate_id": row.get("id") or hashlib.sha1(url.encode("utf-8")).hexdigest()[:16],
+                "raw_meta_json": row.get("raw_meta_json") or "{}",
+                "canonical_json": row.get("canonical_json"),
+                "search_cache_seeded": True,
+            }
+            candidates.append(self._annotate_candidate_with_community_reverse_lookup(candidate))
+        return candidates
+
+    def _seed_request_from_search_cache(self, request_id):
+        if not self.search_cache_enabled:
+            return
+        try:
+            request_row = self.store.get_request_row(request_id)
+        except Exception as exc:
+            _log_event(
+                logging.WARNING,
+                "search_cache_seed_failed",
+                request_id=request_id,
+                stage="get_request_row",
+                error=str(exc),
+            )
+            return
+        if not isinstance(request_row, dict):
+            return
+        try:
+            self.store.create_items_for_request(request_row)
+            items = self.store.list_items(request_id)
+        except Exception as exc:
+            _log_event(
+                logging.WARNING,
+                "search_cache_seed_failed",
+                request_id=request_id,
+                stage="list_items",
+                error=str(exc),
+            )
+            return
+        seeded_total = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                max_candidates = int(request_row.get("max_candidates_per_source") or 5)
+                cached_candidates = self._search_cache_candidates_for_item(
+                    item,
+                    request_row,
+                    limit=max(1, max_candidates * 3),
+                )
+                if not cached_candidates:
+                    _log_event(
+                        logging.INFO,
+                        "search_cache_miss",
+                        request_id=request_id,
+                        item_id=item.get("id"),
+                    )
+                    continue
+                source_priority = _parse_source_priority(request_row.get("source_priority_json"))
+                scored = []
+                for candidate in cached_candidates:
+                    source = str(candidate.get("source") or "").strip()
+                    adapter = self.adapters.get(source)
+                    source_modifier = adapter.source_modifier(candidate) if adapter else 1.0
+                    item_scored = dict(candidate)
+                    item_scored.update(score_candidate(item, item_scored, source_modifier=source_modifier))
+                    item_scored["id"] = uuid4().hex
+                    scored.append(item_scored)
+                ranked = rank_candidates(scored, source_priority=source_priority)
+                self.store.reset_candidates_for_item(item["id"])
+                self.store.insert_candidates(item["id"], ranked)
+                self.store.update_item_status(item["id"], "candidate_found")
+                seeded_total += len(ranked)
+                _log_event(
+                    logging.INFO,
+                    "search_cache_seeded",
+                    request_id=request_id,
+                    item_id=item.get("id"),
+                    candidates=len(ranked),
+                )
+            except Exception as exc:
+                _log_event(
+                    logging.WARNING,
+                    "search_cache_seed_item_failed",
+                    request_id=request_id,
+                    item_id=item.get("id"),
+                    error=str(exc),
+                )
+                continue
+        if seeded_total:
+            _log_event(logging.INFO, "search_cache_seeded_total", request_id=request_id, candidates=seeded_total)
+
+    def _refresh_search_cache_for_item(self, request_row, item, ranked):
+        if not self.search_cache_enabled or not ranked:
+            return
+        try:
+            cache_key, query = self._search_cache_key_for_item(item, request_row)
+            max_candidates = int((request_row or {}).get("max_candidates_per_source") or 5)
+            top_ranked = list(ranked)[: max(1, max_candidates * 3)]
+            self.store.replace_search_cache(
+                cache_key=cache_key,
+                query_text=query,
+                media_type=str((request_row or {}).get("media_type") or "generic"),
+                candidates=top_ranked,
+            )
+            self.store.enforce_search_cache_max_entries(max_entries=self.search_cache_max_entries)
+            _log_event(
+                logging.INFO,
+                "search_cache_refreshed",
+                request_id=(request_row or {}).get("id"),
+                item_id=(item or {}).get("id"),
+                candidates=len(top_ranked),
+            )
+        except Exception as exc:
+            _log_event(
+                logging.WARNING,
+                "search_cache_write_failed",
+                request_id=(request_row or {}).get("id"),
+                item_id=(item or {}).get("id"),
+                error=str(exc),
+            )
+            return
+
+    def invalidate_search_cache_entry(self, *, url, reason=None):
+        if not self.search_cache_enabled:
+            return 0
+        removed = self.store.prune_search_cache_for_url(
+            url=url,
+            failure_reason=str(reason or "").strip() or None,
+            delete=bool(self.search_cache_prune_on_failure),
+        )
+        if removed:
+            _log_event(
+                logging.INFO,
+                "search_cache_entry_pruned",
+                url=url,
+                reason=reason,
+                removed=removed,
+                delete=bool(self.search_cache_prune_on_failure),
+            )
+        return removed
+
+    def _annotate_candidate_with_community_reverse_lookup(self, candidate):
+        if not isinstance(candidate, dict):
+            return candidate
+        annotated = dict(candidate)
+        if not bool(self.community_cache_lookup_enabled):
+            return annotated
+        url = str(annotated.get("url") or "").strip()
+        video_id = extract_video_id(url) or str(annotated.get("video_id") or "").strip()
+        if not video_id:
+            return annotated
+        lookup = community_cache.lookup_video_id(video_id, db_path=self.search_db_path)
+        if not isinstance(lookup, dict):
+            return annotated
+        annotated["community_verified_transport"] = True
+        annotated["community_verified_recording_mbid"] = str(lookup.get("recording_mbid") or "").strip() or None
+        annotated["community_verified_confidence"] = lookup.get("confidence")
+        return annotated
+
     def _music_track_is_live(self, artist, track, album):
         return has_live_intent(artist, track, album)
 
@@ -1411,7 +2019,7 @@ class SearchResolutionService:
                         if not _is_http_url(candidate.get("url")):
                             continue
                         candidate["source"] = candidate.get("source") or source
-                        normalized.append(candidate)
+                        normalized.append(self._annotate_candidate_with_community_reverse_lookup(candidate))
                     candidate_batches[source] = normalized
 
         candidates = []
@@ -1436,20 +2044,69 @@ class SearchResolutionService:
         first_rung = int((ctx or {}).get("first_rung") or 0)
         injected = (ctx or {}).get("mb_injected_candidates")
         injected_candidates = [dict(c) for c in (injected or []) if isinstance(c, dict)]
+        community_injected = (ctx or {}).get("community_seeded_candidates")
+        community_seeded_candidates = [dict(c) for c in (community_injected or []) if isinstance(c, dict)]
 
         candidates = self.search_music_track_candidates(query, limit=limit, query_label=query_label)
-        if rung == first_rung and injected_candidates:
+        if rung == first_rung and (injected_candidates or community_seeded_candidates):
             deduped = []
-            seen_urls = set()
-            for candidate in list(injected_candidates) + list(candidates):
+            index_by_identity = {}
+
+            def _is_blank(value):
+                if value is None:
+                    return True
+                if isinstance(value, str):
+                    return not value.strip()
+                if isinstance(value, (list, tuple, dict, set)):
+                    return len(value) == 0
+                return False
+
+            def _transport_identity(candidate):
+                if not isinstance(candidate, dict):
+                    return None
+                raw_url = str(candidate.get("url") or "").strip()
+                video_id = extract_video_id(raw_url) or str(candidate.get("community_video_id") or "").strip()
+                if video_id:
+                    return f"youtube_video:{str(video_id).lower()}"
+                if raw_url:
+                    return f"url:{raw_url.lower()}"
+                return None
+
+            def _merge_candidate(base, incoming):
+                out = dict(base or {})
+                inc = dict(incoming or {})
+                for key, value in inc.items():
+                    if key in {"community_seeded", "mb_injected", "community_verified_transport"}:
+                        out[key] = bool(out.get(key)) or bool(value)
+                        continue
+                    if _is_blank(out.get(key)) and not _is_blank(value):
+                        out[key] = value
+                provenance_sources = []
+                for source_value in (
+                    out.get("source"),
+                    *([v for v in (out.get("provenance_sources") or []) if isinstance(v, str)]),
+                    inc.get("source"),
+                    *([v for v in (inc.get("provenance_sources") or []) if isinstance(v, str)]),
+                ):
+                    text = str(source_value or "").strip()
+                    if not text or text in provenance_sources:
+                        continue
+                    provenance_sources.append(text)
+                if provenance_sources:
+                    out["provenance_sources"] = provenance_sources
+                return out
+
+            for candidate in list(injected_candidates) + list(community_seeded_candidates) + list(candidates):
                 if not isinstance(candidate, dict):
                     continue
-                url_key = str(candidate.get("url") or "").strip().lower()
-                if url_key and url_key in seen_urls:
+                identity = _transport_identity(candidate)
+                if identity and identity in index_by_identity:
+                    idx = index_by_identity[identity]
+                    deduped[idx] = _merge_candidate(deduped[idx], candidate)
                     continue
-                if url_key:
-                    seen_urls.add(url_key)
-                deduped.append(candidate)
+                if identity:
+                    index_by_identity[identity] = len(deduped)
+                deduped.append(dict(candidate))
             candidates = deduped
         return candidates
 
@@ -1648,6 +2305,7 @@ class SearchResolutionService:
         failure_reason = "all_filtered_by_gate"
         coherence_boost_applied = 0
         mb_injected_rejections: dict[str, int] = {}
+        community_seeded_rejections: dict[str, int] = {}
         rejected_candidates: list[dict] = []
         accepted_selection = None
         final_rejection = None
@@ -1703,6 +2361,21 @@ class SearchResolutionService:
                     )
                 )
             if str(scored.get("source") or "").strip().lower() != "mb_relationship":
+                if bool(scored.get("community_seeded")) and (rejection_reason or float(scored.get("final_score", 0.0)) < float(self.music_source_match_threshold)):
+                    reason = rejection_reason or "score_threshold"
+                    key = self._classify_community_seeded_rejection(reason)
+                    community_seeded_rejections[key] = int(community_seeded_rejections.get(key) or 0) + 1
+                    _log_event(
+                        logging.INFO,
+                        "community_candidate_rejected",
+                        recording_mbid=recording_mbid,
+                        candidate_id=scored.get("candidate_id"),
+                        url=scored.get("url"),
+                        rejection_reason=reason,
+                        classified_reason=key,
+                        selected_rung=rung,
+                        query_label=query_label,
+                    )
                 continue
             if not rejection_reason:
                 continue
@@ -1762,6 +2435,7 @@ class SearchResolutionService:
                 failure_reason="",
                 coherence_boost_applied=coherence_boost_applied,
                 mb_injected_rejections=mb_injected_rejections,
+                community_seeded_rejections=community_seeded_rejections,
                 rejected_candidates=rejected_candidates,
                 accepted_selection=accepted_selection,
                 final_rejection=None,
@@ -1828,6 +2502,20 @@ class SearchResolutionService:
                 if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
                     key = "mb_injected_failed_title"
                     mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+                elif bool(candidate.get("community_seeded")):
+                    key = "community_seeded_failed_title"
+                    community_seeded_rejections[key] = int(community_seeded_rejections.get(key) or 0) + 1
+                    _log_event(
+                        logging.INFO,
+                        "community_candidate_rejected",
+                        recording_mbid=recording_mbid,
+                        candidate_id=candidate.get("candidate_id"),
+                        url=candidate.get("url"),
+                        rejection_reason="pass_b_track_similarity",
+                        classified_reason=key,
+                        selected_rung=rung,
+                        query_label=query_label,
+                    )
                 continue
             if float(candidate.get("score_artist", 0.0)) < _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY:
                 rejected_candidates.append(
@@ -1841,6 +2529,20 @@ class SearchResolutionService:
                 if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
                     key = "mb_injected_failed_artist"
                     mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+                elif bool(candidate.get("community_seeded")):
+                    key = "community_seeded_failed_artist"
+                    community_seeded_rejections[key] = int(community_seeded_rejections.get(key) or 0) + 1
+                    _log_event(
+                        logging.INFO,
+                        "community_candidate_rejected",
+                        recording_mbid=recording_mbid,
+                        candidate_id=candidate.get("candidate_id"),
+                        url=candidate.get("url"),
+                        rejection_reason="pass_b_artist_similarity",
+                        classified_reason=key,
+                        selected_rung=rung,
+                        query_label=query_label,
+                    )
                 continue
             if not bool(candidate.get("authority_channel_match")):
                 rejected_candidates.append(
@@ -1854,6 +2556,20 @@ class SearchResolutionService:
                 if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
                     key = "mb_injected_failed_authority"
                     mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+                elif bool(candidate.get("community_seeded")):
+                    key = "community_seeded_failed_authority"
+                    community_seeded_rejections[key] = int(community_seeded_rejections.get(key) or 0) + 1
+                    _log_event(
+                        logging.INFO,
+                        "community_candidate_rejected",
+                        recording_mbid=recording_mbid,
+                        candidate_id=candidate.get("candidate_id"),
+                        url=candidate.get("url"),
+                        rejection_reason="pass_b_authority",
+                        classified_reason=key,
+                        selected_rung=rung,
+                        query_label=query_label,
+                    )
                 continue
             eligible_b.append(candidate)
         selected_b = eligible_b[0] if eligible_b else None
@@ -1896,6 +2612,7 @@ class SearchResolutionService:
                 failure_reason="",
                 coherence_boost_applied=coherence_boost_applied,
                 mb_injected_rejections=mb_injected_rejections,
+                community_seeded_rejections=community_seeded_rejections,
                 rejected_candidates=rejected_candidates,
                 accepted_selection=accepted_selection,
                 final_rejection=None,
@@ -1926,6 +2643,7 @@ class SearchResolutionService:
             failure_reason=failure_reason,
             coherence_boost_applied=coherence_boost_applied,
             mb_injected_rejections=mb_injected_rejections,
+            community_seeded_rejections=community_seeded_rejections,
             rejected_candidates=rejected_candidates,
             accepted_selection=None,
             final_rejection=final_rejection,
@@ -1977,6 +2695,12 @@ class SearchResolutionService:
                 "coherence_boost_applied": 0,
                 "ep_refinement_attempted": False,
                 "ep_refinement_candidates_considered": 0,
+                "mb_injected_candidates": 0,
+                "mb_injected_selected": False,
+                "mb_injected_rejections": {},
+                "community_seeded_candidates": 0,
+                "community_seeded_selected": False,
+                "community_seeded_rejections": {},
                 "decision_edge": {
                     "accepted_selection": None,
                     "rejected_candidates": [],
@@ -2009,6 +2733,15 @@ class SearchResolutionService:
             mb_injected_candidates, mb_probe_rejections = resolved_injected, {}
         mb_injected_rejections = dict(mb_probe_rejections or {})
         mb_injected_selected = False
+        community_seeded_candidates, community_seeded_probe_rejections = self._resolve_community_cache_candidates(
+            recording_mbid=recording_mbid,
+            artist=artist,
+            track=track,
+            album=album,
+            expected_duration_ms=duration_ms,
+        )
+        community_seeded_rejections = dict(community_seeded_probe_rejections or {})
+        community_seeded_selected = False
         decision_rejected_candidates = []
         decision_accepted = None
         decision_final_rejection = None
@@ -2044,6 +2777,7 @@ class SearchResolutionService:
                     "rung": rung,
                     "first_rung": first_rung,
                     "mb_injected_candidates": mb_injected_candidates,
+                    "community_seeded_candidates": community_seeded_candidates,
                 }
             )
             rung_meta = {
@@ -2083,6 +2817,8 @@ class SearchResolutionService:
             coherence_boost_applied += int(rank_result.coherence_boost_applied or 0)
             for key, value in (rank_result.mb_injected_rejections or {}).items():
                 mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + int(value or 0)
+            for key, value in (rank_result.community_seeded_rejections or {}).items():
+                community_seeded_rejections[key] = int(community_seeded_rejections.get(key) or 0) + int(value or 0)
             for tag, count in (rank_result.candidate_variant_distribution or {}).items():
                 tag_key = str(tag or "").strip()
                 if not tag_key:
@@ -2098,6 +2834,7 @@ class SearchResolutionService:
                 selected_rung = rung
                 selected_pass = rank_result.selected_pass
                 mb_injected_selected = str(selected.get("source") or "").strip().lower() == "mb_relationship"
+                community_seeded_selected = bool(selected.get("community_seeded"))
                 decision_accepted = rank_result.accepted_selection if isinstance(rank_result.accepted_selection, dict) else None
                 decision_selected_variant_tags = list(rank_result.selected_candidate_variant_tags or [])
                 decision_top_rejected_variant_tags = list(rank_result.top_rejected_variant_tags or [])
@@ -2159,6 +2896,14 @@ class SearchResolutionService:
                 selected_pass=selected_pass,
                 count_for_album_run=current,
             )
+        if community_seeded_selected:
+            _log_event(
+                logging.INFO,
+                "community_candidate_selected",
+                recording_mbid=recording_mbid,
+                selected_rung=selected_rung,
+                selected_pass=selected_pass,
+            )
         self.last_music_track_search = {
             "attempted": attempted,
             "start_rung": first_rung,
@@ -2173,6 +2918,9 @@ class SearchResolutionService:
             "mb_injected_selected": mb_injected_selected,
             "mb_injected_rejections": mb_injected_rejections,
             "mb_injected_album_success_count": mb_injected_album_success_count,
+            "community_seeded_candidates": len(community_seeded_candidates or []),
+            "community_seeded_selected": bool(community_seeded_selected),
+            "community_seeded_rejections": dict(community_seeded_rejections or {}),
             "decision_edge": {
                 "accepted_selection": decision_accepted,
                 "rejected_candidates": decision_rejected_candidates,
@@ -2255,7 +3003,18 @@ class SearchResolutionService:
                 )
             )
             return None
-        return self.store.create_request(payload)
+        request_id = self.store.create_request(payload)
+        try:
+            self._seed_request_from_search_cache(request_id)
+        except Exception as exc:
+            _log_event(
+                logging.WARNING,
+                "search_cache_seed_failed",
+                request_id=request_id,
+                stage="create_request_hook",
+                error=str(exc),
+            )
+        return request_id
 
     def get_search_request(self, request_id):
         result = self.store.get_request(request_id)
@@ -2417,6 +3176,7 @@ class SearchResolutionService:
                             )
                             continue
                         cand["source"] = source
+                        cand = self._annotate_candidate_with_community_reverse_lookup(cand)
                         cand["candidate_id"] = str(
                             cand.get("candidate_id")
                             or cand.get("external_id")
@@ -2473,6 +3233,7 @@ class SearchResolutionService:
             ranked = rank_candidates(scored, source_priority=source_priority)
             self.store.reset_candidates_for_item(item["id"])
             self.store.insert_candidates(item["id"], ranked)
+            self._refresh_search_cache_for_item(request_row, item, ranked)
             self.store.update_item_status(item["id"], "candidate_found")
             _log_event(logging.INFO, "item_candidate_found", request_id=request_id, item_id=item["id"])
 

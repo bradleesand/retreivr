@@ -41,6 +41,8 @@ _GOOGLE_AUTH_RETRY = re.compile(r"Refreshing credentials due to a 401 response\.
 _SPOTIFY_PLAYLIST_RE = re.compile(
     r"^(?:https?://open\.spotify\.com/playlist/|spotify:playlist:)([A-Za-z0-9]+)"
 )
+_COMMUNITY_PUBLISH_MODES = {"off", "dry_run", "write_outbox"}
+_SEARCH_CACHE_MAX_ENTRIES_DEFAULT = 50000
 
 
 def _install_google_auth_filter():
@@ -228,13 +230,43 @@ def _finalize_client_delivery(delivery_id, *, timeout=False):
 
 def load_config(path):
     with open(path, "r") as f:
-        return json.load(f)
+        loaded = json.load(f)
+    return apply_config_defaults(loaded)
+
+
+def apply_config_defaults(config):
+    if not isinstance(config, dict):
+        return config
+
+    normalized = dict(config)
+
+    lookup_enabled = normalized.get("community_cache_lookup_enabled")
+    legacy_lookup = normalized.get("community_cache_enabled")
+    if lookup_enabled is None:
+        lookup_enabled = legacy_lookup if legacy_lookup is not None else True
+    normalized["community_cache_lookup_enabled"] = bool(lookup_enabled)
+
+    # Legacy alias retained for backward compatibility with existing code paths.
+    normalized["community_cache_enabled"] = bool(normalized.get("community_cache_lookup_enabled"))
+
+    normalized.setdefault("community_cache_publish_enabled", False)
+    normalized.setdefault("community_cache_publish_mode", "off")
+    normalized.setdefault("community_cache_publish_min_score", 0.78)
+    normalized.setdefault("community_cache_publish_outbox_dir", "")
+
+    normalized.setdefault("search_cache_enabled", True)
+    normalized.setdefault("search_cache_ttl_days", 0)
+    normalized.setdefault("search_cache_prune_on_failure", True)
+    normalized.setdefault("search_cache_max_entries", _SEARCH_CACHE_MAX_ENTRIES_DEFAULT)
+
+    return normalized
 
 
 def validate_config(config):
     errors = []
     if not isinstance(config, dict):
         return ["config must be a JSON object"]
+    config = apply_config_defaults(config)
 
     accounts = config.get("accounts")
     if accounts is not None and not isinstance(accounts, dict):
@@ -377,6 +409,61 @@ def validate_config(config):
                 errors.append("watch_policy.idle_backoff_factor must be an integer")
             if active_reset is not None and not isinstance(active_reset, int):
                 errors.append("watch_policy.active_reset_minutes must be an integer")
+
+    community_cache_lookup_enabled = config.get("community_cache_lookup_enabled")
+    if community_cache_lookup_enabled is not None and not isinstance(community_cache_lookup_enabled, bool):
+        errors.append("community_cache_lookup_enabled must be true/false")
+
+    community_cache_enabled = config.get("community_cache_enabled")
+    if community_cache_enabled is not None and not isinstance(community_cache_enabled, bool):
+        errors.append("community_cache_enabled must be true/false")
+
+    community_cache_publish_enabled = config.get("community_cache_publish_enabled")
+    if community_cache_publish_enabled is not None and not isinstance(community_cache_publish_enabled, bool):
+        errors.append("community_cache_publish_enabled must be true/false")
+
+    community_cache_publish_mode = config.get("community_cache_publish_mode")
+    if community_cache_publish_mode is not None:
+        if not isinstance(community_cache_publish_mode, str):
+            errors.append("community_cache_publish_mode must be a string")
+        elif community_cache_publish_mode not in _COMMUNITY_PUBLISH_MODES:
+            errors.append("community_cache_publish_mode must be one of: off, dry_run, write_outbox")
+
+    community_cache_publish_min_score = config.get("community_cache_publish_min_score")
+    if community_cache_publish_min_score is not None:
+        try:
+            min_score = float(community_cache_publish_min_score)
+        except (TypeError, ValueError):
+            errors.append("community_cache_publish_min_score must be a number")
+        else:
+            if min_score < 0.0 or min_score > 1.0:
+                errors.append("community_cache_publish_min_score must be between 0 and 1")
+
+    community_cache_publish_outbox_dir = config.get("community_cache_publish_outbox_dir")
+    if community_cache_publish_outbox_dir is not None and not isinstance(community_cache_publish_outbox_dir, str):
+        errors.append("community_cache_publish_outbox_dir must be a string")
+
+    search_cache_enabled = config.get("search_cache_enabled")
+    if search_cache_enabled is not None and not isinstance(search_cache_enabled, bool):
+        errors.append("search_cache_enabled must be true/false")
+
+    search_cache_ttl_days = config.get("search_cache_ttl_days")
+    if search_cache_ttl_days is not None:
+        if not isinstance(search_cache_ttl_days, int):
+            errors.append("search_cache_ttl_days must be an integer")
+        elif search_cache_ttl_days < 0:
+            errors.append("search_cache_ttl_days must be >= 0")
+
+    search_cache_prune_on_failure = config.get("search_cache_prune_on_failure")
+    if search_cache_prune_on_failure is not None and not isinstance(search_cache_prune_on_failure, bool):
+        errors.append("search_cache_prune_on_failure must be true/false")
+
+    search_cache_max_entries = config.get("search_cache_max_entries")
+    if search_cache_max_entries is not None:
+        if not isinstance(search_cache_max_entries, int):
+            errors.append("search_cache_max_entries must be an integer")
+        elif search_cache_max_entries < 1000:
+            errors.append("search_cache_max_entries must be >= 1000")
 
     return errors
 
