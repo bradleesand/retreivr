@@ -165,20 +165,19 @@
             <button id="search-create-only" class="button primary">Search</button>
             <div id="search-create-message" class="notice" role="status"></div>
           </div>
+          <button id="import-playlist-toggle" class="button ghost small" type="button">Import Playlist</button>
+          <div id="import-playlist-panel" class="hidden">
+            <div class="home-advanced-row">
+              <label class="home-advanced-field">
+                <span>Import playlist file</span>
+                <input id="home-import-file" type="file" accept=".m3u,.m3u8,.csv,.xml,.plist,.json">
+              </label>
+              <button id="home-import-button" class="button ghost small" type="button">Import Playlist</button>
+            </div>
+            <div id="home-import-summary" class="meta"></div>
+          </div>
         </div>
         <div id="music-results-container"></div>
-
-        <button id="import-playlist-toggle" class="button ghost small" type="button">Import Playlist</button>
-        <div id="import-playlist-panel" class="hidden">
-          <div class="home-advanced-row">
-            <label class="home-advanced-field">
-              <span>Import playlist file</span>
-              <input id="home-import-file" type="file" accept=".m3u,.m3u8,.csv,.xml,.plist,.json">
-            </label>
-            <button id="home-import-button" class="button ghost small" type="button">Import Playlist</button>
-          </div>
-          <div id="home-import-summary" class="meta"></div>
-        </div>
 
         <div id="home-search-message" class="notice" role="status">
           Press Enter or click Search to discover media
