@@ -447,6 +447,8 @@ def ensure_search_tables(conn):
             title TEXT,
             uploader TEXT,
             duration_sec INTEGER,
+            artwork_url TEXT,
+            thumbnail_url TEXT,
             canonical_json TEXT,
             raw_meta_json TEXT,
             cached_at TEXT,
@@ -459,6 +461,12 @@ def ensure_search_tables(conn):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_key ON search_query_cache (cache_key)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_video_id ON search_query_cache (video_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_cached_at ON search_query_cache (cached_at)")
+    cur.execute("PRAGMA table_info(search_query_cache)")
+    existing_cache = {row[1] for row in cur.fetchall()}
+    if "artwork_url" not in existing_cache:
+        cur.execute("ALTER TABLE search_query_cache ADD COLUMN artwork_url TEXT")
+    if "thumbnail_url" not in existing_cache:
+        cur.execute("ALTER TABLE search_query_cache ADD COLUMN thumbnail_url TEXT")
 
     cur.execute(
         """
@@ -841,9 +849,9 @@ class SearchJobStore:
                     """
                     INSERT INTO search_query_cache (
                         id, cache_key, query_text, media_type, source, video_id, url,
-                        title, uploader, duration_sec, canonical_json, raw_meta_json,
+                        title, uploader, duration_sec, artwork_url, thumbnail_url, canonical_json, raw_meta_json,
                         cached_at, suspect, fail_count, last_failure_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row_id,
@@ -856,6 +864,8 @@ class SearchJobStore:
                         candidate.get("title"),
                         candidate.get("uploader"),
                         candidate.get("duration_sec"),
+                        candidate.get("artwork_url"),
+                        candidate.get("thumbnail_url"),
                         candidate.get("canonical_json"),
                         candidate.get("raw_meta_json"),
                         now_iso,
@@ -1832,6 +1842,8 @@ class SearchResolutionService:
                 "artist_detected": row.get("uploader"),
                 "track_detected": row.get("title"),
                 "duration_sec": row.get("duration_sec"),
+                "artwork_url": row.get("artwork_url"),
+                "thumbnail_url": row.get("thumbnail_url"),
                 "candidate_id": row.get("id") or hashlib.sha1(url.encode("utf-8")).hexdigest()[:16],
                 "raw_meta_json": row.get("raw_meta_json") or "{}",
                 "canonical_json": row.get("canonical_json"),

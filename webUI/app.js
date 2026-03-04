@@ -3575,9 +3575,42 @@ function renderHomeCandidateRow(candidate, item) {
     row.dataset.url = candidate.url;
   }
 
+  const extractYouTubeVideoId = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    try {
+      const parsed = new URL(raw);
+      const host = (parsed.hostname || "").toLowerCase();
+      if (host === "youtu.be") {
+        const id = parsed.pathname.replace(/^\/+/, "").split("/")[0];
+        return id || null;
+      }
+      if (host.includes("youtube.com")) {
+        const id = parsed.searchParams.get("v");
+        if (id) return id;
+        const parts = parsed.pathname.split("/").filter(Boolean);
+        const embedIdx = parts.findIndex((part) => part === "embed" || part === "shorts");
+        if (embedIdx >= 0 && parts[embedIdx + 1]) {
+          return parts[embedIdx + 1];
+        }
+      }
+    } catch (_) {
+      return null;
+    }
+    return null;
+  };
+
+  const fallbackYouTubeThumb = (() => {
+    const source = String(candidate.source || "").toLowerCase();
+    if (!source.startsWith("youtube")) return null;
+    const videoId = extractYouTubeVideoId(candidate.url);
+    return videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : null;
+  })();
+
   const artworkUrl =
     candidate.thumbnail_url ||
     candidate.artwork_url ||
+    fallbackYouTubeThumb ||
     null;
   const artwork = document.createElement("div");
   artwork.className = "home-candidate-artwork";
