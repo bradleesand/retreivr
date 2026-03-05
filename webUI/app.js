@@ -29,6 +29,7 @@ const state = {
   homeAlbumCandidatesRequestId: null,
   homeQueuedAlbumReleaseGroups: new Set(),
   homeAlbumCoverCache: {},
+  homeArtistCoverCache: {},
   homeMusicResultMap: {},
   homeRequestContext: {},
   homeBestScores: {},
@@ -149,6 +150,51 @@ function setNotice(el, message, isError = false) {
   if (!el) return;
   el.textContent = message;
   el.style.color = isError ? "#ff7b7b" : "#59b0ff";
+}
+
+function toUserErrorMessage(err, fallback = "Unexpected error") {
+  if (typeof err === "string" && err.trim()) {
+    return err.trim();
+  }
+  if (err instanceof Error) {
+    const msg = typeof err.message === "string" ? err.message.trim() : "";
+    if (msg && msg !== "[object Object]") {
+      return msg;
+    }
+  }
+  if (err && typeof err === "object") {
+    const detail = err.detail ?? err.error ?? err.message;
+    if (typeof detail === "string" && detail.trim()) {
+      return detail.trim();
+    }
+    if (detail && typeof detail === "object") {
+      try {
+        const encoded = JSON.stringify(detail);
+        if (encoded && encoded !== "{}") {
+          return encoded;
+        }
+      } catch (_err) {
+        // Best effort only.
+      }
+    }
+    try {
+      const encoded = JSON.stringify(err);
+      if (encoded && encoded !== "{}") {
+        return encoded;
+      }
+    } catch (_err) {
+      // Best effort only.
+    }
+  }
+  try {
+    const plain = String(err || "").trim();
+    if (plain && plain !== "[object Object]") {
+      return plain;
+    }
+  } catch (_err) {
+    // Best effort only.
+  }
+  return fallback;
 }
 
 function triggerClientDeliveryDownload(downloadUrl, filename = "") {
@@ -2528,6 +2574,15 @@ function renderMusicModeResults(response, query = "") {
     artists.forEach((artistItem) => {
       const card = document.createElement("article");
       card.className = "home-result-card";
+      const artistThumb = document.createElement("img");
+      artistThumb.className = "music-card-thumb";
+      artistThumb.alt = artistItem?.name ? `${artistItem.name} artwork` : "Artist artwork";
+      artistThumb.loading = "lazy";
+      artistThumb.addEventListener("error", () => {
+        artistThumb.classList.remove("loaded");
+        artistThumb.removeAttribute("src");
+      });
+      card.appendChild(artistThumb);
       const title = document.createElement("div");
       title.className = "home-candidate-title";
       title.textContent = artistItem?.name || "";
@@ -2575,12 +2630,46 @@ function renderMusicModeResults(response, query = "") {
         } catch (err) {
           button.disabled = false;
           button.textContent = previousLabel;
-          setNotice($("#home-search-message"), `View Albums failed: ${err.message}`, true);
+          setNotice($("#home-search-message"), `View Albums failed: ${toUserErrorMessage(err)}`, true);
         }
       });
       action.appendChild(button);
       card.appendChild(action);
       container.appendChild(card);
+
+      const artistMbidValue = String(artistItem?.artist_mbid || "").trim();
+      if (artistMbidValue) {
+        const cachedCover = state.homeArtistCoverCache[artistMbidValue];
+        if (cachedCover) {
+          artistThumb.src = cachedCover;
+          artistThumb.classList.add("loaded");
+        } else {
+          setTimeout(async () => {
+            try {
+              const albums = await fetchMusicAlbumsByArtist({
+                name: String(artistItem?.name || "").trim(),
+                artist_mbid: artistMbidValue,
+              });
+              const firstAlbum = Array.isArray(albums) ? albums[0] : null;
+              const firstReleaseGroup = String(firstAlbum?.release_group_mbid || "").trim();
+              if (!firstReleaseGroup) {
+                state.homeArtistCoverCache[artistMbidValue] = null;
+                return;
+              }
+              const coverUrl = await fetchHomeAlbumCoverUrl(firstReleaseGroup);
+              if (!coverUrl) {
+                state.homeArtistCoverCache[artistMbidValue] = null;
+                return;
+              }
+              state.homeArtistCoverCache[artistMbidValue] = coverUrl;
+              artistThumb.src = coverUrl;
+              artistThumb.classList.add("loaded");
+            } catch (_err) {
+              state.homeArtistCoverCache[artistMbidValue] = null;
+            }
+          }, 0);
+        }
+      }
     });
   }
 
@@ -2591,6 +2680,15 @@ function renderMusicModeResults(response, query = "") {
       const card = document.createElement("article");
       card.className = "home-result-card album-card";
       card.dataset.releaseGroupMbid = releaseGroupMbid;
+      const albumThumb = document.createElement("img");
+      albumThumb.className = "music-card-thumb";
+      albumThumb.alt = albumItem?.title ? `${albumItem.title} cover` : "Album cover";
+      albumThumb.loading = "lazy";
+      albumThumb.addEventListener("error", () => {
+        albumThumb.classList.remove("loaded");
+        albumThumb.removeAttribute("src");
+      });
+      card.appendChild(albumThumb);
       const title = document.createElement("div");
       title.className = "home-candidate-title";
       title.textContent = albumItem?.title || "";
@@ -2653,7 +2751,7 @@ function renderMusicModeResults(response, query = "") {
           button.disabled = false;
           viewTracksButton.textContent = previousViewLabel;
           button.textContent = previousDownloadLabel;
-          setNotice($("#home-search-message"), `View Tracks failed: ${err.message}`, true);
+          setNotice($("#home-search-message"), `View Tracks failed: ${toUserErrorMessage(err)}`, true);
         }
       });
       button.addEventListener("click", async () => {
@@ -2678,6 +2776,16 @@ function renderMusicModeResults(response, query = "") {
       action.appendChild(button);
       card.appendChild(action);
       container.appendChild(card);
+
+      if (releaseGroupMbid) {
+        setTimeout(async () => {
+          const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
+          if (coverUrl) {
+            albumThumb.src = coverUrl;
+            albumThumb.classList.add("loaded");
+          }
+        }, 0);
+      }
     });
   }
 
@@ -2717,9 +2825,19 @@ function renderMusicModeResults(response, query = "") {
       const meta = document.createElement("div");
       meta.className = "home-candidate-meta";
       const durationText = Number.isFinite(result.duration_ms) ? formatDuration(result.duration_ms / 1000) : "-";
-      const yearText = result.release_year || "";
-      meta.textContent = `${result.artist} • ${result.album || ""} ${yearText ? `(${yearText})` : ""} • ${durationText}`;
+      meta.textContent = `${result.artist} • ${durationText}`;
       card.appendChild(meta);
+      const albumLine = document.createElement("div");
+      albumLine.className = "home-candidate-meta";
+      const yearText = result.release_year || "";
+      if (result.album) {
+        albumLine.textContent = `Album: ${result.album}${yearText ? ` (${yearText})` : ""}`;
+      } else if (yearText) {
+        albumLine.textContent = `Release year: ${yearText}`;
+      } else {
+        albumLine.textContent = "Album: (unknown)";
+      }
+      card.appendChild(albumLine);
 
       const entityRef = document.createElement("div");
       entityRef.className = "home-mb-entity-ref";
@@ -2819,7 +2937,7 @@ async function fetchMusicTracksByAlbum({ artist = "", album = "", releaseGroupMb
   }
   if (!response.ok) {
     const detail = payload && payload.detail ? payload.detail : `HTTP ${response.status}`;
-    throw new Error(String(detail));
+    throw new Error(toUserErrorMessage(detail, `HTTP ${response.status}`));
   }
   const normalized = normalizeMusicSearchResults(payload?.tracks);
   if (!rgMbid) {
@@ -2868,7 +2986,7 @@ async function performMusicModeSearch() {
   }
   if (!response.ok) {
     const detail = payload && payload.detail ? payload.detail : `HTTP ${response.status}`;
-    throw new Error(String(detail));
+    throw new Error(toUserErrorMessage(detail, `HTTP ${response.status}`));
   }
   if (requestSeq !== state.homeMusicSearchSeq) {
     return;
@@ -3152,7 +3270,7 @@ function renderHomeAlbumCandidates(candidates, query = "") {
         viewTracksButton.disabled = false;
         viewTracksButton.textContent = previousViewLabel;
         if (relatedDownloadButton) relatedDownloadButton.disabled = previousDownloadDisabled;
-        setNotice($("#home-search-message"), `View Tracks failed: ${err.message}`, true);
+        setNotice($("#home-search-message"), `View Tracks failed: ${toUserErrorMessage(err)}`, true);
       }
       return;
     }

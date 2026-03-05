@@ -814,6 +814,20 @@ body.home-page .home-candidate-title {
   color: var(--muted);
 }
 
+.music-card-thumb {
+  width: 64px;
+  height: 64px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  display: none;
+}
+
+.music-card-thumb.loaded {
+  display: block;
+}
+
 body.home-page .home-candidate-source-tag {
   display: inline-flex;
   align-items: center;
@@ -837,16 +851,6 @@ body.home-page .home-candidate-source-tag {
   gap: 8px;
   justify-content: center;
   flex-shrink: 0;
-}
-
-.album-card .home-candidate-action {
-  align-items: stretch;
-  width: 100%;
-}
-
-.album-card .home-candidate-action .button {
-  width: 100%;
-  text-align: center;
 }
 
 .home-candidate-state {
