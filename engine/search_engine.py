@@ -1897,6 +1897,7 @@ class SearchResolutionService:
                 "raw_meta_json": row.get("raw_meta_json") or "{}",
                 "canonical_json": row.get("canonical_json"),
                 "search_cache_seeded": True,
+                "view_count": raw_meta.get("view_count") if isinstance(raw_meta, dict) else None,
             }
             candidates.append(self._annotate_candidate_with_community_reverse_lookup(candidate))
         return candidates

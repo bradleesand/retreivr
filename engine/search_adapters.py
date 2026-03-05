@@ -130,6 +130,7 @@ class _YtDlpSearchMixin(SearchAdapter):
                 "official": bool(entry.get("is_official")),
                 "isrc": isrc,
                 "track_count": track_count,
+                "view_count": entry.get("view_count"),
             }
             candidate["thumbnail_url"] = None
             thumbnail_url = self._candidate_thumbnail_url(entry)
@@ -194,6 +195,7 @@ class _YtDlpSearchMixin(SearchAdapter):
                 "official": candidate.get("official"),
                 "isrc": candidate.get("isrc"),
                 "track_count": candidate.get("track_count"),
+                "view_count": candidate.get("view_count"),
                 "thumbnail_url": candidate.get("thumbnail_url"),
             }
             results.append(normalized)
