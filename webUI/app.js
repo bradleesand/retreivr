@@ -2678,7 +2678,16 @@ function renderMusicModeResults(response, query = "") {
 
   if (tracks.length) {
     appendSection("Tracks");
-    tracks.forEach((result) => {
+    const orderedTracks = [...tracks].sort((a, b) => {
+      const discA = Number.isFinite(Number(a?.disc_number)) ? Number(a.disc_number) : Number.MAX_SAFE_INTEGER;
+      const discB = Number.isFinite(Number(b?.disc_number)) ? Number(b.disc_number) : Number.MAX_SAFE_INTEGER;
+      if (discA !== discB) return discA - discB;
+      const trackA = Number.isFinite(Number(a?.track_number)) ? Number(a.track_number) : Number.MAX_SAFE_INTEGER;
+      const trackB = Number.isFinite(Number(b?.track_number)) ? Number(b.track_number) : Number.MAX_SAFE_INTEGER;
+      if (trackA !== trackB) return trackA - trackB;
+      return String(a?.track || "").localeCompare(String(b?.track || ""));
+    });
+    orderedTracks.forEach((result) => {
       const key = `${result.recording_mbid}::${result.mb_release_id}`;
       state.homeMusicResultMap[key] = result;
       const card = document.createElement("article");
@@ -2691,7 +2700,8 @@ function renderMusicModeResults(response, query = "") {
       header.className = "home-result-header";
       const title = document.createElement("div");
       title.className = "home-candidate-title";
-      title.textContent = result.track;
+      const trackNumber = Number.isFinite(Number(result?.track_number)) ? Number(result.track_number) : null;
+      title.textContent = trackNumber ? `${trackNumber}. ${result.track}` : result.track;
       header.appendChild(title);
       const badge = document.createElement("span");
       badge.className = "home-result-badge matched";
@@ -3060,6 +3070,16 @@ function renderHomeAlbumCandidates(candidates, query = "") {
     body.appendChild(badges);
     card.appendChild(body);
 
+    const actions = document.createElement("div");
+    actions.className = "home-candidate-action";
+    const viewTracksButton = document.createElement("button");
+    viewTracksButton.className = "button ghost small album-view-tracks-btn";
+    viewTracksButton.dataset.releaseGroupId = candidate.release_group_id || "";
+    viewTracksButton.dataset.albumTitle = candidate.title || "";
+    viewTracksButton.dataset.artistCredit = candidate.artist_credit || "";
+    viewTracksButton.textContent = "View Tracks";
+    actions.appendChild(viewTracksButton);
+
     const button = document.createElement("button");
     button.className = "button primary small album-download-btn";
     button.dataset.releaseGroupId = candidate.release_group_id || "";
@@ -3067,11 +3087,55 @@ function renderHomeAlbumCandidates(candidates, query = "") {
     const alreadyQueued = state.homeQueuedAlbumReleaseGroups.has(candidate.release_group_id || "");
     button.textContent = alreadyQueued ? "Queued..." : "Download Album";
     button.disabled = alreadyQueued;
-    card.appendChild(button);
+    actions.appendChild(button);
+    card.appendChild(actions);
 
     container.appendChild(card);
   });
   container.addEventListener("click", async (event) => {
+    const viewTracksButton = event.target.closest(".album-view-tracks-btn");
+    if (viewTracksButton) {
+      const releaseGroupId = String(viewTracksButton.dataset.releaseGroupId || "").trim();
+      const albumTitle = String(viewTracksButton.dataset.albumTitle || "").trim();
+      const artistCredit = String(viewTracksButton.dataset.artistCredit || "").trim();
+      const relatedDownloadButton = viewTracksButton
+        .closest(".home-candidate-action")
+        ?.querySelector(".album-download-btn");
+      if (!releaseGroupId && !albumTitle && !artistCredit) {
+        return;
+      }
+      const artistInput = document.getElementById("search-artist");
+      const albumInput = document.getElementById("search-album");
+      const trackInput = document.getElementById("search-track");
+      const modeSelect = document.getElementById("music-mode-select");
+      if (artistInput) artistInput.value = artistCredit;
+      if (albumInput) albumInput.value = albumTitle;
+      if (trackInput) trackInput.value = "";
+      if (modeSelect) modeSelect.value = "track";
+
+      const previousDownloadDisabled = relatedDownloadButton ? relatedDownloadButton.disabled : false;
+      viewTracksButton.disabled = true;
+      if (relatedDownloadButton) relatedDownloadButton.disabled = true;
+      const previousViewLabel = viewTracksButton.textContent;
+      viewTracksButton.textContent = "Loading...";
+      setNotice($("#home-search-message"), `Loading tracks for ${albumTitle || "album"}...`, false);
+      try {
+        const tracks = await fetchMusicTracksByAlbum({
+          artist: artistCredit,
+          album: albumTitle,
+          releaseGroupMbid: releaseGroupId,
+          limit: 200,
+        });
+        renderMusicModeResults({ artists: [], albums: [], tracks, mode_used: "track" }, `${artistCredit} ${albumTitle}`.trim());
+        setNotice($("#home-search-message"), `Loaded ${tracks.length} tracks for ${albumTitle || "album"}.`, false);
+      } catch (err) {
+        viewTracksButton.disabled = false;
+        viewTracksButton.textContent = previousViewLabel;
+        if (relatedDownloadButton) relatedDownloadButton.disabled = previousDownloadDisabled;
+        setNotice($("#home-search-message"), `View Tracks failed: ${err.message}`, true);
+      }
+      return;
+    }
     const button = event.target.closest(".album-download-btn");
     if (!button) {
       return;
@@ -6426,6 +6490,26 @@ function bindEvents() {
   });
   const musicSearchOnly = $("#search-create-only");
   if (musicSearchOnly) {
+    const onMusicSearchEnter = (event) => {
+      if (
+        event.key === "Enter" &&
+        !event.shiftKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey
+      ) {
+        event.preventDefault();
+        if (!musicSearchOnly.disabled) {
+          musicSearchOnly.click();
+        }
+      }
+    };
+    ["#search-artist", "#search-album", "#search-track"].forEach((selector) => {
+      const input = $(selector);
+      if (input) {
+        input.addEventListener("keydown", onMusicSearchEnter);
+      }
+    });
     musicSearchOnly.addEventListener("click", async () => {
       const artist = String(document.getElementById("search-artist")?.value || "").trim();
       const album = String(document.getElementById("search-album")?.value || "").trim();
