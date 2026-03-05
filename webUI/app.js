@@ -224,6 +224,57 @@ function runPrioritizedThumbnailJobs(jobs, renderToken, maxConcurrent = 4) {
   }
 }
 
+function createMusicCardThumb(altText) {
+  const shell = document.createElement("div");
+  shell.className = "music-card-thumb-shell loading";
+
+  const img = document.createElement("img");
+  img.className = "music-card-thumb";
+  img.alt = altText || "Artwork";
+  img.loading = "lazy";
+
+  const placeholder = document.createElement("div");
+  placeholder.className = "music-card-thumb-placeholder";
+  placeholder.textContent = "Loading artwork";
+
+  img.addEventListener("load", () => {
+    shell.classList.remove("loading", "no-art");
+    shell.classList.add("loaded");
+  });
+  img.addEventListener("error", () => {
+    shell.classList.remove("loading", "loaded");
+    shell.classList.add("no-art");
+    img.removeAttribute("src");
+    placeholder.textContent = "No artwork";
+  });
+
+  const setLoading = () => {
+    shell.classList.remove("loaded", "no-art");
+    shell.classList.add("loading");
+    placeholder.textContent = "Loading artwork";
+  };
+
+  const setNoArt = () => {
+    shell.classList.remove("loading", "loaded");
+    shell.classList.add("no-art");
+    img.removeAttribute("src");
+    placeholder.textContent = "No artwork";
+  };
+
+  const setImage = (url) => {
+    if (!url) {
+      setNoArt();
+      return;
+    }
+    setLoading();
+    img.src = url;
+  };
+
+  shell.appendChild(img);
+  shell.appendChild(placeholder);
+  return { shell, setImage, setNoArt, setLoading };
+}
+
 function triggerClientDeliveryDownload(downloadUrl, filename = "") {
   const url = String(downloadUrl || "").trim();
   if (!url) {
@@ -2603,15 +2654,10 @@ function renderMusicModeResults(response, query = "") {
     artists.forEach((artistItem) => {
       const card = document.createElement("article");
       card.className = "home-result-card music-meta-card";
-      const artistThumb = document.createElement("img");
-      artistThumb.className = "music-card-thumb";
-      artistThumb.alt = artistItem?.name ? `${artistItem.name} artwork` : "Artist artwork";
-      artistThumb.loading = "lazy";
-      artistThumb.addEventListener("error", () => {
-        artistThumb.classList.remove("loaded");
-        artistThumb.removeAttribute("src");
-      });
-      card.appendChild(artistThumb);
+      const artistThumb = createMusicCardThumb(
+        artistItem?.name ? `${artistItem.name} artwork` : "Artist artwork"
+      );
+      card.appendChild(artistThumb.shell);
       const title = document.createElement("div");
       title.className = "home-candidate-title";
       title.textContent = artistItem?.name || "";
@@ -2674,8 +2720,9 @@ function renderMusicModeResults(response, query = "") {
         if (Object.prototype.hasOwnProperty.call(state.homeArtistCoverCache, artistMbidValue)) {
           const cachedCover = state.homeArtistCoverCache[artistMbidValue];
           if (cachedCover) {
-            artistThumb.src = cachedCover;
-            artistThumb.classList.add("loaded");
+            artistThumb.setImage(cachedCover);
+          } else {
+            artistThumb.setNoArt();
           }
         } else {
           thumbnailJobs.push(async (activeToken) => {
@@ -2696,19 +2743,26 @@ function renderMusicModeResults(response, query = "") {
               const coverUrl = await fetchHomeAlbumCoverUrl(firstReleaseGroup);
               if (!coverUrl) {
                 state.homeArtistCoverCache[artistMbidValue] = null;
+                if (state.homeMusicRenderToken === activeToken) {
+                  artistThumb.setNoArt();
+                }
                 return;
               }
               state.homeArtistCoverCache[artistMbidValue] = coverUrl;
               if (state.homeMusicRenderToken !== activeToken) {
                 return;
               }
-              artistThumb.src = coverUrl;
-              artistThumb.classList.add("loaded");
+              artistThumb.setImage(coverUrl);
             } catch (_err) {
               state.homeArtistCoverCache[artistMbidValue] = null;
+              if (state.homeMusicRenderToken === activeToken) {
+                artistThumb.setNoArt();
+              }
             }
           });
         }
+      } else {
+        artistThumb.setNoArt();
       }
     });
   }
@@ -2720,15 +2774,10 @@ function renderMusicModeResults(response, query = "") {
       const card = document.createElement("article");
       card.className = "home-result-card album-card music-meta-card";
       card.dataset.releaseGroupMbid = releaseGroupMbid;
-      const albumThumb = document.createElement("img");
-      albumThumb.className = "music-card-thumb";
-      albumThumb.alt = albumItem?.title ? `${albumItem.title} cover` : "Album cover";
-      albumThumb.loading = "lazy";
-      albumThumb.addEventListener("error", () => {
-        albumThumb.classList.remove("loaded");
-        albumThumb.removeAttribute("src");
-      });
-      card.appendChild(albumThumb);
+      const albumThumb = createMusicCardThumb(
+        albumItem?.title ? `${albumItem.title} cover` : "Album cover"
+      );
+      card.appendChild(albumThumb.shell);
       const content = document.createElement("div");
       content.className = "music-meta-main";
       const title = document.createElement("div");
@@ -2824,19 +2873,24 @@ function renderMusicModeResults(response, query = "") {
         if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid)) {
           const cachedCover = state.homeAlbumCoverCache[releaseGroupMbid];
           if (cachedCover) {
-            albumThumb.src = cachedCover;
-            albumThumb.classList.add("loaded");
+            albumThumb.setImage(cachedCover);
+          } else {
+            albumThumb.setNoArt();
           }
         } else {
           thumbnailJobs.push(async (activeToken) => {
             const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
             if (!coverUrl || state.homeMusicRenderToken !== activeToken) {
+              if (!coverUrl && state.homeMusicRenderToken === activeToken) {
+                albumThumb.setNoArt();
+              }
               return;
             }
-            albumThumb.src = coverUrl;
-            albumThumb.classList.add("loaded");
+            albumThumb.setImage(coverUrl);
           });
         }
+      } else {
+        albumThumb.setNoArt();
       }
     });
   }

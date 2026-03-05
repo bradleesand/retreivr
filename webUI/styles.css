@@ -814,18 +814,45 @@ body.home-page .home-candidate-title {
   color: var(--muted);
 }
 
-.music-card-thumb {
+.music-card-thumb-shell {
   width: 64px;
   height: 64px;
+  flex-shrink: 0;
   border-radius: 10px;
-  object-fit: cover;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(148, 163, 184, 0.2);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.music-card-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
   display: none;
 }
 
-.music-card-thumb.loaded {
+.music-card-thumb-placeholder {
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  padding: 6px;
+  color: rgba(226, 232, 240, 0.9);
+}
+
+.music-card-thumb-shell.loading .music-card-thumb-placeholder,
+.music-card-thumb-shell.no-art .music-card-thumb-placeholder {
   display: block;
+}
+
+.music-card-thumb-shell.loaded .music-card-thumb {
+  display: block;
+}
+
+.music-card-thumb-shell.loaded .music-card-thumb-placeholder {
+  display: none;
 }
 
 .music-meta-card {
