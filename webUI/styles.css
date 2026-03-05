@@ -349,7 +349,7 @@ body.home-page .music-search-grid {
 
 body.home-page .music-search-options {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 12px;
   align-items: end;
 }
@@ -362,8 +362,31 @@ body.home-page .music-search-options .field {
 }
 
 body.home-page .music-search-force-redownload {
-  grid-column: 1 / -1;
-  margin-top: -2px;
+  margin: 0;
+  align-self: flex-end;
+  white-space: nowrap;
+}
+
+body.home-page .music-mode-toggle {
+  width: fit-content;
+}
+
+body.home-page .music-search-inline-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+body.home-page .music-search-max-candidates {
+  flex: 0 0 auto;
+  width: 132px;
+  max-width: 132px;
+}
+
+body.home-page .music-search-max-candidates input {
+  width: 100%;
+  text-align: center;
 }
 
 body.home-page .music-search-actions-row {
@@ -1987,8 +2010,16 @@ a[aria-disabled="true"] {
     grid-template-columns: 1fr;
   }
 
+  body.home-page .music-search-inline-row {
+    width: 100%;
+    align-items: flex-start;
+  }
+
+  body.home-page .music-search-force-redownload {
+    align-self: flex-start;
+  }
+
   body.home-page .music-search-actions-row {
-    grid-template-columns: 1fr;
     align-items: stretch;
   }
 }

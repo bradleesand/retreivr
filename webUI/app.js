@@ -2268,6 +2268,29 @@ function updateHomeMusicModeUI() {
   }
 }
 
+function updateMusicModeToggleUI(mode) {
+  const modeSelect = $("#music-mode-select");
+  if (modeSelect) {
+    modeSelect.value = String(mode || "auto").trim().toLowerCase() || "auto";
+  }
+  const modeToggle = $("#music-mode-toggle");
+  if (!modeToggle) {
+    return;
+  }
+  const normalized = String(mode || "auto").trim().toLowerCase() || "auto";
+  modeToggle.querySelectorAll("button[data-mode]").forEach((button) => {
+    const isActive = String(button.dataset.mode || "").trim().toLowerCase() === normalized;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-checked", isActive ? "true" : "false");
+  });
+}
+
+function setMusicModeSelection(mode) {
+  const normalized = String(mode || "auto").trim().toLowerCase() || "auto";
+  const allowed = new Set(["auto", "artist", "album", "track"]);
+  updateMusicModeToggleUI(allowed.has(normalized) ? normalized : "auto");
+}
+
 function normalizeHomeMediaMode(value) {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "video" || normalized === "music" || normalized === "music_video") {
@@ -2843,11 +2866,10 @@ function renderMusicModeResults(response, query = "") {
         const artistInput = document.getElementById("search-artist");
         const albumInput = document.getElementById("search-album");
         const trackInput = document.getElementById("search-track");
-        const modeSelect = document.getElementById("music-mode-select");
         if (artistInput) artistInput.value = nextQuery;
         if (albumInput) albumInput.value = "";
         if (trackInput) trackInput.value = "";
-        if (modeSelect) modeSelect.value = "album";
+        setMusicModeSelection("album");
 
         button.disabled = true;
         const previousLabel = button.textContent;
@@ -2969,11 +2991,10 @@ function renderMusicModeResults(response, query = "") {
         const artistInput = document.getElementById("search-artist");
         const albumInput = document.getElementById("search-album");
         const trackInput = document.getElementById("search-track");
-        const modeSelect = document.getElementById("music-mode-select");
         if (artistInput) artistInput.value = artistQuery;
         if (albumInput) albumInput.value = albumTitle;
         if (trackInput) trackInput.value = "";
-        if (modeSelect) modeSelect.value = "track";
+        setMusicModeSelection("track");
 
         viewTracksButton.disabled = true;
         button.disabled = true;
@@ -3510,11 +3531,10 @@ function renderHomeAlbumCandidates(candidates, query = "") {
       const artistInput = document.getElementById("search-artist");
       const albumInput = document.getElementById("search-album");
       const trackInput = document.getElementById("search-track");
-      const modeSelect = document.getElementById("music-mode-select");
       if (artistInput) artistInput.value = artistCredit;
       if (albumInput) albumInput.value = albumTitle;
       if (trackInput) trackInput.value = "";
-      if (modeSelect) modeSelect.value = "track";
+      setMusicModeSelection("track");
 
       const previousDownloadDisabled = relatedDownloadButton ? relatedDownloadButton.disabled : false;
       viewTracksButton.disabled = true;
@@ -7041,6 +7061,21 @@ function bindEvents() {
       const button = event.target.closest("button[data-mode]");
       if (!button) return;
       setHomeMediaMode(button.dataset.mode || "video");
+    });
+  }
+  const musicModeSelect = document.getElementById("music-mode-select");
+  if (musicModeSelect) {
+    musicModeSelect.addEventListener("change", () => {
+      updateMusicModeToggleUI(musicModeSelect.value || "auto");
+    });
+    updateMusicModeToggleUI(musicModeSelect.value || "auto");
+  }
+  const musicModeToggle = $("#music-mode-toggle");
+  if (musicModeToggle) {
+    musicModeToggle.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-mode]");
+      if (!button) return;
+      setMusicModeSelection(button.dataset.mode || "auto");
     });
   }
   const homeDeliveryToggle = $("#home-delivery-toggle");

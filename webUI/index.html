@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-19">
-  <script defer src="app.js?v=0.9.7-ui-19"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-20">
+  <script defer src="app.js?v=0.9.7-ui-20"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -151,23 +151,30 @@
             </label>
           </div>
           <div class="music-search-options">
-            <label class="field">
+            <label class="field full">
               <span>Mode</span>
-              <select id="music-mode-select">
+              <div id="music-mode-toggle" class="home-media-mode-toggle music-mode-toggle" role="radiogroup" aria-label="Music metadata mode">
+                <button type="button" class="home-media-mode-pill active" data-mode="auto" role="radio" aria-checked="true">Auto</button>
+                <button type="button" class="home-media-mode-pill" data-mode="album" role="radio" aria-checked="false">Album</button>
+                <button type="button" class="home-media-mode-pill" data-mode="track" role="radio" aria-checked="false">Track</button>
+              </div>
+              <select id="music-mode-select" class="hidden" aria-hidden="true" tabindex="-1">
                 <option value="auto">Auto</option>
                 <option value="artist">Artist</option>
                 <option value="album">Album</option>
                 <option value="track">Track</option>
               </select>
             </label>
-            <label class="field">
-              <span>Max candidates (1-15)</span>
-              <input id="search-max-candidates" type="number" min="1" max="15" value="10">
-            </label>
-            <label class="checkbox-inline music-search-force-redownload">
-              <input id="music-force-redownload" type="checkbox">
-              <span>Force re-download</span>
-            </label>
+            <div class="music-search-inline-row">
+              <label class="field tiny music-search-max-candidates">
+                <span>Max candidates</span>
+                <input id="search-max-candidates" type="number" min="1" max="15" value="10">
+              </label>
+              <label class="checkbox-inline music-search-force-redownload">
+                <input id="music-force-redownload" type="checkbox">
+                <span>Force re-download</span>
+              </label>
+            </div>
           </div>
           <div class="music-search-actions-row">
             <button id="search-create-only" class="button primary">Search</button>
