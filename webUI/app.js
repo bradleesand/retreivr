@@ -2606,10 +2606,51 @@ function renderMusicModeResults(response, query = "") {
       card.appendChild(albumRef);
       const action = document.createElement("div");
       action.className = "home-candidate-action";
+      const viewTracksButton = document.createElement("button");
+      viewTracksButton.className = "button ghost small";
+      viewTracksButton.dataset.releaseGroupMbid = releaseGroupMbid;
+      viewTracksButton.textContent = "View Tracks";
       const button = document.createElement("button");
       button.className = "button primary small";
       button.dataset.releaseGroupMbid = releaseGroupMbid;
       button.textContent = "Download";
+      viewTracksButton.addEventListener("click", async () => {
+        const releaseGroupMbidValue = String(viewTracksButton.dataset.releaseGroupMbid || "").trim();
+        const artistQuery = String(albumItem?.artist || "").trim();
+        const albumTitle = String(albumItem?.title || "").trim();
+        if (!artistQuery && !albumTitle) return;
+        const artistInput = document.getElementById("search-artist");
+        const albumInput = document.getElementById("search-album");
+        const trackInput = document.getElementById("search-track");
+        const modeSelect = document.getElementById("music-mode-select");
+        if (artistInput) artistInput.value = artistQuery;
+        if (albumInput) albumInput.value = albumTitle;
+        if (trackInput) trackInput.value = "";
+        if (modeSelect) modeSelect.value = "track";
+
+        viewTracksButton.disabled = true;
+        button.disabled = true;
+        const previousViewLabel = viewTracksButton.textContent;
+        const previousDownloadLabel = button.textContent;
+        viewTracksButton.textContent = "Loading...";
+        setNotice($("#home-search-message"), `Loading tracks for ${albumTitle || "album"}...`, false);
+        try {
+          const tracks = await fetchMusicTracksByAlbum({
+            artist: artistQuery,
+            album: albumTitle,
+            releaseGroupMbid: releaseGroupMbidValue,
+            limit: 200,
+          });
+          renderMusicModeResults({ artists: [], albums: [], tracks, mode_used: "track" }, `${artistQuery} ${albumTitle}`.trim());
+          setNotice($("#home-search-message"), `Loaded ${tracks.length} tracks for ${albumTitle || "album"}.`, false);
+        } catch (err) {
+          viewTracksButton.disabled = false;
+          button.disabled = false;
+          viewTracksButton.textContent = previousViewLabel;
+          button.textContent = previousDownloadLabel;
+          setNotice($("#home-search-message"), `View Tracks failed: ${err.message}`, true);
+        }
+      });
       button.addEventListener("click", async () => {
         const releaseGroupMbidValue = String(button.dataset.releaseGroupMbid || "").trim();
         if (!releaseGroupMbidValue) return;
@@ -2628,6 +2669,7 @@ function renderMusicModeResults(response, query = "") {
           setNotice($("#home-search-message"), `Album queue failed: ${err.message}`, true);
         }
       });
+      action.appendChild(viewTracksButton);
       action.appendChild(button);
       card.appendChild(action);
       container.appendChild(card);
@@ -2732,6 +2774,35 @@ async function fetchMusicAlbumsByArtist(artist) {
     });
   }
   return out;
+}
+
+async function fetchMusicTracksByAlbum({ artist = "", album = "", releaseGroupMbid = "", limit = 100 } = {}) {
+  const artistQuery = String(artist || "").trim();
+  const albumQuery = String(album || "").trim();
+  const rgMbid = String(releaseGroupMbid || "").trim();
+  const cappedLimit = Number.isFinite(Number(limit)) ? Math.min(200, Math.max(1, Number(limit))) : 100;
+  if (!artistQuery && !albumQuery) {
+    return [];
+  }
+  const response = await fetch(
+    `/api/music/search?artist=${encodeURIComponent(artistQuery)}&album=${encodeURIComponent(albumQuery)}&track=&mode=track&offset=0&limit=${cappedLimit}`
+  );
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch (_err) {
+    payload = {};
+  }
+  if (!response.ok) {
+    const detail = payload && payload.detail ? payload.detail : `HTTP ${response.status}`;
+    throw new Error(String(detail));
+  }
+  const normalized = normalizeMusicSearchResults(payload?.tracks);
+  if (!rgMbid) {
+    return normalized;
+  }
+  const matched = normalized.filter((item) => String(item?.mb_release_group_id || "").trim() === rgMbid);
+  return matched.length ? matched : normalized;
 }
 
 async function performMusicModeSearch() {
