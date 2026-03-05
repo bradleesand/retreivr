@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-20">
-  <script defer src="app.js?v=0.9.7-ui-20"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-23">
+  <script defer src="app.js?v=0.9.7-ui-23"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -24,7 +24,7 @@
     </button>
     <nav class="top-nav" id="primary-nav" aria-label="Primary">
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
-      <button class="button ghost small nav-button" data-page="advanced" type="button">Advanced</button>
+      <button class="button ghost small nav-button" data-page="info" type="button">Info</button>
       <button class="button ghost small nav-button" data-page="status" type="button">Status</button>
       <button class="button ghost small nav-button" data-page="config" type="button">Config</button>
       <div id="nav-actions" class="nav-actions"></div>
@@ -151,7 +151,8 @@
             </label>
           </div>
           <div class="music-search-options">
-            <label class="field full">
+            <div class="music-search-options-row">
+            <label class="field music-search-mode-field">
               <span>Mode</span>
               <div id="music-mode-toggle" class="home-media-mode-toggle music-mode-toggle" role="radiogroup" aria-label="Music metadata mode">
                 <button type="button" class="home-media-mode-pill active" data-mode="auto" role="radio" aria-checked="true">Auto</button>
@@ -165,7 +166,6 @@
                 <option value="track">Track</option>
               </select>
             </label>
-            <div class="music-search-inline-row">
               <label class="field tiny music-search-max-candidates">
                 <span>Max candidates</span>
                 <input id="search-max-candidates" type="number" min="1" max="15" value="10">
@@ -463,7 +463,7 @@
       </div>
     </section>
 
-    <section class="panel" id="metrics-panel" data-page="advanced">
+    <section class="panel" id="metrics-panel" data-page="info">
       <div class="panel-title">Metrics</div>
       <div class="panel-body">
         <div class="row">
@@ -825,7 +825,7 @@
       </div>
     </section>
 
-    <section class="panel" id="search-items-panel" data-page="advanced">
+    <section class="panel" id="search-items-panel" data-page="info">
       <div class="panel-title">Search Results (Discovery)</div>
       <div class="notice">Selected request: <span id="search-selected-request">-</span></div>
       <div class="group">
@@ -870,7 +870,7 @@
     </section>
 
 
-    <section class="panel" id="search-requests-panel" data-page="advanced">
+    <section class="panel" id="search-requests-panel" data-page="info">
       <div class="panel-title">Search History (Requests)</div>
       <div class="row">
         <button id="search-requests-refresh" class="button ghost">Refresh</button>

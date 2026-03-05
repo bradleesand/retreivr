@@ -348,10 +348,27 @@ body.home-page .music-search-grid {
 }
 
 body.home-page .music-search-options {
-  display: grid;
-  grid-template-columns: 1fr;
+  display: block;
+}
+
+body.home-page .music-search-options-row {
+  display: flex;
+  align-items: flex-end;
   gap: 12px;
-  align-items: end;
+  flex-wrap: wrap;
+}
+
+body.home-page .music-search-mode-field {
+  flex: 0 1 auto;
+  width: auto;
+  max-width: none;
+  gap: 12px;
+}
+
+body.home-page .music-search-options-row .music-search-mode-field {
+  width: auto;
+  max-width: none;
+  justify-self: auto;
 }
 
 body.home-page .music-search-grid .field,
@@ -384,8 +401,15 @@ body.home-page .music-search-max-candidates {
   max-width: 132px;
 }
 
+body.home-page .music-search-options-row .music-search-max-candidates {
+  width: 132px;
+  max-width: 132px;
+  min-width: 132px;
+}
+
 body.home-page .music-search-max-candidates input {
-  width: 100%;
+  width: 84px;
+  min-width: 84px;
   text-align: center;
 }
 
@@ -2007,10 +2031,10 @@ a[aria-disabled="true"] {
   }
 
   body.home-page .music-search-options {
-    grid-template-columns: 1fr;
+    display: block;
   }
 
-  body.home-page .music-search-inline-row {
+  body.home-page .music-search-options-row {
     width: 100%;
     align-items: flex-start;
   }

@@ -140,8 +140,8 @@ function normalizePageName(page) {
     return "home";
   }
   const cleanPage = String(page).split("?")[0] || page;
-  if (cleanPage === "search" || cleanPage === "info") {
-    return "advanced";
+  if (cleanPage === "search" || cleanPage === "advanced") {
+    return "info";
   }
   if (["downloads", "history", "logs"].includes(cleanPage)) {
     return "status";
@@ -371,7 +371,7 @@ function setConfigNotice(message, isError = false, autoClear = false) {
 
 function setPage(page) {
   const normalized = normalizePageName(page);
-  const allowed = new Set(["home", "config", "status", "advanced"]);
+  const allowed = new Set(["home", "config", "status", "info"]);
   const target = allowed.has(normalized) ? normalized : "home";
   state.currentPage = target;
   if (target === "home") {
@@ -428,7 +428,7 @@ function setPage(page) {
       });
     }
     refreshSchedule();
-  } else if (target === "advanced") {
+  } else if (target === "info") {
     if (!state.config) {
       fetchJson("/api/config")
         .then((cfg) => {
@@ -2492,7 +2492,7 @@ function handleHomeViewAdvanced() {
     return;
   }
   state.pendingAdvancedRequestId = requestId;
-  window.location.hash = "#advanced";
+  window.location.hash = "#info";
 }
 
 function setHomeSearchControlsEnabled(enabled) {
@@ -2569,8 +2569,8 @@ function normalizeMusicSearchResults(rawResults) {
   return rawResults
     .map((item) => {
       const recordingMbid = String(item?.recording_mbid || "").trim();
-      const releaseMbid = String(item?.release_mbid || "").trim();
-      const releaseGroupMbid = String(item?.release_group_mbid || "").trim();
+      const releaseMbid = String(item?.release_mbid || item?.mb_release_id || "").trim();
+      const releaseGroupMbid = String(item?.release_group_mbid || item?.mb_release_group_id || "").trim();
       const artist = String(item?.artist || "").trim();
       const track = String(item?.track || "").trim();
       if (!recordingMbid || !releaseMbid || !releaseGroupMbid || !artist || !track) {
