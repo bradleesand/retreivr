@@ -460,7 +460,8 @@ body.home-page .music-force-toggle-state {
   inset: 0;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
+  padding-right: 12px;
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.6px;
@@ -483,6 +484,9 @@ body.home-page .music-force-toggle-control input[type="checkbox"]:checked + .mus
 
 body.home-page .music-force-toggle-control input[type="checkbox"]:checked ~ .music-force-toggle-state {
   color: #fca5a5;
+  justify-content: flex-start;
+  padding-left: 12px;
+  padding-right: 0;
 }
 
 body.home-page .music-force-toggle-control input[type="checkbox"]:checked ~ .music-force-toggle-state::before {
@@ -526,6 +530,26 @@ body.home-page #search-create-message {
   display: flex;
   align-items: center;
   justify-content: center;
+  text-align: center;
+}
+
+body.home-page #import-playlist-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+body.home-page #import-playlist-panel .home-advanced-row {
+  justify-content: center;
+}
+
+body.home-page #import-playlist-panel .home-advanced-field {
+  max-width: 520px;
+}
+
+body.home-page #home-import-summary {
+  width: 100%;
   text-align: center;
 }
 body.home-page.search-active .home-search-shell {
