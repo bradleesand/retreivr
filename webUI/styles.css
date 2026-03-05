@@ -859,6 +859,10 @@ body.home-page .home-source-panel .home-source-pill.selected {
   text-transform: none;
 }
 
+.music-card-click-target {
+  cursor: pointer;
+}
+
 .home-candidate-list {
   display: flex;
   flex-direction: column;

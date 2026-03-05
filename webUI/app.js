@@ -2857,7 +2857,7 @@ function renderMusicModeResults(response, query = "") {
       const button = document.createElement("button");
       button.className = "button ghost small";
       button.textContent = "View Albums";
-      button.addEventListener("click", async () => {
+      const runViewAlbums = async () => {
         const nextQuery = String(artistItem?.name || "").trim();
         const nextArtistMbid = String(artistItem?.artist_mbid || artistItem?.id || "").trim();
         if (!nextQuery) {
@@ -2884,6 +2884,15 @@ function renderMusicModeResults(response, query = "") {
           button.textContent = previousLabel;
           setNotice($("#home-search-message"), `View Albums failed: ${toUserErrorMessage(err)}`, true);
         }
+      };
+      button.addEventListener("click", runViewAlbums);
+      [artistThumb.shell, title].forEach((el) => {
+        if (!el) return;
+        el.classList.add("music-card-click-target");
+        el.addEventListener("click", () => {
+          if (button.disabled) return;
+          runViewAlbums();
+        });
       });
       action.appendChild(button);
       card.appendChild(action);
@@ -2983,7 +2992,7 @@ function renderMusicModeResults(response, query = "") {
       button.dataset.releaseGroupId = releaseGroupMbid;
       button.dataset.albumTitle = String(albumItem?.title || "");
       button.textContent = "Download";
-      viewTracksButton.addEventListener("click", async () => {
+      const runViewTracks = async () => {
         const releaseGroupMbidValue = String(viewTracksButton.dataset.releaseGroupMbid || "").trim();
         const artistQuery = String(albumItem?.artist || "").trim();
         const albumTitle = String(albumItem?.title || "").trim();
@@ -3018,6 +3027,15 @@ function renderMusicModeResults(response, query = "") {
           button.textContent = previousDownloadLabel;
           setNotice($("#home-search-message"), `View Tracks failed: ${toUserErrorMessage(err)}`, true);
         }
+      };
+      viewTracksButton.addEventListener("click", runViewTracks);
+      [albumThumb.shell, title].forEach((el) => {
+        if (!el) return;
+        el.classList.add("music-card-click-target");
+        el.addEventListener("click", () => {
+          if (viewTracksButton.disabled) return;
+          runViewTracks();
+        });
       });
       button.addEventListener("click", async () => {
         const releaseGroupMbidValue = String(button.dataset.releaseGroupMbid || "").trim();
@@ -3517,6 +3535,14 @@ function renderHomeAlbumCandidates(candidates, query = "") {
     container.appendChild(card);
   });
   container.addEventListener("click", async (event) => {
+    const clickCard = event.target.closest(".album-card");
+    if (clickCard && (event.target.closest(".album-cover") || event.target.closest(".album-title"))) {
+      const linked = clickCard.querySelector(".album-view-tracks-btn");
+      if (linked && !linked.disabled) {
+        linked.click();
+      }
+      return;
+    }
     const viewTracksButton = event.target.closest(".album-view-tracks-btn");
     if (viewTracksButton) {
       const releaseGroupId = String(viewTracksButton.dataset.releaseGroupId || "").trim();
