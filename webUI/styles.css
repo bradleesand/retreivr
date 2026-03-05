@@ -857,16 +857,20 @@ body.home-page .home-candidate-title {
 
 .music-meta-card {
   display: flex;
-  align-items: center;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 12px;
 }
 
 .music-meta-main {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
   flex: 1;
   min-width: 0;
+  text-align: left;
 }
 
 .music-meta-card .home-candidate-action {
