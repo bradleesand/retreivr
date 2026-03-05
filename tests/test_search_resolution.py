@@ -494,6 +494,51 @@ class SearchResolutionTests(unittest.TestCase):
         self.assertEqual(seeded[0].get("url"), "https://example.test/media/exact-song")
         self.assertTrue(bool(seeded[0].get("search_cache_seeded")))
 
+    def test_search_cache_query_normalization_reuses_similar_video_text(self):
+        service = SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"stub": StubAdapter()},
+            config={"search_cache_enabled": True},
+            paths=self.paths,
+            canonical_resolver=StubCanonicalResolver(),
+        )
+        request_row = {
+            "id": "req-1",
+            "media_type": "generic",
+            "source_priority_json": '["stub"]',
+            "max_candidates_per_source": 5,
+        }
+        broad_item = {"id": "item-1", "item_type": "track", "artist": "hello", "track": "hello"}
+        ranked = [
+            {
+                "candidate_id": "cand-1",
+                "source": "stub",
+                "url": "https://example.test/media/hello",
+                "title": "Hello Official Video",
+                "uploader": "Artist",
+                "duration_sec": 200,
+            }
+        ]
+        service._refresh_search_cache_for_item(  # type: ignore[attr-defined]
+            request_row,
+            broad_item,
+            ranked,
+        )
+        similar_item = {
+            "id": "item-2",
+            "item_type": "track",
+            "artist": "hello official video",
+            "track": "hello official video",
+        }
+        seeded = service._search_cache_candidates_for_item(  # type: ignore[attr-defined]
+            similar_item,
+            request_row,
+            limit=5,
+        )
+        self.assertEqual(len(seeded), 1)
+        self.assertEqual(seeded[0].get("url"), "https://example.test/media/hello")
+
 
 if __name__ == "__main__":
     unittest.main()

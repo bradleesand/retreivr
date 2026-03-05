@@ -399,6 +399,96 @@ body.home-page .music-search-force-redownload {
   white-space: nowrap;
 }
 
+body.home-page .music-force-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  margin: 0;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+body.home-page .music-force-toggle-label {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+body.home-page .music-force-toggle-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+body.home-page .music-force-toggle-control input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+
+body.home-page .music-force-toggle-track {
+  width: 78px;
+  height: 38px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: rgba(148, 163, 184, 0.14);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+  position: relative;
+}
+
+body.home-page .music-force-toggle-track::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #ffffff;
+  transition: transform 0.2s ease;
+}
+
+body.home-page .music-force-toggle-state {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+body.home-page .music-force-toggle-state::before {
+  content: "Off";
+}
+
+body.home-page .music-force-toggle-control input[type="checkbox"]:checked + .music-force-toggle-track {
+  background: rgba(239, 68, 68, 0.24);
+  border-color: rgba(239, 68, 68, 0.75);
+}
+
+body.home-page .music-force-toggle-control input[type="checkbox"]:checked + .music-force-toggle-track::before {
+  transform: translateX(40px);
+}
+
+body.home-page .music-force-toggle-control input[type="checkbox"]:checked ~ .music-force-toggle-state {
+  color: #fca5a5;
+}
+
+body.home-page .music-force-toggle-control input[type="checkbox"]:checked ~ .music-force-toggle-state::before {
+  content: "On";
+}
+
 body.home-page .music-mode-toggle {
   width: fit-content;
 }

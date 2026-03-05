@@ -1814,11 +1814,53 @@ class SearchResolutionService:
             return " ".join(part for part in [artist, track] if part).strip()
         return " ".join(part for part in [artist, album] if part).strip()
 
+    def _normalize_search_cache_query_text(self, query):
+        text = str(query or "").strip().lower()
+        if not text:
+            return ""
+        text = re.sub(r"[^\w\s]", " ", text)
+        tokens = [token for token in text.split() if token]
+        # Remove common transport noise so semantically similar queries map together.
+        drop_tokens = {
+            "official",
+            "video",
+            "music",
+            "mv",
+            "audio",
+            "lyrics",
+            "lyric",
+            "hd",
+            "4k",
+        }
+        normalized_tokens = [token for token in tokens if token not in drop_tokens]
+        if not normalized_tokens:
+            normalized_tokens = tokens
+        seen = set()
+        compact = []
+        for token in normalized_tokens:
+            if token in seen:
+                continue
+            seen.add(token)
+            compact.append(token)
+        return " ".join(compact).strip()
+
     def _search_cache_key_for_item(self, item, request_row):
         query = self._build_search_cache_query(item, request_row)
         return self._search_cache_key_for_query(query, request_row, item_type=(item or {}).get("item_type")), query
 
     def _search_cache_key_for_query(self, query, request_row, *, item_type):
+        normalized_query = self._normalize_search_cache_query_text(query)
+        media_type = str((request_row or {}).get("media_type") or "generic").strip().lower()
+        source_priority = _parse_source_priority((request_row or {}).get("source_priority_json"))
+        key_payload = {
+            "query": normalized_query,
+            "media_type": media_type,
+            "sources": [str(s).strip().lower() for s in source_priority if str(s).strip()],
+            "item_type": str(item_type or "").strip().lower(),
+        }
+        return hashlib.sha1(safe_json_dumps(key_payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _search_cache_key_for_query_legacy(self, query, request_row, *, item_type):
         media_type = str((request_row or {}).get("media_type") or "generic").strip().lower()
         source_priority = _parse_source_priority((request_row or {}).get("source_priority_json"))
         key_payload = {
@@ -1843,6 +1885,17 @@ class SearchResolutionService:
                 max_age_seconds=self._search_cache_ttl_seconds(),
                 limit=max(1, int(limit)),
             )
+            if not rows:
+                legacy_key = self._search_cache_key_for_query_legacy(
+                    query,
+                    request_row,
+                    item_type=(item or {}).get("item_type"),
+                )
+                rows = self.store.list_search_cache(
+                    cache_key=legacy_key,
+                    max_age_seconds=self._search_cache_ttl_seconds(),
+                    limit=max(1, int(limit)),
+                )
             alias_query = self._build_search_cache_alias_query(item)
             if not rows and alias_query and alias_query.strip().lower() != str(query or "").strip().lower():
                 alias_key = self._search_cache_key_for_query(
@@ -1855,6 +1908,17 @@ class SearchResolutionService:
                     max_age_seconds=self._search_cache_ttl_seconds(),
                     limit=max(1, int(limit)),
                 )
+                if not rows:
+                    legacy_alias_key = self._search_cache_key_for_query_legacy(
+                        alias_query,
+                        request_row,
+                        item_type=(item or {}).get("item_type"),
+                    )
+                    rows = self.store.list_search_cache(
+                        cache_key=legacy_alias_key,
+                        max_age_seconds=self._search_cache_ttl_seconds(),
+                        limit=max(1, int(limit)),
+                    )
         except Exception as exc:
             _log_event(
                 logging.WARNING,

@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-25">
-  <script defer src="app.js?v=0.9.7-ui-25"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-26">
+  <script defer src="app.js?v=0.9.7-ui-26"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -170,9 +170,13 @@
                 <span>Max candidates</span>
                 <input id="search-max-candidates" type="number" min="1" max="15" value="10">
               </label>
-              <label class="checkbox-inline music-search-force-redownload">
-                <input id="music-force-redownload" type="checkbox">
-                <span>Force re-download</span>
+              <label class="music-force-toggle" for="music-force-redownload">
+                <span class="music-force-toggle-label">Force re-download</span>
+                <span class="music-force-toggle-control">
+                  <input id="music-force-redownload" type="checkbox">
+                  <span class="music-force-toggle-track" aria-hidden="true"></span>
+                  <span class="music-force-toggle-state" aria-hidden="true"></span>
+                </span>
               </label>
             </div>
           </div>
