@@ -118,3 +118,16 @@ def test_api_put_config_hot_applies_watcher_enable_toggle(monkeypatch) -> None:
 
     assert calls["enable"] == 1
     assert calls["disable"] == 1
+
+
+def test_send_watcher_batch_telegram_returns_message_id(monkeypatch) -> None:
+    module = _load_api_main()
+
+    def _fake_send(_config, _message):
+        return {"ok": True, "message_id": 777}
+
+    monkeypatch.setattr(module, "telegram_notify_result", _fake_send)
+
+    result = module._send_watcher_batch_telegram({}, "test")
+    assert result["sent"] is True
+    assert result["message_id"] == 777

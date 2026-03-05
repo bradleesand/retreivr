@@ -1011,16 +1011,52 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
 
         return labels
 
+    def _resolve_attempted_job_outcomes(values) -> tuple[list[str], list[str]]:
+        if not isinstance(values, (list, tuple, set)):
+            return [], []
+        job_ids = [str(v or "").strip() for v in values if re.fullmatch(r"[0-9a-f]{32}", str(v or "").strip())]
+        if not job_ids:
+            return [], []
+        db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+        if not db_path:
+            return [], []
+        completed_ids: list[str] = []
+        failed_ids: list[str] = []
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            placeholders = ",".join("?" for _ in job_ids)
+            cur.execute(
+                f"SELECT id, status FROM download_jobs WHERE id IN ({placeholders})",
+                job_ids,
+            )
+            for job_id, raw_status in cur.fetchall():
+                normalized = str(raw_status or "").strip().lower()
+                if normalized == "completed":
+                    completed_ids.append(str(job_id))
+                elif normalized in {"failed", "cancelled"}:
+                    failed_ids.append(str(job_id))
+        except Exception:
+            logging.exception("Failed to resolve attempted outcomes from download_jobs")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        return completed_ids, failed_ids
+
     def _build_message(success_count: int, failure_count: int, duration_text: str, downloaded_labels: list[str]) -> str:
         status_text = "completed" if failure_count <= 0 else "completed_with_errors"
         success_label = "Success"
         failure_label = "Failed"
         downloaded_heading = "Downloaded:"
         if run_type == "scheduled":
-            title = "Retreivr Scheduler Run Summary\nYouTube Playlist Queueing Completed"
-            success_label = "Jobs queued"
-            failure_label = "Queue failures"
-            downloaded_heading = "Queued:"
+            title = "Retreivr Scheduler Run Summary\nYouTube Playlist Download Attempts"
+            success_label = "Attempted successes"
+            failure_label = "Attempted failures"
+            downloaded_heading = "Attempted:"
         elif run_type == "watcher":
             title = "Retreivr Watcher Run Summary\nYouTube Playlist Archive Completed"
         else:
@@ -1044,7 +1080,7 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
             return message
 
         # Trim downloaded list first, preserving header and a clear overflow marker.
-        trimmed_lines = ["", "Downloaded:"]
+        trimmed_lines = ["", downloaded_heading]
         remaining = list(downloaded_labels)
         while remaining:
             next_line = f"\u2022 {remaining[0]}"
@@ -1063,15 +1099,22 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
             return f"{capped[:TELEGRAM_MAX_MESSAGE_CHARS - 1]}\u2026"
         return capped
 
-    successes = _count(getattr(status, "run_successes", 0))
-    failures = _count(getattr(status, "run_failures", 0))
-    attempted = successes + failures
+    raw_successes = getattr(status, "run_successes", []) or []
+    completed_ids, failed_ids = _resolve_attempted_job_outcomes(raw_successes)
+    if completed_ids or failed_ids:
+        successes = len(completed_ids)
+        failures = len(failed_ids)
+        attempted = successes + failures
+        summary_values = list(completed_ids) + list(failed_ids)
+    else:
+        successes = _count(raw_successes)
+        failures = _count(getattr(status, "run_failures", 0))
+        attempted = successes + failures
+        summary_values = list(raw_successes) if isinstance(raw_successes, (list, tuple, set)) else []
 
-    if attempted <= 0 and not force_send:
+    # Attempt-driven summaries only: no synthetic sends when nothing was attempted.
+    if attempted <= 0:
         return {"attempted": 0, "sent": False, "telegram_message_id": None}
-    if attempted <= 0 and force_send:
-        failures = 1
-        attempted = 1
 
     duration_label = "unknown"
     if started_at and finished_at:
@@ -1082,7 +1125,7 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
             m, s = divmod(max(0, duration_sec), 60)
             duration_label = f"{m}m {s}s" if m else f"{s}s"
 
-    downloaded_labels = _resolve_downloaded_labels(getattr(status, "run_successes", []) or [])
+    downloaded_labels = _resolve_downloaded_labels(summary_values)
     msg = _build_message(successes, failures, duration_label, downloaded_labels)
 
     telegram_message_id = None
@@ -4532,7 +4575,7 @@ async def _watcher_supervisor():
                     ",".join(batch_playlists),
                 )
                 batch_start = time.monotonic()
-                total_enqueued = 0
+                batch_job_ids: list[str] = []
                 for playlist_id in batch_playlists:
                     pl = playlist_map.get(playlist_id)
                     if not pl:
@@ -4555,31 +4598,64 @@ async def _watcher_supervisor():
                             await app.state.run_task
                         status = app.state.status
                         if status:
-                            total_enqueued += len(status.run_successes or [])
+                            for value in (status.run_successes or []):
+                                text = str(value or "").strip()
+                                if re.fullmatch(r"[0-9a-f]{32}", text):
+                                    batch_job_ids.append(text)
                     elif result == "deferred":
                         logging.info("Watcher: batch deferred playlist_id=%s", playlist_id)
                     else:
                         logging.debug("Watcher: batch skipped (run active) playlist_id=%s", playlist_id)
                 duration_seconds = max(0, int(time.monotonic() - batch_start))
+                attempted_success = 0
+                attempted_failed = 0
+                if batch_job_ids:
+                    conn = None
+                    try:
+                        conn = sqlite3.connect(app.state.paths.db_path)
+                        cur = conn.cursor()
+                        placeholders = ",".join("?" for _ in batch_job_ids)
+                        cur.execute(
+                            f"SELECT status, COUNT(*) FROM download_jobs WHERE id IN ({placeholders}) GROUP BY status",
+                            batch_job_ids,
+                        )
+                        for raw_status, count in cur.fetchall():
+                            normalized = str(raw_status or "").strip().lower()
+                            if normalized == "completed":
+                                attempted_success += int(count or 0)
+                            elif normalized in {"failed", "cancelled"}:
+                                attempted_failed += int(count or 0)
+                    except Exception:
+                        logging.exception("Watcher batch attempted-summary query failed")
+                    finally:
+                        if conn is not None:
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+                attempted_total = attempted_success + attempted_failed
                 logging.info(
-                    "Watcher: batch complete playlists=%s jobs_enqueued=%s",
+                    "Watcher: batch complete playlists=%s attempted_total=%s attempted_success=%s attempted_failed=%s",
                     len(batch_playlists),
-                    total_enqueued,
+                    attempted_total,
+                    attempted_success,
+                    attempted_failed,
                 )
-                if batch_playlists and total_enqueued > 0:
+                if batch_playlists and attempted_total > 0:
                     minutes = duration_seconds // 60
                     seconds = duration_seconds % 60
                     duration_label = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
                     msg = (
                         "Retreivr Watcher Batch\n"
                         f"Playlists: {len(batch_playlists)}\n"
-                        f"Jobs enqueued: {total_enqueued}\n"
+                        f"Attempted successes: {attempted_success}\n"
+                        f"Attempted failures: {attempted_failed}\n"
                         f"Duration: {duration_label}"
                     )
-                    telegram_notify(config, msg)
+                    _send_watcher_batch_telegram(config, msg)
                 elif batch_playlists:
                     logging.info(
-                        "Watcher: batch telegram skipped (no downloads) playlists=%s",
+                        "Watcher: batch telegram skipped (no attempted downloads) playlists=%s",
                         len(batch_playlists),
                     )
                 batch_state["batch_active"] = False
@@ -4805,6 +4881,28 @@ def _start_watcher_supervisor_task():
     task.add_done_callback(_watcher_supervisor_task_done)
     app.state.watcher_task = task
     return task
+
+
+def _send_watcher_batch_telegram(config, message: str) -> dict[str, object]:
+    telegram_message_id = None
+    sent = False
+    try:
+        result = telegram_notify_result(config, message)
+        if isinstance(result, dict):
+            sent = bool(result.get("ok"))
+            telegram_message_id = result.get("message_id")
+        else:
+            sent = bool(telegram_notify(config, message))
+        logging.info(
+            "Watcher: batch telegram dispatched sent=%s message_id=%s",
+            sent,
+            telegram_message_id,
+        )
+    except Exception:
+        logging.exception("Watcher: batch telegram dispatch failed")
+        sent = False
+        telegram_message_id = None
+    return {"sent": sent, "message_id": telegram_message_id}
 
 
 async def _disable_watcher_runtime(reason: str | None = None):
