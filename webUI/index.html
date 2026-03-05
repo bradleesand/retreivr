@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-9">
-  <script defer src="app.js?v=0.9.7-ui-9"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-10">
+  <script defer src="app.js?v=0.9.7-ui-10"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -664,47 +664,55 @@
 
         <div class="group">
           <div class="group-title">Music metadata enrichment</div>
-          <div class="grid two">
-            <label class="field short">
-              <span>Music mode match threshold (%)</span>
-              <input id="cfg-music-meta-threshold" type="number" min="0" max="100" step="1">
-            </label>
-            <label class="field inline short">
-              <span>Enabled</span>
-              <input id="cfg-music-meta-enabled" type="checkbox">
-            </label>
-            <label class="field short">
-              <span>Enrichment confidence threshold (%)</span>
-              <input id="cfg-music-enrich-threshold" type="number" min="0" max="100" step="1">
-            </label>
-            <label class="field inline short">
-              <span>Use AcoustID</span>
-              <input id="cfg-music-meta-acoustid" type="checkbox">
-            </label>
-            <label class="field long">
-              <span>AcoustID API key</span>
-              <input id="cfg-music-meta-acoustid-key" type="password" placeholder="optional">
-            </label>
-            <label class="field inline short">
-              <span>Embed artwork</span>
-              <input id="cfg-music-meta-artwork" type="checkbox">
-            </label>
-            <label class="field inline short">
-              <span>Overwrite existing tags</span>
-              <input id="cfg-music-meta-overwrite" type="checkbox">
-            </label>
-            <label class="field short">
-              <span>Max artwork size (px)</span>
-              <input id="cfg-music-meta-artwork-size" type="number" min="200" step="50">
-            </label>
-            <label class="field short">
-              <span>Rate limit (seconds)</span>
-              <input id="cfg-music-meta-rate" type="number" min="0" step="0.1">
-            </label>
-            <label class="field inline short">
-              <span>Dry-run tagging</span>
-              <input id="cfg-music-meta-dry-run" type="checkbox">
-            </label>
+          <div class="stack music-meta-layout">
+            <div class="row">
+              <label class="field inline short">
+                <span title="Turns post-download metadata enrichment on or off for music-mode items.">Enabled</span>
+                <input id="cfg-music-meta-enabled" type="checkbox">
+              </label>
+              <label class="field inline short">
+                <span title="Embed album art into output audio tags when available.">Embed artwork</span>
+                <input id="cfg-music-meta-artwork" type="checkbox">
+              </label>
+              <label class="field inline short">
+                <span title="Write tag changes without modifying files (debug/verification mode).">Dry-run tagging</span>
+                <input id="cfg-music-meta-dry-run" type="checkbox">
+              </label>
+            </div>
+            <div class="row">
+              <label class="field tiny">
+                <span title="Minimum MusicBrainz/source match score used by music-mode resolver.">Match threshold (%)</span>
+                <input id="cfg-music-meta-threshold" type="number" min="0" max="100" step="1">
+              </label>
+              <label class="field tiny">
+                <span title="Minimum enrichment confidence required before writing metadata tags.">Enrichment threshold (%)</span>
+                <input id="cfg-music-enrich-threshold" type="number" min="0" max="100" step="1">
+              </label>
+              <label class="field short">
+                <span title="Throttle metadata calls to reduce API pressure and rate-limit risk.">Rate limit (seconds)</span>
+                <input id="cfg-music-meta-rate" type="number" min="0" step="0.1">
+              </label>
+            </div>
+            <div class="row">
+              <label class="field inline short">
+                <span title="Use AcoustID fingerprint lookups when available to improve tag confidence.">Use AcoustID</span>
+                <input id="cfg-music-meta-acoustid" type="checkbox">
+              </label>
+              <label class="field long">
+                <span title="Optional AcoustID API key used when AcoustID lookups are enabled.">AcoustID API key</span>
+                <input id="cfg-music-meta-acoustid-key" type="password" placeholder="optional">
+              </label>
+            </div>
+            <div class="row">
+              <label class="field short">
+                <span title="Maximum embedded artwork dimension (pixels). Larger values increase output size.">Max artwork size (px)</span>
+                <input id="cfg-music-meta-artwork-size" type="number" min="200" step="50">
+              </label>
+              <label class="field inline short">
+                <span title="Allow enrichment to replace existing tags in already-tagged files.">Overwrite existing tags</span>
+                <input id="cfg-music-meta-overwrite" type="checkbox">
+              </label>
+            </div>
           </div>
           <div class="notice">Applies only to music mode runs. Enrichment happens after downloads, in the background.</div>
         </div>
@@ -719,11 +727,6 @@
           <div class="group-title">Playlists</div>
           <div id="playlists-list" class="stack"></div>
           <button id="add-playlist" class="button ghost">Add playlist</button>
-        </div>
-
-        <div class="group">
-          <div class="group-title">Spotify Playlists</div>
-          <div id="spotify-playlists-list" class="stack"></div>
         </div>
 
         <div class="group">
