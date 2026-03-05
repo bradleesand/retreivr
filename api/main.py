@@ -231,43 +231,85 @@ def _bounded_call(timeout_seconds: float, fn):
         return future.result(timeout=max(0.2, float(timeout_seconds)))
 
 
+_MV_HINT_STOPWORDS = {
+    "official",
+    "music",
+    "video",
+    "audio",
+    "lyrics",
+    "lyric",
+    "hd",
+    "hq",
+    "ft",
+    "feat",
+    "featuring",
+    "the",
+    "and",
+    "with",
+    "a",
+    "an",
+}
+
+
+def _mv_hint_tokens(text: str) -> list[str]:
+    raw = re.findall(r"[a-z0-9]+", str(text or "").lower())
+    return [token for token in raw if token and token not in _MV_HINT_STOPWORDS]
+
+
+def _mv_required_hits(tokens: list[str]) -> int:
+    if not tokens:
+        return 0
+    if len(tokens) <= 2:
+        return 1
+    return 2
+
+
+def _mv_has_intent(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    if "official music video" in lowered or "official video" in lowered or "music video" in lowered:
+        return True
+    words = set(re.findall(r"[a-z0-9]+", lowered))
+    return "official" in words and "video" in words
+
+
 def _quick_youtube_mv_precheck(artist: str, track: str, album: str | None = None) -> dict:
     artist_text = str(artist or "").strip()
     track_text = str(track or "").strip()
-    album_text = str(album or "").strip()
     if not artist_text and not track_text:
         return {"matched": False, "reason": "missing_query"}
-    query_parts = [artist_text, track_text]
-    if album_text:
-        query_parts.append(album_text)
-    query_parts.append("official music video")
+    query_parts = [artist_text, track_text, "official music video"]
     query = " ".join(part for part in query_parts if part).strip()
     if not query:
         return {"matched": False, "reason": "missing_query"}
     adapter = YouTubeAdapter()
     try:
-        candidates = _bounded_call(2.8, lambda: adapter.search_music_track(query, limit=3))
+        candidates = _bounded_call(2.8, lambda: adapter.search_music_track(query, limit=5))
     except Exception:
         return {"matched": False, "reason": "search_timeout"}
     if not isinstance(candidates, list) or not candidates:
         return {"matched": False, "reason": "no_candidates"}
-    artist_lower = artist_text.lower()
-    track_lower = track_text.lower()
-    for candidate in candidates[:3]:
+    artist_tokens = _mv_hint_tokens(artist_text)
+    track_tokens = _mv_hint_tokens(track_text)
+    for candidate in candidates[:5]:
         title = str(candidate.get("title") or "").strip()
         if not title:
             continue
-        title_lower = title.lower()
-        if (
-            ("official video" in title_lower or "music video" in title_lower)
-            and (not artist_lower or artist_lower in title_lower)
-            and (not track_lower or track_lower in title_lower)
-        ):
+        uploader = str(candidate.get("uploader") or candidate.get("artist") or "").strip()
+        searchable = f"{title} {uploader}".strip()
+        searchable_tokens = set(_mv_hint_tokens(searchable))
+        artist_hits = len(set(artist_tokens).intersection(searchable_tokens)) if artist_tokens else 0
+        track_hits = len(set(track_tokens).intersection(searchable_tokens)) if track_tokens else 0
+        artist_ok = artist_hits >= _mv_required_hits(artist_tokens)
+        track_ok = track_hits >= _mv_required_hits(track_tokens)
+        if _mv_has_intent(title) and artist_ok and track_ok:
             return {
                 "matched": True,
-                "reason": "title_match",
+                "reason": "token_match",
                 "title": title,
                 "url": candidate.get("url"),
+                "uploader": uploader or None,
             }
     first = candidates[0] if isinstance(candidates[0], dict) else {}
     return {
