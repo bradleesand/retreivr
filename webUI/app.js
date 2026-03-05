@@ -33,6 +33,8 @@ const state = {
   homeArtistCoverCache: {},
   homeMusicRenderToken: 0,
   homeMusicResultMap: {},
+  homeMusicCurrentView: null,
+  homeMusicViewStack: [],
   homeMusicVideoHintCache: {},
   homeRequestContext: {},
   homeBestScores: {},
@@ -2323,6 +2325,9 @@ function setHomeMediaMode(mode, { persist = true, clearResultsOnDisable = true }
   state.homeMediaMode = nextMode;
   state.homeMusicMode = nextMode !== "video";
   updateHomeMusicModeUI();
+  if (previous !== state.homeMusicMode) {
+    clearMusicResultsHistory();
+  }
   if (previous && !state.homeMusicMode && clearResultsOnDisable) {
     // Invalidate any in-flight music metadata responses so stale results cannot render.
     state.homeMusicSearchSeq += 1;
@@ -2598,6 +2603,23 @@ function normalizeMusicSearchResults(rawResults) {
     .filter(Boolean);
 }
 
+function snapshotMusicResultsView(response = {}, query = "") {
+  return {
+    response: {
+      artists: Array.isArray(response?.artists) ? [...response.artists] : [],
+      albums: Array.isArray(response?.albums) ? [...response.albums] : [],
+      tracks: Array.isArray(response?.tracks) ? [...response.tracks] : [],
+      mode_used: response?.mode_used || "auto",
+    },
+    query: String(query || ""),
+  };
+}
+
+function clearMusicResultsHistory() {
+  state.homeMusicCurrentView = null;
+  state.homeMusicViewStack = [];
+}
+
 async function enqueueAlbum(releaseGroupMbid) {
   const forceRedownload = !!document.getElementById("music-force-redownload")?.checked;
   return fetchJson("/api/music/album/download", {
@@ -2784,7 +2806,11 @@ async function hydrateMusicVideoHints(tracks = [], renderToken = 0) {
   await Promise.all(workers);
 }
 
-function renderMusicModeResults(response, query = "") {
+function renderMusicModeResults(response, query = "", { pushHistory = false } = {}) {
+  if (pushHistory && state.homeMusicCurrentView) {
+    state.homeMusicViewStack.push(state.homeMusicCurrentView);
+  }
+  state.homeMusicCurrentView = snapshotMusicResultsView(response, query);
   const artists = Array.isArray(response?.artists) ? response.artists : [];
   const albums = Array.isArray(response?.albums) ? response.albums : [];
   const tracks = normalizeMusicSearchResults(response?.tracks);
@@ -2816,6 +2842,26 @@ function renderMusicModeResults(response, query = "") {
     query ? `Showing MusicBrainz metadata for “${query}”.` : "Showing MusicBrainz metadata.",
     false
   );
+
+  if (state.homeMusicViewStack.length) {
+    const nav = document.createElement("div");
+    nav.className = "row";
+    nav.style.marginBottom = "8px";
+    const backButton = document.createElement("button");
+    backButton.className = "button ghost small";
+    const previousView = state.homeMusicViewStack[state.homeMusicViewStack.length - 1];
+    const previousHasAlbums = Array.isArray(previousView?.response?.albums) && previousView.response.albums.length > 0;
+    backButton.textContent = previousHasAlbums ? "Back to Albums" : "Back";
+    backButton.addEventListener("click", () => {
+      const previous = state.homeMusicViewStack.pop();
+      if (!previous) {
+        return;
+      }
+      renderMusicModeResults(previous.response, previous.query, { pushHistory: false });
+    });
+    nav.appendChild(backButton);
+    container.appendChild(nav);
+  }
 
   function appendSection(titleText) {
     const sectionHeader = document.createElement("div");
@@ -2877,7 +2923,11 @@ function renderMusicModeResults(response, query = "") {
         setNotice($("#home-search-message"), `Loading albums for ${nextQuery}...`, false);
         try {
           const albums = await fetchMusicAlbumsByArtist({ name: nextQuery, artist_mbid: nextArtistMbid });
-          renderMusicModeResults({ artists: [], albums, tracks: [], mode_used: "album" }, nextQuery);
+          renderMusicModeResults(
+            { artists: [], albums, tracks: [], mode_used: "album" },
+            nextQuery,
+            { pushHistory: true }
+          );
           setNotice($("#home-search-message"), `Loaded ${albums.length} album candidates for ${nextQuery}.`, false);
         } catch (err) {
           button.disabled = false;
@@ -3018,7 +3068,11 @@ function renderMusicModeResults(response, query = "") {
             releaseGroupMbid: releaseGroupMbidValue,
             limit: 100,
           });
-          renderMusicModeResults({ artists: [], albums: [], tracks, mode_used: "track" }, `${artistQuery} ${albumTitle}`.trim());
+          renderMusicModeResults(
+            { artists: [], albums: [], tracks, mode_used: "track" },
+            `${artistQuery} ${albumTitle}`.trim(),
+            { pushHistory: true }
+          );
           setNotice($("#home-search-message"), `Loaded ${tracks.length} tracks for ${albumTitle || "album"}.`, false);
         } catch (err) {
           viewTracksButton.disabled = false;
@@ -3274,6 +3328,7 @@ async function performMusicModeSearch() {
     if (!state.homeMusicMode) {
       return;
     }
+    clearMusicResultsHistory();
     renderMusicModeResults({ artists: [], albums: [], tracks: [], mode_used: "auto" });
     return;
   }
@@ -3300,6 +3355,7 @@ async function performMusicModeSearch() {
     return;
   }
   const displayQuery = [artist, album, track].filter(Boolean).join(" ");
+  clearMusicResultsHistory();
   renderMusicModeResults(payload, displayQuery);
 }
 
@@ -3575,7 +3631,11 @@ function renderHomeAlbumCandidates(candidates, query = "") {
           releaseGroupMbid: releaseGroupId,
           limit: 100,
         });
-        renderMusicModeResults({ artists: [], albums: [], tracks, mode_used: "track" }, `${artistCredit} ${albumTitle}`.trim());
+        renderMusicModeResults(
+          { artists: [], albums: [], tracks, mode_used: "track" },
+          `${artistCredit} ${albumTitle}`.trim(),
+          { pushHistory: true }
+        );
         setNotice($("#home-search-message"), `Loaded ${tracks.length} tracks for ${albumTitle || "album"}.`, false);
       } catch (err) {
         viewTracksButton.disabled = false;
