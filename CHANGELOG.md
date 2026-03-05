@@ -2,6 +2,52 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.7 — Community Cache + Local Search Cache + Watcher/Telegram Hardening
+
+### High-Level
+This release adds cache-first acceleration for both metadata-first music resolution and homepage search UX, while tightening watcher/Telegram behavior for cleaner operations signals.
+
+### Added
+- Community transport cache lookup integration for metadata-first music resolution:
+  - seeds candidates from community index (`recording_mbid -> transport ids`) before normal ladder execution
+  - keeps MusicBrainz canonical metadata authority unchanged
+  - keeps deterministic probe/scoring/gating unchanged (community remains hint-only)
+- Community publish outbox (v1-scoped, local-only):
+  - emits validated JSONL proposal artifacts for eligible successful selections
+  - supports opt-in modes: `off | dry_run | write_outbox`
+  - includes schema versioning, eligibility checks, and recent-window dedupe
+- Local search cache (SQLite-backed) for homepage/global search:
+  - cache-first candidate seeding for repeated queries
+  - background refresh through existing adapter search path
+  - configurable TTL, prune-on-failure, max entries, and seed depth controls
+- Deterministic community reverse index lifecycle:
+  - reverse lookup index is rebuilt from local dataset snapshots (not runtime accumulation)
+
+### Changed
+- Search UX acceleration:
+  - cached search candidates are injected immediately as source-visible candidates
+  - adapter results continue to stream in as they complete
+  - cache failures degrade gracefully and never block request/resolution flow
+- Candidate dedupe behavior improved:
+  - preserves canonical transport identity dedupe while merging provenance/richer metadata deterministically
+- Config defaults and schema support expanded for:
+  - community cache lookup/publish controls
+  - local search cache controls
+  - backward-compatible default application for missing keys
+
+### Fixed
+- Telegram run-summary hardening:
+  - scheduler/watcher headers clarified by run type
+  - downloaded item labels prefer track/title evidence and avoid leaking opaque job IDs
+  - duplicate/extra summary dispatch paths reduced
+- Watcher notification hardening:
+  - removed per-playlist watcher summary spam; watcher now relies on batch summary path
+  - batch message semantics corrected to report `jobs enqueued` (not claimed as completed downloads)
+- Watcher runtime resiliency:
+  - supervisor crash path now logs and auto-restarts
+  - blocking playlist API fetch moved off the event loop thread
+  - `/api/config` now hot-applies `enable_watcher` toggles at runtime (start/stop without restart)
+
 ## v0.9.6 — Runtime Distribution + Music Match Robustness
 
 ### High-Level
