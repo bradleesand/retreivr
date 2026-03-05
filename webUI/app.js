@@ -2242,6 +2242,14 @@ function updateHomeMusicModeUI() {
   if (modeSelect) {
     modeSelect.value = state.homeMediaMode || "video";
   }
+  const modeToggle = $("#home-media-mode-toggle");
+  if (modeToggle) {
+    modeToggle.querySelectorAll("button[data-mode]").forEach((button) => {
+      const isActive = button.dataset.mode === (state.homeMediaMode || "video");
+      button.classList.toggle("active", isActive);
+      button.setAttribute("aria-checked", isActive ? "true" : "false");
+    });
+  }
   const standardSearchContainer = $("#standard-search-container");
   if (standardSearchContainer) {
     standardSearchContainer.classList.toggle("hidden", !!state.homeMusicMode);
@@ -3638,6 +3646,17 @@ function buildHomeResultsStatusInfo(requestId) {
     };
   }
 
+  // If candidates are already visible, stop showing an indefinite "Searching for media…"
+  // header state even while adapters are still resolving.
+  if (hasCandidates && (requestStatus === "resolving" || requestStatus === "pending")) {
+    return {
+      text: "Results found",
+      detail: "Additional sources may still be resolving.",
+      isError: false,
+      status: requestStatus,
+    };
+  }
+
   if (requestStatus === "resolving" && adaptersTotal !== null && adaptersCompleted !== null) {
     return {
       text: `Searching sources (${adaptersCompleted}/${adaptersTotal})`,
@@ -3697,6 +3716,20 @@ function renderHomeStatusBadge(status) {
   badge.className = `home-result-badge ${className} long`;
   badge.textContent = label;
   return badge;
+}
+
+function buildCompactMediaSummary(parts = []) {
+  const normalized = [];
+  const seen = new Set();
+  (Array.isArray(parts) ? parts : []).forEach((value) => {
+    const text = String(value || "").trim();
+    if (!text) return;
+    const key = text.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    normalized.push(text);
+  });
+  return normalized.join(" / ") || "-";
 }
 
 const HOME_CANDIDATE_STATE_LABELS = {
@@ -3865,7 +3898,7 @@ function renderHomeResultItem(item) {
   const header = document.createElement("div");
   header.className = "home-result-header";
   const title = document.createElement("div");
-  const summary = [item.artist, item.album, item.track].filter(Boolean).join(" / ") || "-";
+  const summary = buildCompactMediaSummary([item.artist, item.album, item.track]);
   title.innerHTML = `<strong>${summary}</strong>`;
   header.appendChild(title);
   header.appendChild(renderHomeStatusBadge(item.status));
@@ -3893,7 +3926,7 @@ function updateHomeResultItemCard(card, item) {
   if (!card || !item) {
     return;
   }
-  const summary = [item.artist, item.album, item.track].filter(Boolean).join(" / ") || "-";
+  const summary = buildCompactMediaSummary([item.artist, item.album, item.track]);
   const title = card.querySelector(".home-result-header strong");
   if (title) {
     title.textContent = summary;
@@ -5509,7 +5542,7 @@ async function refreshSearchRequests(preferRequestId = null) {
 
     body.textContent = "";
     if (!requests.length) {
-      renderSearchEmptyRow(body, 7, "No search requests found.");
+      renderSearchEmptyRow(body, 6, "No search requests found.");
       setSearchSelectedRequest(null);
       setSearchSelectedItem(null);
       renderSearchEmptyRow($("#search-items-body"), 6, "Select a request to view items.");
@@ -5530,12 +5563,12 @@ async function refreshSearchRequests(preferRequestId = null) {
       if (req.id && req.id === selectedRequestId) {
         tr.classList.add("selected");
       }
-      const summary = [req.artist, req.album, req.track].filter(Boolean).join(" / ") || "-";
+      const summary = [req.artist, req.album, req.track].filter(Boolean).join(" / ");
+      const searchText = String(req.query || "").trim() || summary || "-";
       const status = req.status || "";
       const cancelDisabled = ["completed", "completed_with_skips", "failed"].includes(status);
       tr.innerHTML = `
-        <td>${req.id || ""}</td>
-        <td>${summary}</td>
+        <td>${searchText}</td>
         <td>${req.intent || ""}</td>
         <td>${status}</td>
         <td>${formatTimestamp(req.created_at) || ""}</td>
@@ -5556,7 +5589,7 @@ async function refreshSearchRequests(preferRequestId = null) {
     }
     if (messageEl) messageEl.textContent = "";
   } catch (err) {
-    renderSearchEmptyRow(body, 7, `Failed to load requests: ${err.message}`);
+    renderSearchEmptyRow(body, 6, `Failed to load requests: ${err.message}`);
     setNotice(messageEl, `Failed to load requests: ${err.message}`, true);
   }
 }
@@ -6916,6 +6949,14 @@ function bindEvents() {
   if (mediaModeSelect) {
     mediaModeSelect.addEventListener("change", () => {
       setHomeMediaMode(mediaModeSelect.value || "video");
+    });
+  }
+  const mediaModeToggle = $("#home-media-mode-toggle");
+  if (mediaModeToggle) {
+    mediaModeToggle.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-mode]");
+      if (!button) return;
+      setHomeMediaMode(button.dataset.mode || "video");
     });
   }
   const homeDeliveryToggle = $("#home-delivery-toggle");
