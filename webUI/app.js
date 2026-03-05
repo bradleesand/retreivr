@@ -264,17 +264,42 @@ function createMusicCardThumb(altText) {
   };
 
   const setImage = (url) => {
-    if (!url) {
+    const normalizedUrl = normalizeArtworkUrl(url);
+    if (!normalizedUrl) {
       setNoArt();
       return;
     }
     setLoading();
-    img.src = url;
+    img.src = normalizedUrl;
   };
 
   shell.appendChild(img);
   shell.appendChild(placeholder);
   return { shell, setImage, setNoArt, setLoading };
+}
+
+function normalizeArtworkUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+  if (raw.startsWith("//")) {
+    return `https:${raw}`;
+  }
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (
+      parsed.protocol === "http:" &&
+      (host === "coverartarchive.org" || host.endsWith(".coverartarchive.org"))
+    ) {
+      parsed.protocol = "https:";
+      return parsed.toString();
+    }
+    return parsed.toString();
+  } catch (_err) {
+    return raw;
+  }
 }
 
 function triggerClientDeliveryDownload(downloadUrl, filename = "") {
@@ -3475,20 +3500,24 @@ async function fetchHomeAlbumCoverUrl(albumId) {
   if (!key) {
     return null;
   }
+  const directCoverUrl = `https://coverartarchive.org/release-group/${encodeURIComponent(key)}/front-250`;
   const cached = state.homeAlbumCoverCache[key];
   if (typeof cached === "string" && cached) {
     return cached;
   }
   try {
     const data = await fetchJson(`/api/music/album/art/${encodeURIComponent(key)}`);
-    const url = typeof data?.cover_url === "string" && data.cover_url ? data.cover_url : null;
+    const url = normalizeArtworkUrl(data?.cover_url);
     // Cache positive hits only; avoid pinning transient misses/rate limits as permanent null.
     if (url) {
       state.homeAlbumCoverCache[key] = url;
+      return url;
     }
-    return url;
+    // Backend returned no result; allow browser to attempt direct cover-art endpoint.
+    return directCoverUrl;
   } catch (_err) {
-    return null;
+    // Backend lookup failed; still attempt direct cover-art endpoint from browser.
+    return directCoverUrl;
   }
 }
 

@@ -818,6 +818,7 @@ body.home-page .home-candidate-title {
   width: 64px;
   height: 64px;
   flex-shrink: 0;
+  position: relative;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(148, 163, 184, 0.2);
@@ -831,28 +832,42 @@ body.home-page .home-candidate-title {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  display: none;
+  display: block;
+  opacity: 0;
+  visibility: hidden;
 }
 
 .music-card-thumb-placeholder {
+  position: absolute;
+  inset: 0;
   font-size: 10px;
   line-height: 1.2;
   text-align: center;
   padding: 6px;
   color: rgba(226, 232, 240, 0.9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 20, 27, 0.55);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
 }
 
 .music-card-thumb-shell.loading .music-card-thumb-placeholder,
 .music-card-thumb-shell.no-art .music-card-thumb-placeholder {
-  display: block;
+  opacity: 1;
+  visibility: visible;
 }
 
 .music-card-thumb-shell.loaded .music-card-thumb {
-  display: block;
+  opacity: 1;
+  visibility: visible;
 }
 
 .music-card-thumb-shell.loaded .music-card-thumb-placeholder {
-  display: none;
+  opacity: 0;
+  visibility: hidden;
 }
 
 .music-meta-card {
