@@ -6368,6 +6368,12 @@ def _hydrate_meta_from_output_template(meta, output_template):
     if not isinstance(output_template, dict):
         return meta
 
+    canonical = (
+        output_template.get("canonical_metadata")
+        if isinstance(output_template.get("canonical_metadata"), dict)
+        else {}
+    )
+
     template_title = str(output_template.get("title") or output_template.get("track") or "").strip()
     template_channel = str(
         output_template.get("channel")
@@ -6386,6 +6392,73 @@ def _hydrate_meta_from_output_template(meta, output_template):
         meta["channel"] = template_channel
         if not str(meta.get("artist") or "").strip():
             meta["artist"] = template_channel
+
+    # For music-video jobs, preserve canonical MB metadata so video container tags
+    # can carry artist/album/track/release fields as expected.
+    artist_value = str(
+        canonical.get("artist")
+        or canonical.get("album_artist")
+        or output_template.get("artist")
+        or output_template.get("album_artist")
+        or ""
+    ).strip()
+    if artist_value and not str(meta.get("artist") or "").strip():
+        meta["artist"] = artist_value
+    if artist_value and not str(meta.get("album_artist") or "").strip():
+        meta["album_artist"] = artist_value
+
+    track_value = str(
+        canonical.get("track")
+        or canonical.get("title")
+        or output_template.get("track")
+        or ""
+    ).strip()
+    if track_value and not str(meta.get("track") or "").strip():
+        meta["track"] = track_value
+    if track_value and not str(meta.get("title") or "").strip():
+        meta["title"] = track_value
+
+    album_value = str(canonical.get("album") or output_template.get("album") or "").strip()
+    if album_value and not str(meta.get("album") or "").strip():
+        meta["album"] = album_value
+
+    release_date = str(
+        canonical.get("release_date")
+        or canonical.get("date")
+        or output_template.get("release_date")
+        or ""
+    ).strip()
+    if release_date and not str(meta.get("release_date") or "").strip():
+        meta["release_date"] = release_date
+
+    for key in ("track_number", "track_total", "disc_number", "disc_total", "genre"):
+        if meta.get(key) in (None, "", 0):
+            value = canonical.get(key)
+            if value in (None, "", 0):
+                value = output_template.get(key)
+            if value not in (None, "", 0):
+                meta[key] = value
+
+    recording_id = str(
+        canonical.get("recording_mbid")
+        or canonical.get("mb_recording_id")
+        or output_template.get("recording_mbid")
+        or output_template.get("mb_recording_id")
+        or ""
+    ).strip()
+    if recording_id and not str(meta.get("recording_mbid") or meta.get("mb_recording_id") or "").strip():
+        meta["recording_mbid"] = recording_id
+        meta["mb_recording_id"] = recording_id
+
+    release_id = str(
+        canonical.get("mb_release_id")
+        or canonical.get("release_id")
+        or output_template.get("mb_release_id")
+        or output_template.get("release_id")
+        or ""
+    ).strip()
+    if release_id and not str(meta.get("mb_release_id") or "").strip():
+        meta["mb_release_id"] = release_id
 
     return meta
 

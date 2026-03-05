@@ -2727,6 +2727,8 @@ function buildMusicTrackEnqueuePayload({ button, result }) {
 }
 
 const MUSIC_VIDEO_HINT_MAX_TRACKS = 10;
+const MUSIC_VIDEO_HINT_POSITIVE_CACHE_TTL_MS = 30 * 60 * 1000;
+const MUSIC_VIDEO_HINT_NEGATIVE_CACHE_TTL_MS = 90 * 1000;
 
 function _musicVideoHintBadgeClass(likelihood) {
   const key = String(likelihood || "").toLowerCase();
@@ -2777,9 +2779,23 @@ async function hydrateMusicVideoHints(tracks = [], renderToken = 0) {
       const recordingMbid = String(result?.recording_mbid || "").trim();
       if (!recordingMbid) continue;
       if (renderToken !== state.homeMusicRenderToken) return;
-      if (state.homeMusicVideoHintCache[recordingMbid]) {
-        updateMusicVideoHintBadge(recordingMbid, state.homeMusicVideoHintCache[recordingMbid]);
-        continue;
+      const now = Date.now();
+      const cachedEntry = state.homeMusicVideoHintCache[recordingMbid];
+      if (cachedEntry) {
+        const payload = cachedEntry?.payload && typeof cachedEntry.payload === "object"
+          ? cachedEntry.payload
+          : cachedEntry;
+        const cachedAt = Number.isFinite(Number(cachedEntry?.cachedAt))
+          ? Number(cachedEntry.cachedAt)
+          : 0;
+        const likelihood = String(payload?.likelihood || "").trim().toLowerCase();
+        const ttl = likelihood === "none"
+          ? MUSIC_VIDEO_HINT_NEGATIVE_CACHE_TTL_MS
+          : MUSIC_VIDEO_HINT_POSITIVE_CACHE_TTL_MS;
+        if (cachedAt > 0 && (now - cachedAt) < ttl) {
+          updateMusicVideoHintBadge(recordingMbid, payload);
+          continue;
+        }
       }
       try {
         const payload = await fetchJson("/api/music/video/availability", {
@@ -2794,7 +2810,10 @@ async function hydrateMusicVideoHints(tracks = [], renderToken = 0) {
           }),
         });
         if (renderToken !== state.homeMusicRenderToken) return;
-        state.homeMusicVideoHintCache[recordingMbid] = payload || {};
+        state.homeMusicVideoHintCache[recordingMbid] = {
+          payload: payload || {},
+          cachedAt: now,
+        };
         updateMusicVideoHintBadge(recordingMbid, payload || {});
       } catch (_err) {
         if (renderToken !== state.homeMusicRenderToken) return;
