@@ -2783,6 +2783,15 @@ async function fetchMusicAlbumsByArtist(artist) {
       release_year: releaseYear,
     });
   }
+  out.sort((a, b) => {
+    const aYear = Number.parseInt(String(a?.release_year || ""), 10);
+    const bYear = Number.parseInt(String(b?.release_year || ""), 10);
+    const aHas = Number.isFinite(aYear);
+    const bHas = Number.isFinite(bYear);
+    if (aHas && bHas && aYear !== bYear) return bYear - aYear;
+    if (aHas !== bHas) return aHas ? -1 : 1;
+    return String(a?.title || "").localeCompare(String(b?.title || ""));
+  });
   return out;
 }
 
