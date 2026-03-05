@@ -516,6 +516,25 @@ body.home-page .music-search-max-candidates input {
   text-align: center;
 }
 
+body.home-page .music-search-video-format {
+  flex: 0 0 auto;
+  width: 132px;
+  max-width: 132px;
+  min-width: 132px;
+}
+
+body.home-page .music-search-options-row .music-search-video-format {
+  width: 132px;
+  max-width: 132px;
+  min-width: 132px;
+}
+
+body.home-page .music-search-video-format select {
+  width: 100%;
+  min-width: 0;
+  text-transform: lowercase;
+}
+
 body.home-page .music-search-actions-row {
   display: flex;
   flex-direction: column;

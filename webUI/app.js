@@ -2240,6 +2240,21 @@ function homeMusicDebugLog(...args) {
   console.debug(...args);
 }
 
+function getMusicModeFinalFormatOverride() {
+  if (state.homeMediaMode !== "music_video") {
+    return null;
+  }
+  const selector = document.getElementById("music-video-final-format");
+  const value = String(selector?.value || "").trim().toLowerCase();
+  if (!value || value === "default") {
+    return null;
+  }
+  if (!["mkv", "webm", "mp4"].includes(value)) {
+    return null;
+  }
+  return value;
+}
+
 function updateHomeMusicModeUI() {
   const modeSelect = $("#home-media-mode");
   if (modeSelect) {
@@ -2260,6 +2275,10 @@ function updateHomeMusicModeUI() {
   const musicModeConsole = $("#music-mode-console");
   if (musicModeConsole) {
     musicModeConsole.classList.toggle("hidden", !state.homeMusicMode);
+  }
+  const musicVideoFormatField = $("#music-video-format-field");
+  if (musicVideoFormatField) {
+    musicVideoFormatField.classList.toggle("hidden", state.homeMediaMode !== "music_video");
   }
   // Keep this badge strictly tied to the live toggle state.
   const badge = $("#home-music-mode-badge");
@@ -2628,7 +2647,7 @@ async function enqueueAlbum(releaseGroupMbid) {
     body: JSON.stringify({
       release_group_mbid: releaseGroupMbid,
       destination: $("#home-destination")?.value.trim() || null,
-      final_format: $("#home-format")?.value.trim() || null,
+      final_format: getMusicModeFinalFormatOverride(),
       music_mode: state.homeMediaMode === "music",
       media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
       force_redownload: forceRedownload,
@@ -2712,7 +2731,7 @@ function buildMusicTrackEnqueuePayload({ button, result }) {
     release_mbid: release,
     release_group_mbid: releaseGroup,
     destination: String($("#home-destination")?.value || "").trim() || null,
-    final_format: String($("#home-format")?.value || "").trim() || null,
+    final_format: getMusicModeFinalFormatOverride(),
   };
   if (result && typeof result === "object") {
     payload.artist = result.artist || null;
@@ -3683,7 +3702,7 @@ function renderHomeAlbumCandidates(candidates, query = "") {
       const payload = {
         release_group_mbid: releaseGroupId,
         destination: $("#home-destination")?.value.trim() || null,
-        final_format: $("#home-format")?.value.trim() || null,
+        final_format: getMusicModeFinalFormatOverride(),
         music_mode: state.homeMediaMode === "music",
         media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
         force_redownload: !!document.getElementById("music-force-redownload")?.checked,
