@@ -3204,7 +3204,12 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       const title = document.createElement("div");
       title.className = "home-candidate-title";
       const trackNumber = Number.isFinite(Number(result?.track_number)) ? Number(result.track_number) : null;
-      title.textContent = trackNumber ? `${trackNumber}. ${result.track}` : result.track;
+      if (trackNumber && trackNumber > 0) {
+        const trackLabel = String(trackNumber).padStart(2, "0");
+        title.textContent = `${trackLabel}. ${result.track}`;
+      } else {
+        title.textContent = result.track;
+      }
       header.appendChild(title);
       const badge = document.createElement("span");
       badge.className = "home-result-badge matched";
