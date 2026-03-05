@@ -2358,6 +2358,15 @@ function setHomeMediaMode(mode, { persist = true, clearResultsOnDisable = true }
     if (results) {
       results.innerHTML = "";
     }
+    const musicMessage = document.getElementById("home-search-message");
+    if (musicMessage) {
+      setNotice(musicMessage, "Press Enter or click Search to discover media", false);
+    }
+    const albumDetails = document.getElementById("home-album-failed-details");
+    if (albumDetails) {
+      albumDetails.innerHTML = "";
+      albumDetails.classList.add("hidden");
+    }
     clearLegacyHomeSearchState();
   }
   if (persist) {
