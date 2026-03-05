@@ -5,68 +5,29 @@ All notable changes to this project will be documented here.
 ## v0.9.7 — Community Cache + Local Search Cache + Watcher/Telegram Hardening
 
 ### High-Level
-This release adds cache-first acceleration for both metadata-first music resolution and homepage search UX, while tightening watcher/Telegram behavior for cleaner operations signals.
+This release improves cache-first search/resolution performance, stabilizes watcher/Telegram reporting, and refines music/music-video UX without changing deterministic scoring thresholds.
+Added Music Video Mode with similar UX as Music Mode, but attempts to download official music videos from official channels as priority while still embedding musicbrainz metadata.
 
 ### Added
-- Community transport cache lookup integration for metadata-first music resolution:
-  - seeds candidates from community index (`recording_mbid -> transport ids`) before normal ladder execution
-  - keeps MusicBrainz canonical metadata authority unchanged
-  - keeps deterministic probe/scoring/gating unchanged (community remains hint-only)
-- Community publish outbox (v1-scoped, local-only):
-  - emits validated JSONL proposal artifacts for eligible successful selections
-  - supports opt-in modes: `off | dry_run | write_outbox`
-  - includes schema versioning, eligibility checks, and recent-window dedupe
-- Local search cache (SQLite-backed) for homepage/global search:
-  - cache-first candidate seeding for repeated queries
-  - background refresh through existing adapter search path
-  - configurable TTL, prune-on-failure, max entries, and seed depth controls
-- Deterministic community reverse index lifecycle:
-  - reverse lookup index is rebuilt from local dataset snapshots (not runtime accumulation)
-- Music-video availability hinting for music-first UX:
-  - new endpoint: `POST /api/music/video/availability`
-  - combines three non-blocking signals: MusicBrainz YouTube URL relations, community cache hit, and bounded YouTube precheck
-  - track cards now hydrate MV-likelihood badges asynchronously (`MV likely/possible/maybe/No MV hint`)
+- Community transport cache lookup + publish outbox (local JSONL proposals, opt-in).
+- Local SQLite search cache for homepage search with cache-first replay + background refresh.
+- Deterministic community reverse-index rebuild from local dataset snapshots.
+- Music/MV metadata-first UX upgrades: MB IDs on cards, artwork, album/track navigation improvements.
 
 ### Changed
-- Search UX acceleration:
-  - cached search candidates are injected immediately as source-visible candidates
-  - adapter results continue to stream in as they complete
-  - cache failures degrade gracefully and never block request/resolution flow
-- Homepage/music search result card UX:
-  - music result cards now support artwork thumbnails (album + artist contexts) with loading/placeholder behavior
-  - album cards include `View Tracks`; track listings render in track-number order with track number shown
-  - music search UX supports Enter-key submit and improved card metadata visibility (MB IDs on music entities)
-- Candidate dedupe behavior improved:
-  - preserves canonical transport identity dedupe while merging provenance/richer metadata deterministically
-  - adapter-returned candidates are deduped against already-seeded local cache candidates to avoid duplicate rows in progressive results
-- Config defaults and schema support expanded for:
-  - community cache lookup/publish controls
-  - local search cache controls
-  - backward-compatible default application for missing keys
+- Homepage search now surfaces cached candidates immediately and continues normal adapter resolution in parallel.
+- Candidate dedupe now merges provenance/metadata deterministically and removes cache/adapter duplicate rows.
+- Community lookup remains hint-only and is injected before normal ladder execution; fallback behavior is unchanged if cache is missing/unavailable.
+- Config defaults/schema expanded for community lookup/publish and local search-cache controls with backward-compatible defaulting.
 - Generic/video scoring now includes a small logarithmic `view_count` tie-break bonus when metadata already contains view counts (no extra fetch calls).
-- Home nav naming aligned to architecture:
-  - page label now uses `Advanced` consistently (instead of `Info`)
-  - backward-compatible hash aliases retained (`#search`/`#info` -> `#advanced`)
+- Navigation cleanup: page naming/hash alias behavior aligned around `Advanced`.
 
 ### Fixed
-- Search safety hardening for restricted content:
-  - age-restricted/auth-gated YouTube entries are filtered from adapter result normalization where restriction metadata is present
-  - restricted entries are also filtered out from local search-cache seed replay
-- Telegram run-summary hardening:
-  - scheduler/watcher headers clarified by run type
-  - downloaded item labels prefer track/title evidence and avoid leaking opaque job IDs
-  - duplicate/extra summary dispatch paths reduced
-- Watcher notification hardening:
-  - removed per-playlist watcher summary spam; watcher now relies on batch summary path
-  - batch message semantics corrected to report `jobs enqueued` (not claimed as completed downloads)
-- Watcher runtime resiliency:
-  - supervisor crash path now logs and auto-restarts
-  - blocking playlist API fetch moved off the event loop thread
-  - `/api/config` now hot-applies `enable_watcher` toggles at runtime (start/stop without restart)
-- Music UI regressions:
-  - fixed video-mode result title overwrite where cards could show `Source: generic · Item N` in place of candidate title
-  - fixed album `View Tracks` regression by honoring explicit `mode=track` for artist+album queries in metadata search routing
-- Config UI scheduler section layout cleaned up to prevent overlap/collision while preserving existing behavior and bindings.
+- Search/control-flow safety fixes so cache failures/timeouts do not block request resolution.
+- Restricted-content filtering improved for adapter normalization and cache replay.
+- Telegram scheduler/watcher summaries hardened: cleaner headers, title-first item labels, duplicate dispatch reduction.
+- Watcher stability improvements: batch-level messaging behavior, restart resilience, and non-blocking polling paths.
+- Music UI regressions fixed across `View Tracks`, card actions, artwork loading/layout, and mode-specific interaction behavior.
 
 ## v0.9.6 — Runtime Distribution + Music Match Robustness
 

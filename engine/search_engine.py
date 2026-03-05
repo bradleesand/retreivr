@@ -1684,6 +1684,8 @@ class SearchResolutionService:
             elif overlap >= 0.30:
                 adjustment += 5.0
                 reasons.append("artist_uploader_overlap")
+        else:
+            overlap = 0.0
 
         expected_duration = expected.get("duration_hint_sec")
         candidate_duration = candidate.get("duration_sec")
@@ -1732,7 +1734,9 @@ class SearchResolutionService:
         if bool(expected.get("prefer_music_video")):
             source_lower = source.strip().lower()
             is_youtube_family = source_lower in {"youtube", "youtube_music"}
-            authority_match = bool(candidate.get("authority_channel_match"))
+            authority_match = bool(candidate.get("authority_channel_match")) or (
+                overlap >= 0.60 and "topic" not in uploader.lower()
+            )
             has_official_video = ("official music video" in title_lower) or ("official video" in title_lower)
             if is_youtube_family and authority_match and has_official_video:
                 adjustment += 18.0
@@ -1751,12 +1755,29 @@ class SearchResolutionService:
                 reasons.append("mv_topic_audio_penalty")
         return adjustment, reasons
 
-    def _music_video_priority_bucket(self, candidate):
+    def _music_video_authority_like(self, candidate, expected_base=None):
+        if not isinstance(candidate, dict):
+            return False
+        if bool(candidate.get("authority_channel_match")):
+            return True
+        expected_artist_tokens = set(self._music_tokens((expected_base or {}).get("artist")))
+        uploader = str(candidate.get("uploader") or candidate.get("artist_detected") or "").strip()
+        uploader_tokens = set(self._music_tokens(uploader))
+        if not expected_artist_tokens or not uploader_tokens:
+            return False
+        overlap = len(expected_artist_tokens & uploader_tokens) / max(len(expected_artist_tokens), 1)
+        if overlap < 0.60:
+            return False
+        if "topic" in uploader.lower():
+            return False
+        return True
+
+    def _music_video_priority_bucket(self, candidate, expected_base=None):
         if not isinstance(candidate, dict):
             return 0
         source_lower = str(candidate.get("source") or "").strip().lower()
         is_youtube_family = source_lower in {"youtube", "youtube_music"}
-        authority_match = bool(candidate.get("authority_channel_match"))
+        authority_match = self._music_video_authority_like(candidate, expected_base=expected_base)
         title_lower = str(candidate.get("title") or "").strip().lower()
         has_official_video = ("official music video" in title_lower) or ("official video" in title_lower)
         if is_youtube_family and authority_match and has_official_video:
@@ -1765,7 +1786,7 @@ class SearchResolutionService:
             return 2
         return 1
 
-    def _prefer_music_video_candidate(self, eligible, ranked):
+    def _prefer_music_video_candidate(self, eligible, ranked, *, expected_base=None):
         if not eligible:
             return None
         index_map = {}
@@ -1777,7 +1798,7 @@ class SearchResolutionService:
         ordered = sorted(
             eligible,
             key=lambda candidate: (
-                -int(self._music_video_priority_bucket(candidate)),
+                -int(self._music_video_priority_bucket(candidate, expected_base=expected_base)),
                 -float(candidate.get("final_score") or 0.0),
                 int(source_priority.get(str(candidate.get("source") or "").strip().lower(), 999)),
                 int(index_map.get(str(candidate.get("candidate_id") or "").strip(), 99999)),
@@ -2615,7 +2636,7 @@ class SearchResolutionService:
             and float(c.get("final_score", 0.0)) >= float(self.music_source_match_threshold)
         ]
         selected_a = (
-            self._prefer_music_video_candidate(eligible_a, ranked_a)
+            self._prefer_music_video_candidate(eligible_a, ranked_a, expected_base=expected_base)
             if prefer_music_video
             else (eligible_a[0] if eligible_a else None)
         )
@@ -2794,7 +2815,7 @@ class SearchResolutionService:
                 continue
             eligible_b.append(candidate)
         selected_b = (
-            self._prefer_music_video_candidate(eligible_b, ranked_b)
+            self._prefer_music_video_candidate(eligible_b, ranked_b, expected_base=expected_base)
             if prefer_music_video
             else (eligible_b[0] if eligible_b else None)
         )

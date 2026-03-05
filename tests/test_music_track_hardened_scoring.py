@@ -432,6 +432,33 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         self.assertIsNotNone(picked)
         self.assertEqual(picked.get("candidate_id"), "authority-official-video")
 
+    def test_music_video_treats_artist_named_channel_as_authority_like(self):
+        service = self._service({"youtube": []})
+        expected_base = {"artist": "Kenny Chesney"}
+        official_video = {
+            "candidate_id": "official-video",
+            "source": "youtube",
+            "title": "Kenny Chesney - Get Along (Official Music Video)",
+            "uploader": "Kenny Chesney",
+            "authority_channel_match": False,
+            "final_score": 0.86,
+        }
+        topic_audio = {
+            "candidate_id": "topic-audio",
+            "source": "youtube_music",
+            "title": "Get Along",
+            "uploader": "Kenny Chesney - Topic",
+            "authority_channel_match": False,
+            "final_score": 0.91,
+        }
+        picked = service._prefer_music_video_candidate(  # noqa: SLF001
+            [topic_audio, official_video],
+            [topic_audio, official_video],
+            expected_base=expected_base,
+        )
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked.get("candidate_id"), "official-video")
+
     def test_select_best_candidate_tie_break_order(self):
         candidates = [
             {
