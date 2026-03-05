@@ -2539,6 +2539,11 @@ function renderMusicModeResults(response, query = "") {
       if (artistItem?.disambiguation) metaParts.push(String(artistItem.disambiguation));
       meta.textContent = metaParts.join(" • ");
       card.appendChild(meta);
+      const artistRef = document.createElement("div");
+      artistRef.className = "home-mb-entity-ref";
+      const artistMbid = String(artistItem?.artist_mbid || "").trim();
+      artistRef.textContent = artistMbid ? `MB: artist ${artistMbid}` : "MB: artist (unknown)";
+      card.appendChild(artistRef);
       const action = document.createElement("div");
       action.className = "home-candidate-action";
       const button = document.createElement("button");
@@ -2595,6 +2600,10 @@ function renderMusicModeResults(response, query = "") {
       const year = albumItem?.release_year ? ` (${albumItem.release_year})` : "";
       meta.textContent = `${albumItem?.artist || ""}${year}`;
       card.appendChild(meta);
+      const albumRef = document.createElement("div");
+      albumRef.className = "home-mb-entity-ref";
+      albumRef.textContent = releaseGroupMbid ? `MB: release-group ${releaseGroupMbid}` : "MB: release-group (unknown)";
+      card.appendChild(albumRef);
       const action = document.createElement("div");
       action.className = "home-candidate-action";
       const button = document.createElement("button");
