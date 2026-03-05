@@ -7291,9 +7291,20 @@ function bindEvents() {
     btn.textContent = "Queuing...";
     try {
       const payload = buildMusicTrackEnqueuePayload({ button: btn, result: selectedResult });
-      await enqueueMusicTrack(payload);
-      btn.textContent = "Queued...";
-      setNotice($("#home-search-message"), "Track queued.", false);
+      const response = await enqueueMusicTrack(payload);
+      const created = !!response?.created;
+      if (created) {
+        btn.textContent = "Queued...";
+        setNotice($("#home-search-message"), "Track queued.", false);
+      } else {
+        btn.disabled = false;
+        btn.textContent = originalText;
+        const reason = String(response?.dedupe_reason || "").trim();
+        const message = reason
+          ? `Track not queued (${reason.replaceAll("_", " ")}).`
+          : "Track already queued/downloaded; not queued again.";
+        setNotice($("#home-search-message"), message, false);
+      }
     } catch (err) {
       btn.disabled = false;
       btn.textContent = originalText;
