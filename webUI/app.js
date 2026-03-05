@@ -2747,7 +2747,7 @@ function buildMusicTrackEnqueuePayload({ button, result }) {
 
 const MUSIC_VIDEO_HINT_MAX_TRACKS = 10;
 const MUSIC_VIDEO_HINT_POSITIVE_CACHE_TTL_MS = 30 * 60 * 1000;
-const MUSIC_VIDEO_HINT_NEGATIVE_CACHE_TTL_MS = 90 * 1000;
+const MUSIC_VIDEO_HINT_NEGATIVE_CACHE_TTL_MS = 15 * 1000;
 
 function _musicVideoHintBadgeClass(likelihood) {
   const key = String(likelihood || "").toLowerCase();

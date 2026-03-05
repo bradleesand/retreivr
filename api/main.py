@@ -277,41 +277,59 @@ def _mv_has_intent(text: str) -> bool:
 def _quick_youtube_mv_precheck(artist: str, track: str, album: str | None = None) -> dict:
     artist_text = str(artist or "").strip()
     track_text = str(track or "").strip()
+    album_text = str(album or "").strip()
     if not artist_text and not track_text:
         return {"matched": False, "reason": "missing_query"}
-    query_parts = [artist_text, track_text, "official music video"]
-    query = " ".join(part for part in query_parts if part).strip()
-    if not query:
-        return {"matched": False, "reason": "missing_query"}
     adapter = YouTubeAdapter()
-    try:
-        candidates = _bounded_call(2.8, lambda: adapter.search_music_track(query, limit=5))
-    except Exception:
-        return {"matched": False, "reason": "search_timeout"}
-    if not isinstance(candidates, list) or not candidates:
-        return {"matched": False, "reason": "no_candidates"}
+    queries = []
+    strict_query = " ".join(
+        part for part in [artist_text, track_text, album_text, "official music video"] if part
+    ).strip()
+    if strict_query:
+        queries.append(strict_query)
+    fallback_query = " ".join(part for part in [artist_text, track_text, "music video"] if part).strip()
+    if fallback_query and fallback_query not in queries:
+        queries.append(fallback_query)
+    if not queries:
+        return {"matched": False, "reason": "missing_query"}
+
     artist_tokens = _mv_hint_tokens(artist_text)
     track_tokens = _mv_hint_tokens(track_text)
-    for candidate in candidates[:5]:
-        title = str(candidate.get("title") or "").strip()
-        if not title:
+    first_candidate: dict | None = None
+    for query in queries:
+        try:
+            candidates = _bounded_call(4.2, lambda: adapter.search_music_track(query, limit=12))
+        except Exception:
             continue
-        uploader = str(candidate.get("uploader") or candidate.get("artist") or "").strip()
-        searchable = f"{title} {uploader}".strip()
-        searchable_tokens = set(_mv_hint_tokens(searchable))
-        artist_hits = len(set(artist_tokens).intersection(searchable_tokens)) if artist_tokens else 0
-        track_hits = len(set(track_tokens).intersection(searchable_tokens)) if track_tokens else 0
-        artist_ok = artist_hits >= _mv_required_hits(artist_tokens)
-        track_ok = track_hits >= _mv_required_hits(track_tokens)
-        if _mv_has_intent(title) and artist_ok and track_ok:
-            return {
-                "matched": True,
-                "reason": "token_match",
-                "title": title,
-                "url": candidate.get("url"),
-                "uploader": uploader or None,
-            }
-    first = candidates[0] if isinstance(candidates[0], dict) else {}
+        if not isinstance(candidates, list) or not candidates:
+            continue
+        if first_candidate is None and isinstance(candidates[0], dict):
+            first_candidate = dict(candidates[0])
+        for candidate in candidates[:12]:
+            title = str(candidate.get("title") or "").strip()
+            if not title:
+                continue
+            uploader = str(candidate.get("uploader") or candidate.get("artist") or "").strip()
+            searchable = f"{title} {uploader}".strip()
+            searchable_tokens = set(_mv_hint_tokens(searchable))
+            artist_hits = len(set(artist_tokens).intersection(searchable_tokens)) if artist_tokens else 0
+            track_hits = len(set(track_tokens).intersection(searchable_tokens)) if track_tokens else 0
+            artist_ok = artist_hits >= _mv_required_hits(artist_tokens)
+            track_ok = track_hits >= _mv_required_hits(track_tokens)
+            # Fallback acceptance: for long names, one strong track + artist hit is enough for hinting.
+            fallback_ok = artist_hits >= 1 and track_hits >= 1
+            if _mv_has_intent(title) and (artist_ok and track_ok or fallback_ok):
+                return {
+                    "matched": True,
+                    "reason": "token_match",
+                    "title": title,
+                    "url": candidate.get("url"),
+                    "uploader": uploader or None,
+                    "query": query,
+                }
+    if first_candidate is None:
+        return {"matched": False, "reason": "no_candidates"}
+    first = first_candidate if isinstance(first_candidate, dict) else {}
     return {
         "matched": False,
         "reason": "weak_match",
@@ -6645,6 +6663,15 @@ def music_video_availability(data: dict = Body(...)):
     if include_youtube_probe:
         precheck = _quick_youtube_mv_precheck(artist, track, album=album)
         signals["youtube_precheck"] = precheck
+        _log_event(
+            logging.INFO,
+            "music_video_precheck_result",
+            recording_mbid=recording_mbid or None,
+            matched=bool(precheck.get("matched")) if isinstance(precheck, dict) else False,
+            reason=(precheck.get("reason") if isinstance(precheck, dict) else None),
+            title=(precheck.get("title") if isinstance(precheck, dict) else None),
+            query=(precheck.get("query") if isinstance(precheck, dict) else None),
+        )
         if isinstance(precheck, dict) and bool(precheck.get("matched")):
             score += 1
 
