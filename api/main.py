@@ -1920,7 +1920,7 @@ async def startup():
         if app.state.watcher_lock is None:
             logging.info("Watcher disabled due to guardrails (lock unavailable)")
         else:
-            app.state.watcher_task = asyncio.create_task(_watcher_supervisor())
+            _start_watcher_supervisor_task()
             logging.info("Watcher active — adaptive monitoring enabled")
 
     app.state.watcher_status = {
@@ -4102,7 +4102,8 @@ async def _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batc
         return
 
     try:
-        videos = get_playlist_videos(yt, playlist_id)
+        # Google client calls are blocking; run off the event loop thread.
+        videos = await anyio.to_thread.run_sync(get_playlist_videos, yt, playlist_id)
     except RefreshError as exc:
         logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
         skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
@@ -4412,7 +4413,7 @@ async def _watcher_supervisor():
                     ",".join(batch_playlists),
                 )
                 batch_start = time.monotonic()
-                total_downloaded = 0
+                total_enqueued = 0
                 for playlist_id in batch_playlists:
                     pl = playlist_map.get(playlist_id)
                     if not pl:
@@ -4435,25 +4436,25 @@ async def _watcher_supervisor():
                             await app.state.run_task
                         status = app.state.status
                         if status:
-                            total_downloaded += len(status.run_successes or [])
+                            total_enqueued += len(status.run_successes or [])
                     elif result == "deferred":
                         logging.info("Watcher: batch deferred playlist_id=%s", playlist_id)
                     else:
                         logging.debug("Watcher: batch skipped (run active) playlist_id=%s", playlist_id)
                 duration_seconds = max(0, int(time.monotonic() - batch_start))
                 logging.info(
-                    "Watcher: batch complete playlists=%s videos=%s",
+                    "Watcher: batch complete playlists=%s jobs_enqueued=%s",
                     len(batch_playlists),
-                    total_downloaded,
+                    total_enqueued,
                 )
-                if batch_playlists and total_downloaded > 0:
+                if batch_playlists and total_enqueued > 0:
                     minutes = duration_seconds // 60
                     seconds = duration_seconds % 60
                     duration_label = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
                     msg = (
                         "Retreivr Watcher Batch\n"
                         f"Playlists: {len(batch_playlists)}\n"
-                        f"Videos downloaded: {total_downloaded}\n"
+                        f"Jobs enqueued: {total_enqueued}\n"
                         f"Duration: {duration_label}"
                     )
                     telegram_notify(config, msg)
@@ -4646,6 +4647,111 @@ async def _watcher_supervisor():
                 quiet_window_remaining_sec=None,
                 batch_active=batch_state["batch_active"],
             )
+
+
+def _watcher_supervisor_task_done(task: asyncio.Task):
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is None:
+        return
+    logging.exception("Watcher supervisor crashed; scheduling restart", exc_info=(type(exc), exc, exc.__traceback__))
+    app.state.watcher_task = None
+    if getattr(app.state, "watcher_lock", None) is None:
+        return
+    loop = app.state.loop
+    if not loop or loop.is_closed():
+        return
+    loop.create_task(_restart_watcher_supervisor())
+
+
+async def _restart_watcher_supervisor(delay_seconds: int = 5):
+    await asyncio.sleep(max(0, int(delay_seconds)))
+    if getattr(app.state, "watcher_lock", None) is None:
+        return
+    current = getattr(app.state, "watcher_task", None)
+    if current and not current.done():
+        return
+    _start_watcher_supervisor_task()
+
+
+def _start_watcher_supervisor_task():
+    loop = app.state.loop
+    if not loop or loop.is_closed():
+        return None
+    current = getattr(app.state, "watcher_task", None)
+    if current and not current.done():
+        return current
+    task = loop.create_task(_watcher_supervisor())
+    task.add_done_callback(_watcher_supervisor_task_done)
+    app.state.watcher_task = task
+    return task
+
+
+async def _disable_watcher_runtime(reason: str | None = None):
+    watcher_task = getattr(app.state, "watcher_task", None)
+    if watcher_task:
+        watcher_task.cancel()
+        try:
+            await watcher_task
+        except asyncio.CancelledError:
+            pass
+    app.state.watcher_task = None
+
+    lock_fd = getattr(app.state, "watcher_lock", None)
+    if lock_fd is not None:
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+    app.state.watcher_lock = None
+    _set_watcher_status(
+        "disabled",
+        pending_playlists_count=0,
+        quiet_window_remaining_sec=None,
+        batch_active=False,
+        next_poll_ts=None,
+    )
+    if reason:
+        logging.info("Watcher disabled: %s", reason)
+
+
+def _enable_watcher_runtime():
+    if not bool(getattr(app.state, "single_worker_enforced", False)):
+        logging.info(
+            "Watcher disabled due to guardrails (multiple workers detected=%d)",
+            int(getattr(app.state, "worker_count", 0) or 0),
+        )
+        _set_watcher_status(
+            "disabled",
+            pending_playlists_count=0,
+            quiet_window_remaining_sec=None,
+            batch_active=False,
+            next_poll_ts=None,
+        )
+        return
+
+    if getattr(app.state, "watcher_lock", None) is None:
+        app.state.watcher_lock = _acquire_watcher_lock(DATA_DIR)
+    if getattr(app.state, "watcher_lock", None) is None:
+        logging.info("Watcher disabled due to guardrails (lock unavailable)")
+        _set_watcher_status(
+            "disabled",
+            pending_playlists_count=0,
+            quiet_window_remaining_sec=None,
+            batch_active=False,
+            next_poll_ts=None,
+        )
+        return
+
+    _start_watcher_supervisor_task()
+    _set_watcher_status(
+        "idle",
+        pending_playlists_count=0,
+        quiet_window_remaining_sec=None,
+        batch_active=False,
+    )
+    logging.info("Watcher active — adaptive monitoring enabled")
 
 
 def _apply_watch_policy(policy):
@@ -7204,6 +7310,11 @@ async def api_put_config(payload: dict = Body(...)):
         app.state.watch_policy = policy
         _apply_watch_policy(policy)
         app.state.watch_config_cache = payload
+    enable_watcher = bool(payload.get("enable_watcher")) if isinstance(payload, dict) else False
+    if enable_watcher:
+        _enable_watcher_runtime()
+    else:
+        await _disable_watcher_runtime("config updated (enable_watcher=false)")
 
     return {"status": "updated"}
 
