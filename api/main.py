@@ -158,6 +158,7 @@ SPOTIFY_PLAYLISTS_WATCH_JOB_ID = "spotify_playlists_watch"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
 COVER_ART_CACHE_TTL_SECONDS = 3600
+COVER_ART_NEGATIVE_CACHE_TTL_SECONDS = 120
 DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
 DEFAULT_SAVED_ALBUMS_SYNC_INTERVAL_MINUTES = 30
 DEFAULT_USER_PLAYLISTS_SYNC_INTERVAL_MINUTES = 30
@@ -6622,10 +6623,16 @@ def music_album_art(album_id: str):
         cached = cache.get(album_id)
         if isinstance(cached, dict):
             cached_at = float(cached.get("cached_at") or 0)
-            if now - cached_at < COVER_ART_CACHE_TTL_SECONDS:
+            cached_url = cached.get("cover_url")
+            ttl = COVER_ART_CACHE_TTL_SECONDS if cached_url else COVER_ART_NEGATIVE_CACHE_TTL_SECONDS
+            if now - cached_at < ttl:
                 return {"status": "ok", "cover_url": cached.get("cover_url")}
 
-    cover_url = _mb_service().fetch_release_group_cover_art_url(album_id, timeout=8)
+    try:
+        cover_url = _mb_service().fetch_release_group_cover_art_url(album_id, timeout=8)
+    except Exception:
+        logging.exception("music_album_art fetch failed album_id=%s", album_id)
+        cover_url = None
 
     if isinstance(cache, dict):
         cache[album_id] = {
