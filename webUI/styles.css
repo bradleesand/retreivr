@@ -352,11 +352,11 @@ body.home-page .music-search-options {
 }
 
 body.home-page .music-search-options-row {
-  display: grid;
-  grid-template-columns: auto auto auto;
+  display: flex;
+  flex-wrap: nowrap;
   align-items: end;
   gap: 12px;
-  justify-content: start;
+  justify-content: flex-start;
 }
 
 body.home-page .music-search-mode-field {
@@ -408,6 +408,7 @@ body.home-page .music-force-toggle {
   white-space: nowrap;
   cursor: pointer;
   user-select: none;
+  margin-left: auto;
 }
 
 body.home-page .music-force-toggle-label {
@@ -2192,7 +2193,8 @@ a[aria-disabled="true"] {
   }
 
   body.home-page .music-search-options-row {
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-direction: column;
     width: 100%;
     align-items: flex-start;
   }
