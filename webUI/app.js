@@ -2986,7 +2986,7 @@ function renderMusicModeResults(response, query = "") {
             artist: artistQuery,
             album: albumTitle,
             releaseGroupMbid: releaseGroupMbidValue,
-            limit: 200,
+            limit: 100,
           });
           renderMusicModeResults({ artists: [], albums: [], tracks, mode_used: "track" }, `${artistQuery} ${albumTitle}`.trim());
           setNotice($("#home-search-message"), `Loaded ${tracks.length} tracks for ${albumTitle || "album"}.`, false);
@@ -3188,7 +3188,7 @@ async function fetchMusicTracksByAlbum({ artist = "", album = "", releaseGroupMb
   const artistQuery = String(artist || "").trim();
   const albumQuery = String(album || "").trim();
   const rgMbid = String(releaseGroupMbid || "").trim();
-  const cappedLimit = Number.isFinite(Number(limit)) ? Math.min(200, Math.max(1, Number(limit))) : 100;
+  const cappedLimit = Number.isFinite(Number(limit)) ? Math.min(100, Math.max(1, Number(limit))) : 100;
   if (!artistQuery && !albumQuery) {
     return [];
   }
@@ -3527,7 +3527,7 @@ function renderHomeAlbumCandidates(candidates, query = "") {
           artist: artistCredit,
           album: albumTitle,
           releaseGroupMbid: releaseGroupId,
-          limit: 200,
+          limit: 100,
         });
         renderMusicModeResults({ artists: [], albums: [], tracks, mode_used: "track" }, `${artistCredit} ${albumTitle}`.trim());
         setNotice($("#home-search-message"), `Loaded ${tracks.length} tracks for ${albumTitle || "album"}.`, false);
