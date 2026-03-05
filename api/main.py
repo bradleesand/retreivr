@@ -818,6 +818,101 @@ def _delete_music_failures(
     remaining = int((cur.fetchone() or [0])[0] or 0)
     return deleted, before_count, remaining
 
+
+def _ensure_run_summary_dispatch_table(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS run_summary_dispatch (
+            run_type TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            summary_sent INTEGER NOT NULL DEFAULT 0,
+            telegram_message_id TEXT,
+            attempted INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (run_type, run_id)
+        )
+        """
+    )
+    conn.commit()
+
+
+def _read_persisted_run_summary_dispatch(run_type: str, run_id: str) -> dict[str, object] | None:
+    db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+    if not db_path:
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        _ensure_run_summary_dispatch_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT summary_sent, telegram_message_id, attempted
+            FROM run_summary_dispatch
+            WHERE run_type=? AND run_id=?
+            """,
+            (run_type, run_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        summary_sent, telegram_message_id, attempted = row
+        return {
+            "summary_sent": bool(summary_sent),
+            "telegram_message_id": telegram_message_id,
+            "attempted": int(attempted or 0),
+        }
+    except Exception:
+        logging.exception("Failed reading persisted run summary dispatch")
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _write_persisted_run_summary_dispatch(run_type: str, run_id: str, record: dict[str, object]) -> None:
+    db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+    if not db_path:
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        _ensure_run_summary_dispatch_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO run_summary_dispatch (
+                run_type, run_id, summary_sent, telegram_message_id, attempted, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_type, run_id) DO UPDATE SET
+                summary_sent=excluded.summary_sent,
+                telegram_message_id=excluded.telegram_message_id,
+                attempted=excluded.attempted,
+                updated_at=excluded.updated_at
+            """,
+            (
+                run_type,
+                run_id,
+                1 if bool(record.get("summary_sent")) else 0,
+                str(record.get("telegram_message_id") or "").strip() or None,
+                int(record.get("attempted") or 0),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+    except Exception:
+        logging.exception("Failed writing persisted run summary dispatch")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
 def notify_run_summary(config, *, run_type: str, status, started_at, finished_at, force_send: bool = False):
     if run_type not in {"scheduled", "watcher", "api"}:
         return {"attempted": 0, "sent": False, "telegram_message_id": None}
@@ -918,8 +1013,14 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
 
     def _build_message(success_count: int, failure_count: int, duration_text: str, downloaded_labels: list[str]) -> str:
         status_text = "completed" if failure_count <= 0 else "completed_with_errors"
+        success_label = "Success"
+        failure_label = "Failed"
+        downloaded_heading = "Downloaded:"
         if run_type == "scheduled":
-            title = "Retreivr Scheduler Run Summary\nYouTube Playlist Archive Completed"
+            title = "Retreivr Scheduler Run Summary\nYouTube Playlist Queueing Completed"
+            success_label = "Jobs queued"
+            failure_label = "Queue failures"
+            downloaded_heading = "Queued:"
         elif run_type == "watcher":
             title = "Retreivr Watcher Run Summary\nYouTube Playlist Archive Completed"
         else:
@@ -927,12 +1028,12 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
         header = (
             f"{title}\n"
             f"Status: {status_text}\n"
-            f"\u2714 Success: {success_count}\n"
-            f"\u2716 Failed: {failure_count}\n"
+            f"\u2714 {success_label}: {success_count}\n"
+            f"\u2716 {failure_label}: {failure_count}\n"
             f"Duration: {duration_text}"
         )
         footer = "\n\n__________"
-        lines = ["", "Downloaded:"]
+        lines = ["", downloaded_heading]
         if downloaded_labels:
             lines.extend([f"\u2022 {label}" for label in downloaded_labels])
         else:
@@ -1021,6 +1122,7 @@ def dispatch_run_summary_once(
         app.state.run_summary_dispatch = registry
 
     dedupe_key = f"{run_type}:{str(run_id or '').strip() or 'unknown'}"
+    dedupe_run_id = str(run_id or "").strip() or "unknown"
     existing = registry.get(dedupe_key) if isinstance(registry.get(dedupe_key), dict) else None
     if existing and bool(existing.get("summary_sent")):
         setattr(status, "summary_sent", True)
@@ -1033,6 +1135,19 @@ def dispatch_run_summary_once(
         )
         return existing
 
+    persisted = _read_persisted_run_summary_dispatch(run_type, dedupe_run_id)
+    if persisted and bool(persisted.get("summary_sent")):
+        setattr(status, "summary_sent", True)
+        setattr(status, "telegram_message_id", persisted.get("telegram_message_id"))
+        registry[dedupe_key] = persisted
+        logging.info(
+            "run_summary_telegram_dispatch_skipped run_id=%s run_type=%s reason=already_sent_persisted message_id=%s",
+            run_id,
+            run_type,
+            persisted.get("telegram_message_id"),
+        )
+        return persisted
+
     if bool(getattr(status, "summary_sent", False)):
         cached = {
             "summary_sent": True,
@@ -1040,6 +1155,7 @@ def dispatch_run_summary_once(
             "attempted": 0,
         }
         registry[dedupe_key] = cached
+        _write_persisted_run_summary_dispatch(run_type, dedupe_run_id, cached)
         logging.info(
             "run_summary_telegram_dispatch_skipped run_id=%s run_type=%s reason=status_summary_sent message_id=%s",
             run_id,
@@ -1069,6 +1185,7 @@ def dispatch_run_summary_once(
         "attempted": attempted,
     }
     registry[dedupe_key] = record
+    _write_persisted_run_summary_dispatch(run_type, dedupe_run_id, record)
     logging.info(
         "run_summary_telegram_dispatch run_id=%s run_type=%s attempted=%s sent=%s message_id=%s",
         run_id,
@@ -1846,6 +1963,8 @@ async def startup():
         logging.info("Scheduler active — fixed interval bulk runs")
 
     init_db(app.state.paths.db_path)
+    with sqlite3.connect(app.state.paths.db_path) as _conn:
+        _ensure_run_summary_dispatch_table(_conn)
     _ensure_watch_tables(app.state.paths.db_path)
     app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, startup_cfg)
     logging.info("Search DB path: %s", app.state.search_db_path)

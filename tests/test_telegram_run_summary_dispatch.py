@@ -228,7 +228,10 @@ def test_notify_run_summary_uses_run_type_header_and_resolves_track_labels(monke
     msg = captured["message"] or ""
     assert result["sent"] is True
     assert "Retreivr Scheduler Run Summary" in msg
-    assert "YouTube Playlist Archive Completed" in msg
+    assert "YouTube Playlist Queueing Completed" in msg
+    assert "Jobs queued: 1" in msg
+    assert "Queue failures: 0" in msg
+    assert "Queued:" in msg
     assert "Alcohol" in msg
     assert "0123456789abcdef0123456789abcdef" not in msg
 
