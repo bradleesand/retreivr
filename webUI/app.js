@@ -198,7 +198,7 @@ function toUserErrorMessage(err, fallback = "Unexpected error") {
   return fallback;
 }
 
-function runPrioritizedThumbnailJobs(jobs, renderToken, maxConcurrent = 4) {
+function runPrioritizedThumbnailJobs(jobs, renderToken, maxConcurrent = 2) {
   const tasks = Array.isArray(jobs) ? jobs.filter((job) => typeof job === "function") : [];
   if (!tasks.length) {
     return;
@@ -217,6 +217,8 @@ function runPrioritizedThumbnailJobs(jobs, renderToken, maxConcurrent = 4) {
       } catch (_err) {
         // Thumbnail hydration is best-effort only.
       }
+      // Small spacing helps avoid burst throttling on cover-art endpoints.
+      await new Promise((resolve) => window.setTimeout(resolve, 120));
     }
   };
   for (let i = 0; i < concurrency; i += 1) {
@@ -2894,7 +2896,7 @@ function renderMusicModeResults(response, query = "") {
       }
     });
   }
-  runPrioritizedThumbnailJobs(thumbnailJobs, renderToken, 4);
+  runPrioritizedThumbnailJobs(thumbnailJobs, renderToken, 2);
 
   if (tracks.length) {
     appendSection("Tracks");
@@ -3473,16 +3475,19 @@ async function fetchHomeAlbumCoverUrl(albumId) {
   if (!key) {
     return null;
   }
-  if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, key)) {
-    return state.homeAlbumCoverCache[key];
+  const cached = state.homeAlbumCoverCache[key];
+  if (typeof cached === "string" && cached) {
+    return cached;
   }
   try {
     const data = await fetchJson(`/api/music/album/art/${encodeURIComponent(key)}`);
     const url = typeof data?.cover_url === "string" && data.cover_url ? data.cover_url : null;
-    state.homeAlbumCoverCache[key] = url;
+    // Cache positive hits only; avoid pinning transient misses/rate limits as permanent null.
+    if (url) {
+      state.homeAlbumCoverCache[key] = url;
+    }
     return url;
   } catch (_err) {
-    state.homeAlbumCoverCache[key] = null;
     return null;
   }
 }
