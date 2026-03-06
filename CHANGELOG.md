@@ -41,6 +41,10 @@ This release focuses on homepage search UX and discovery speed: incremental/as-r
 - Rumble/archive preview wiring and embed behavior reliability on homepage preview modal.
 - Search-card metadata regressions (including posted-date rendering on result cards).
 
+### Upgrade Notes
+- No required config migration for existing installs.
+- To add site-search adapters, copy `config/custom_search_adapters.example.yaml` to `config/custom_search_adapters.yaml` and ensure `custom_search_adapters_file` is set in `config/config.json`.
+
 ## v0.9.7 — Community Cache + Local Search Cache + Watcher/Telegram Hardening
 
 ### High-Level
