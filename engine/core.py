@@ -41,6 +41,9 @@ _GOOGLE_AUTH_RETRY = re.compile(r"Refreshing credentials due to a 401 response\.
 _SPOTIFY_PLAYLIST_RE = re.compile(
     r"^(?:https?://open\.spotify\.com/playlist/|spotify:playlist:)([A-Za-z0-9]+)"
 )
+_COMMUNITY_PUBLISH_MODES = {"off", "dry_run", "write_outbox"}
+_SEARCH_CACHE_MAX_ENTRIES_DEFAULT = 50000
+_SEARCH_CACHE_SEED_TOP_N_DEFAULT = 30
 
 
 def _install_google_auth_filter():
@@ -226,15 +229,68 @@ def _finalize_client_delivery(delivery_id, *, timeout=False):
     return bool(entry.get("delivered"))
 
 
-def load_config(path):
+def _write_config_atomic(path, config):
+    target_dir = os.path.dirname(path) or "."
+    os.makedirs(target_dir, exist_ok=True)
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w") as handle:
+        json.dump(config, handle, indent=4, sort_keys=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, path)
+
+
+def load_config(path, *, write_back_defaults=False):
     with open(path, "r") as f:
-        return json.load(f)
+        loaded = json.load(f)
+    normalized = apply_config_defaults(loaded)
+    if (
+        write_back_defaults
+        and isinstance(loaded, dict)
+        and isinstance(normalized, dict)
+        and normalized != loaded
+    ):
+        try:
+            _write_config_atomic(path, normalized)
+        except Exception:
+            logging.warning("Failed to persist config defaults to %s", path, exc_info=True)
+    return normalized
+
+
+def apply_config_defaults(config):
+    if not isinstance(config, dict):
+        return config
+
+    normalized = dict(config)
+
+    lookup_enabled = normalized.get("community_cache_lookup_enabled")
+    legacy_lookup = normalized.get("community_cache_enabled")
+    if lookup_enabled is None:
+        lookup_enabled = legacy_lookup if legacy_lookup is not None else True
+    normalized["community_cache_lookup_enabled"] = bool(lookup_enabled)
+
+    # Legacy alias retained for backward compatibility with existing code paths.
+    normalized["community_cache_enabled"] = bool(normalized.get("community_cache_lookup_enabled"))
+
+    normalized.setdefault("community_cache_publish_enabled", False)
+    normalized.setdefault("community_cache_publish_mode", "off")
+    normalized.setdefault("community_cache_publish_min_score", 0.78)
+    normalized.setdefault("community_cache_publish_outbox_dir", "")
+
+    normalized.setdefault("search_cache_enabled", True)
+    normalized.setdefault("search_cache_ttl_days", 0)
+    normalized.setdefault("search_cache_prune_on_failure", True)
+    normalized.setdefault("search_cache_max_entries", _SEARCH_CACHE_MAX_ENTRIES_DEFAULT)
+    normalized.setdefault("search_cache_seed_top_n", _SEARCH_CACHE_SEED_TOP_N_DEFAULT)
+
+    return normalized
 
 
 def validate_config(config):
     errors = []
     if not isinstance(config, dict):
         return ["config must be a JSON object"]
+    config = apply_config_defaults(config)
 
     accounts = config.get("accounts")
     if accounts is not None and not isinstance(accounts, dict):
@@ -256,6 +312,9 @@ def validate_config(config):
             mode = pl.get("mode")
             if mode is not None and mode not in {"full", "subscribe"}:
                 errors.append(f"playlists[{idx}].mode must be 'full' or 'subscribe'")
+            media_mode = pl.get("media_mode")
+            if media_mode is not None and media_mode not in {"video", "music", "music_video"}:
+                errors.append(f"playlists[{idx}].media_mode must be 'video', 'music', or 'music_video'")
             media_type = pl.get("media_type")
             if media_type is not None and media_type not in {"music", "audio", "video"}:
                 errors.append(f"playlists[{idx}].media_type must be 'music', 'audio', or 'video'")
@@ -377,6 +436,68 @@ def validate_config(config):
                 errors.append("watch_policy.idle_backoff_factor must be an integer")
             if active_reset is not None and not isinstance(active_reset, int):
                 errors.append("watch_policy.active_reset_minutes must be an integer")
+
+    community_cache_lookup_enabled = config.get("community_cache_lookup_enabled")
+    if community_cache_lookup_enabled is not None and not isinstance(community_cache_lookup_enabled, bool):
+        errors.append("community_cache_lookup_enabled must be true/false")
+
+    community_cache_enabled = config.get("community_cache_enabled")
+    if community_cache_enabled is not None and not isinstance(community_cache_enabled, bool):
+        errors.append("community_cache_enabled must be true/false")
+
+    community_cache_publish_enabled = config.get("community_cache_publish_enabled")
+    if community_cache_publish_enabled is not None and not isinstance(community_cache_publish_enabled, bool):
+        errors.append("community_cache_publish_enabled must be true/false")
+
+    community_cache_publish_mode = config.get("community_cache_publish_mode")
+    if community_cache_publish_mode is not None:
+        if not isinstance(community_cache_publish_mode, str):
+            errors.append("community_cache_publish_mode must be a string")
+        elif community_cache_publish_mode not in _COMMUNITY_PUBLISH_MODES:
+            errors.append("community_cache_publish_mode must be one of: off, dry_run, write_outbox")
+
+    community_cache_publish_min_score = config.get("community_cache_publish_min_score")
+    if community_cache_publish_min_score is not None:
+        try:
+            min_score = float(community_cache_publish_min_score)
+        except (TypeError, ValueError):
+            errors.append("community_cache_publish_min_score must be a number")
+        else:
+            if min_score < 0.0 or min_score > 1.0:
+                errors.append("community_cache_publish_min_score must be between 0 and 1")
+
+    community_cache_publish_outbox_dir = config.get("community_cache_publish_outbox_dir")
+    if community_cache_publish_outbox_dir is not None and not isinstance(community_cache_publish_outbox_dir, str):
+        errors.append("community_cache_publish_outbox_dir must be a string")
+
+    search_cache_enabled = config.get("search_cache_enabled")
+    if search_cache_enabled is not None and not isinstance(search_cache_enabled, bool):
+        errors.append("search_cache_enabled must be true/false")
+
+    search_cache_ttl_days = config.get("search_cache_ttl_days")
+    if search_cache_ttl_days is not None:
+        if not isinstance(search_cache_ttl_days, int):
+            errors.append("search_cache_ttl_days must be an integer")
+        elif search_cache_ttl_days < 0:
+            errors.append("search_cache_ttl_days must be >= 0")
+
+    search_cache_prune_on_failure = config.get("search_cache_prune_on_failure")
+    if search_cache_prune_on_failure is not None and not isinstance(search_cache_prune_on_failure, bool):
+        errors.append("search_cache_prune_on_failure must be true/false")
+
+    search_cache_max_entries = config.get("search_cache_max_entries")
+    if search_cache_max_entries is not None:
+        if not isinstance(search_cache_max_entries, int):
+            errors.append("search_cache_max_entries must be an integer")
+        elif search_cache_max_entries < 1000:
+            errors.append("search_cache_max_entries must be >= 1000")
+
+    search_cache_seed_top_n = config.get("search_cache_seed_top_n")
+    if search_cache_seed_top_n is not None:
+        if not isinstance(search_cache_seed_top_n, int):
+            errors.append("search_cache_seed_top_n must be an integer")
+        elif search_cache_seed_top_n < 1:
+            errors.append("search_cache_seed_top_n must be >= 1")
 
     return errors
 
@@ -842,6 +963,10 @@ def telegram_notify_result(config, message):
     telegram = config.get("telegram") if isinstance(config, dict) else None
     if not telegram or not message:
         return {"ok": False, "message_id": None}
+    # Respect explicit telegram.enabled=false while preserving legacy behavior
+    # for configs that only provide bot token/chat id.
+    if isinstance(telegram, dict) and "enabled" in telegram and not bool(telegram.get("enabled")):
+        return {"ok": False, "message_id": None}
     bot_token = telegram.get("bot_token")
     chat_id = telegram.get("chat_id")
     if not bot_token or not chat_id:
@@ -1032,7 +1157,10 @@ def run_single_playlist(
         return status
 
     normalized_final_format = str(final_format_override or "").strip().lower()
-    explicit_music_mode = bool(_ignored.get("music_mode"))
+    requested_media_mode = str(_ignored.get("media_mode") or "").strip().lower()
+    if requested_media_mode not in {"video", "music", "music_video"}:
+        requested_media_mode = "music_video" if bool(_ignored.get("music_video")) else ""
+    explicit_music_mode = bool(_ignored.get("music_mode")) or requested_media_mode == "music"
     configured_media_type = str((config or {}).get("media_type") or "").strip().lower()
     inferred_music_mode = explicit_music_mode or configured_media_type in {"music", "audio"} or normalized_final_format in {
         "mp3",
@@ -1054,7 +1182,11 @@ def run_single_playlist(
         "remove_after_download": False,
         "mode": "full",
     }
-    if inferred_music_mode:
+    if requested_media_mode:
+        entry["media_mode"] = requested_media_mode
+    if requested_media_mode == "music_video":
+        entry["media_type"] = "video"
+    elif inferred_music_mode:
         entry["media_type"] = "music"
     if account:
         entry["account"] = account

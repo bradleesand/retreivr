@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.7 — Community Cache + Local Search Cache + Watcher/Telegram Hardening
+
+### High-Level
+This release improves cache-first search/resolution performance, stabilizes watcher/Telegram reporting, and refines music/music-video UX without changing deterministic scoring thresholds.
+Added Music Video Mode with similar UX as Music Mode, but attempts to download official music videos from official channels as priority while still embedding musicbrainz metadata.
+
+### Added
+- Community transport cache lookup + publish outbox (local JSONL proposals, opt-in).
+- Local SQLite search cache for homepage search with cache-first replay + background refresh.
+- Deterministic community reverse-index rebuild from local dataset snapshots.
+- Music/MV metadata-first UX upgrades: MB IDs on cards, artwork, album/track navigation improvements.
+
+### Changed
+- Homepage search now surfaces cached candidates immediately and continues normal adapter resolution in parallel.
+- Candidate dedupe now merges provenance/metadata deterministically and removes cache/adapter duplicate rows.
+- Community lookup remains hint-only and is injected before normal ladder execution; fallback behavior is unchanged if cache is missing/unavailable.
+- Config defaults/schema expanded for community lookup/publish and local search-cache controls with backward-compatible defaulting.
+- Generic/video scoring now includes a small logarithmic `view_count` tie-break bonus when metadata already contains view counts (no extra fetch calls).
+- Navigation cleanup: page naming/hash alias behavior aligned around `Advanced`.
+
+### Fixed
+- Search/control-flow safety fixes so cache failures/timeouts do not block request resolution.
+- Restricted-content filtering improved for adapter normalization and cache replay.
+- Telegram scheduler/watcher summaries hardened: cleaner headers, title-first item labels, duplicate dispatch reduction.
+- Watcher stability improvements: batch-level messaging behavior, restart resilience, and non-blocking polling paths.
+- Music UI regressions fixed across `View Tracks`, card actions, artwork loading/layout, and mode-specific interaction behavior.
+
 ## v0.9.6 — Runtime Distribution + Music Match Robustness
 
 ### High-Level
