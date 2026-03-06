@@ -39,8 +39,10 @@ const state = {
   homeBestScores: {},
   homeCandidateCache: {},
   homeCandidatesLoading: {},
+  homeCandidateRefreshPending: {},
   homeCandidateData: {},
   homeSearchPollStart: null,
+  homeResultPollInFlight: false,
   homeSearchControlsEnabled: true,
   pendingAdvancedRequestId: null,
   spotifyPlaylistStatus: {},
@@ -154,7 +156,8 @@ const HOME_STATUS_CLASS_MAP = {
 };
 const HOME_FINAL_STATUSES = new Set(["completed", "completed_with_skips", "failed"]);
 const HOME_RESULT_TIMEOUT_MS = 18000;
-const HOME_RESULT_POLL_INTERVAL_MS = 1000;
+const HOME_RESULT_POLL_INTERVAL_MS = 300;
+const HOME_NO_CANDIDATE_STREAK_LIMIT = 12;
 const DIRECT_URL_PLAYLIST_ERROR =
   "Playlist URLs are not supported in Direct URL mode. Please add this playlist via Scheduler or Playlist settings.";
 const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
@@ -2906,9 +2909,10 @@ function maybeReleaseHomeSearchControls(requestId, requestStatus, hasVisibleCand
 
 function stopHomeResultPolling() {
   if (state.homeResultsTimer) {
-    clearInterval(state.homeResultsTimer);
+    clearTimeout(state.homeResultsTimer);
     state.homeResultsTimer = null;
   }
+  state.homeResultPollInFlight = false;
   state.homeSearchPollStart = null;
 }
 
@@ -3669,6 +3673,7 @@ function clearLegacyHomeSearchState() {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateRefreshPending = {};
   const resultsList = $("#home-results-list");
   if (resultsList) {
     resultsList.textContent = "";
@@ -3727,6 +3732,7 @@ async function handleHomeStandardSearch(autoEnqueue, inputValue, messageEl) {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateRefreshPending = {};
   state.homeSearchRequestId = data.request_id;
   state.homeSearchMode = autoEnqueue ? "download" : "searchOnly";
   updateHomeViewAdvancedLink();
@@ -4461,7 +4467,11 @@ function updateHomeResultItemCard(card, item) {
 }
 
 function scheduleHomeCandidateRefresh(item, container) {
-  if (!item || !item.id || !container || state.homeCandidatesLoading[item.id]) {
+  if (!item || !item.id || !container) {
+    return;
+  }
+  if (state.homeCandidatesLoading[item.id]) {
+    state.homeCandidateRefreshPending[item.id] = true;
     return;
   }
   const preloadedCandidates = Array.isArray(item.candidates) ? item.candidates : null;
@@ -4534,31 +4544,36 @@ async function loadHomeCandidates(item, container, preloadedCandidates = null) {
     if (Number.isFinite(bestScore)) {
       recordHomeCandidateScore(requestId, bestScore);
     }
-    // Enrich with job-state after candidate rows are visible.
-    let jobSnapshot = null;
-    try {
-      jobSnapshot = await fetchHomeJobSnapshot(requestId);
-    } catch (err) {
-      jobSnapshot = null;
-    }
-    if (jobSnapshot) {
-      candidates.forEach((candidate) => {
-        if (!candidate?.id) return;
-        const selector = `[data-candidate-id="${CSS.escape(candidate.id)}"]`;
-        const row = container.querySelector(selector);
-        if (!row) return;
-        const job = candidate.url ? jobSnapshot.jobsByUrl.get(candidate.url) : null;
-        updateHomeCandidateRowState(row, candidate, item, job || null);
-      });
-      if (!state.homeJobTimer) {
-        const hasActive = Array.from(jobSnapshot.jobsByUrl.values()).some((job) =>
-          ["queued", "claimed", "downloading", "postprocessing"].includes(job.status)
-        );
-        if (hasActive) {
-          startHomeJobPolling(requestId);
+    // Enrich job-state asynchronously so rendering is never blocked.
+    Promise.resolve()
+      .then(async () => {
+        if (!requestId) return null;
+        try {
+          return await fetchHomeJobSnapshot(requestId);
+        } catch (_err) {
+          return null;
         }
-      }
-    }
+      })
+      .then((jobSnapshot) => {
+        if (!jobSnapshot) return;
+        candidates.forEach((candidate) => {
+          if (!candidate?.id) return;
+          const selector = `[data-candidate-id="${CSS.escape(candidate.id)}"]`;
+          const row = container.querySelector(selector);
+          if (!row) return;
+          const job = candidate.url ? jobSnapshot.jobsByUrl.get(candidate.url) : null;
+          updateHomeCandidateRowState(row, candidate, item, job || null);
+        });
+        if (!state.homeJobTimer) {
+          const hasActive = Array.from(jobSnapshot.jobsByUrl.values()).some((job) =>
+            ["queued", "claimed", "downloading", "postprocessing"].includes(job.status)
+          );
+          if (hasActive) {
+            startHomeJobPolling(requestId);
+          }
+        }
+      })
+      .catch(() => {});
   } catch (err) {
     container.textContent = "";
     const errorEl = document.createElement("div");
@@ -4567,6 +4582,10 @@ async function loadHomeCandidates(item, container, preloadedCandidates = null) {
     container.appendChild(errorEl);
   } finally {
     state.homeCandidatesLoading[item.id] = false;
+    if (state.homeCandidateRefreshPending[item.id]) {
+      state.homeCandidateRefreshPending[item.id] = false;
+      setTimeout(() => scheduleHomeCandidateRefresh(item, container), 0);
+    }
   }
 }
 
@@ -5087,6 +5106,7 @@ function showHomeDirectUrlError(url, message, messageEl) {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateRefreshPending = {};
   state.homeCandidateData = {};
   stopHomeJobPolling();
   showHomeResults(true);
@@ -5112,6 +5132,7 @@ function showHomeDirectUrlPreview(preview) {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateRefreshPending = {};
   state.homeCandidateData = {};
   stopHomeJobPolling();
   showHomeResults(true);
@@ -5446,7 +5467,7 @@ function guardHomeSearchNoCandidates(requestId, requestStatus, items) {
   if (watchingStates.has(requestStatus) && !hasCandidates) {
     const streak = (state.homeNoCandidateStreaks[requestId] || 0) + 1;
     state.homeNoCandidateStreaks[requestId] = streak;
-    if (streak >= 3) {
+    if (streak >= HOME_NO_CANDIDATE_STREAK_LIMIT) {
       stopHomeResultPolling();
       setHomeResultsStatus("No candidates returned");
       setHomeResultsDetail(
@@ -5476,22 +5497,40 @@ function startHomeResultPolling(requestId) {
   showHomeResults(true);
   state.homeSearchPollStart = Date.now();
   const tick = async () => {
-    const status = await refreshHomeResults(requestId);
-    if (status === null) {
+    if (state.homeSearchRequestId !== requestId) {
       stopHomeResultPolling();
       return;
     }
-    const elapsed = state.homeSearchPollStart ? Date.now() - state.homeSearchPollStart : 0;
-    const hasVisibleCandidates = document.querySelectorAll("#home-results-list .home-candidate-row").length > 0;
-    if (elapsed >= HOME_RESULT_TIMEOUT_MS && !hasVisibleCandidates) {
-      abortHomeResultPolling("No adapters responded in time. Please retry or use Advanced Search.");
+    if (state.homeResultPollInFlight) {
+      state.homeResultsTimer = setTimeout(tick, HOME_RESULT_POLL_INTERVAL_MS);
       return;
     }
-    if (status && ["completed", "completed_with_skips", "failed"].includes(status)) {
-      stopHomeResultPolling();
+    state.homeResultPollInFlight = true;
+    let shouldContinue = true;
+    try {
+      const status = await refreshHomeResults(requestId);
+      if (status === null) {
+        stopHomeResultPolling();
+        return;
+      }
+      const elapsed = state.homeSearchPollStart ? Date.now() - state.homeSearchPollStart : 0;
+      const hasVisibleCandidates = document.querySelectorAll("#home-results-list .home-candidate-row").length > 0;
+      if (elapsed >= HOME_RESULT_TIMEOUT_MS && !hasVisibleCandidates) {
+        abortHomeResultPolling("No adapters responded in time. Please retry or use Advanced Search.");
+        return;
+      }
+      if (status && ["completed", "completed_with_skips", "failed"].includes(status)) {
+        stopHomeResultPolling();
+        shouldContinue = false;
+        return;
+      }
+    } finally {
+      state.homeResultPollInFlight = false;
+    }
+    if (shouldContinue && state.homeSearchRequestId === requestId) {
+      state.homeResultsTimer = setTimeout(tick, HOME_RESULT_POLL_INTERVAL_MS);
     }
   };
-  state.homeResultsTimer = setInterval(tick, HOME_RESULT_POLL_INTERVAL_MS);
   tick();
 }
 
@@ -5705,6 +5744,7 @@ async function handleHomePlaylistUrlPreview(url, playlistId, messageEl) {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateRefreshPending = {};
   state.homeCandidateData = {};
   state.homeDirectPreview = {
     title: `YouTube Playlist (${playlistId})`,
