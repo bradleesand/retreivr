@@ -748,6 +748,78 @@ function formatDuration(seconds) {
   return `${secs}s`;
 }
 
+function formatCandidatePostedDate(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return "";
+  }
+
+  const parseRawMeta = () => {
+    const raw = candidate.raw_meta_json;
+    if (!raw || typeof raw !== "string") return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_err) {
+      return {};
+    }
+  };
+
+  const rawMeta = parseRawMeta();
+  const direct = [
+    candidate.posted_at,
+    candidate.published_at,
+    candidate.publish_date,
+    candidate.upload_date,
+    rawMeta.upload_date,
+    rawMeta.release_date,
+    rawMeta.timestamp,
+    rawMeta.release_timestamp,
+  ];
+
+  const parseValue = (value) => {
+    if (value === null || value === undefined || value === "") return null;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const ms = value > 1e12 ? value : value * 1000;
+      const d = new Date(ms);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const text = String(value).trim();
+    if (!text) return null;
+    if (/^\d{8}$/.test(text)) {
+      const year = Number(text.slice(0, 4));
+      const month = Number(text.slice(4, 6));
+      const day = Number(text.slice(6, 8));
+      const d = new Date(Date.UTC(year, month - 1, day));
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    if (/^\d{10,13}$/.test(text)) {
+      const n = Number(text);
+      if (!Number.isFinite(n)) return null;
+      const ms = text.length === 13 ? n : n * 1000;
+      const d = new Date(ms);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const d = new Date(text);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  for (const value of direct) {
+    const parsed = parseValue(value);
+    if (parsed) {
+      try {
+        return parsed.toLocaleDateString(undefined, {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        });
+      } catch (_err) {
+        return parsed.toISOString().slice(0, 10);
+      }
+    }
+  }
+  return "";
+}
+
 function toFiniteNumber(value) {
   if (value === null || value === undefined) return null;
   if (typeof value === "string" && value.trim() === "") return null;
@@ -4518,6 +4590,14 @@ function renderHomeCandidateRow(candidate, item) {
     }
   }
   row.appendChild(action);
+
+  const postedDate = formatCandidatePostedDate(candidate);
+  if (postedDate) {
+    const postedEl = document.createElement("div");
+    postedEl.className = "home-candidate-posted";
+    postedEl.textContent = `Posted: ${postedDate}`;
+    row.appendChild(postedEl);
+  }
 
   return row;
 }
