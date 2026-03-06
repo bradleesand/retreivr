@@ -3497,19 +3497,6 @@ class DownloadWorkerEngine:
                 candidate_id=candidate_id,
                 unavailable_class=unavailable_class,
             )
-            if (
-                self.search_service
-                and bool(self.config.get("search_cache_enabled", True))
-                and failure_domain in {"source_unavailable", "metadata_probe"}
-            ):
-                try:
-                    self.search_service.invalidate_search_cache_entry(
-                        url=getattr(job, "url", None),
-                        reason=error_message,
-                    )
-                except Exception:
-                    logging.exception("search_cache_invalidation_failed job_id=%s", getattr(job, "id", None))
-
 
 class YouTubeAdapter:
     _missing_final_format_warned = False

@@ -109,20 +109,16 @@ http://localhost:8000
 ---
 
 ## Cache Configuration
-Retreivr supports two separate cache concepts:
+Retreivr supports one cache concept in the current pipeline:
 
 - `community_cache_lookup_enabled`: Enables reading shared community transport hints (MBID -> transport IDs). Defaults to `true`. This accelerates discovery only; MusicBrainz remains canonical metadata authority.
 - `community_cache_publish_enabled`: Enables local proposal emission for contributing matches. Defaults to `false` (opt-in).
-- `search_cache_enabled`: Enables local platform-search result caching for faster repeated UI searches. Defaults to `true`.
 
 Related controls:
 
 - `community_cache_publish_mode`: `off | dry_run | write_outbox`
 - `community_cache_publish_min_score`
 - `community_cache_publish_outbox_dir`
-- `search_cache_ttl_days` (`0` = no time-based expiry)
-- `search_cache_prune_on_failure`
-- `search_cache_max_entries`
 
 ---
 
