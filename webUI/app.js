@@ -2284,6 +2284,13 @@ function updateHomeMusicModeUI() {
   if (musicVideoFormatField) {
     musicVideoFormatField.classList.toggle("hidden", state.homeMediaMode !== "music_video");
   }
+  const musicVideoFormatSelector = $("#music-video-final-format");
+  if (musicVideoFormatSelector && state.homeMediaMode === "music_video") {
+    const current = String(musicVideoFormatSelector.value || "").trim().toLowerCase();
+    if (!current) {
+      musicVideoFormatSelector.value = "mp4";
+    }
+  }
   // Keep this badge strictly tied to the live toggle state.
   const badge = $("#home-music-mode-badge");
   if (badge) {
