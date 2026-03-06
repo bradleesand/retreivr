@@ -684,6 +684,19 @@ function buildHomePreviewDescriptor(candidate) {
   };
 }
 
+function buildHomePreviewDescriptorFromRow(row) {
+  if (!row) return null;
+  const previewButton = row.querySelector('button[data-action="home-preview"]');
+  if (!previewButton) return null;
+  const embedUrl = String(previewButton.dataset.previewEmbedUrl || "").trim();
+  if (!embedUrl || !isValidHttpUrl(embedUrl)) return null;
+  return {
+    embedUrl,
+    source: String(previewButton.dataset.previewSource || "").trim(),
+    title: String(previewButton.dataset.previewTitle || "").trim() || "Preview",
+  };
+}
+
 function openHomePreviewModal(descriptor) {
   if (!descriptor || !descriptor.embedUrl) {
     return;
@@ -4661,6 +4674,8 @@ function renderHomeCandidateRow(candidate, item) {
       previewButton.dataset.previewSource = previewDescriptor.source;
       previewButton.dataset.previewTitle = previewDescriptor.title;
       action.appendChild(previewButton);
+      titleEl.dataset.previewEnabled = "true";
+      artwork.dataset.previewEnabled = "true";
     }
   }
   row.appendChild(action);
@@ -7492,6 +7507,15 @@ function bindEvents() {
   const homeResultsList = $("#home-results-list");
   if (homeResultsList) {
     homeResultsList.addEventListener("click", async (event) => {
+      const previewTarget = event.target.closest(".home-candidate-artwork, .home-candidate-title");
+      if (previewTarget) {
+        const row = previewTarget.closest(".home-candidate-row");
+        const descriptor = buildHomePreviewDescriptorFromRow(row);
+        if (descriptor) {
+          openHomePreviewModal(descriptor);
+          return;
+        }
+      }
       const cancelIntentButton = event.target.closest('button[data-action="home-intent-cancel"]');
       if (cancelIntentButton) {
         resetHomeIntentConfirmation();
