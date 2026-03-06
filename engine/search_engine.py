@@ -180,8 +180,6 @@ DEFAULT_SOURCE_PRIORITY = [
     "youtube_music",
     "rumble",
     "archive_org",
-    "bitchute",
-    "x",
     "soundcloud",
     "bandcamp",
 ]
@@ -249,6 +247,22 @@ def _is_http_url(value: str | None) -> bool:
 # Helper: Coerce to HTTP(S) URL or None
 def _coerce_http_url(value: str | None) -> str | None:
     return value if _is_http_url(value) else None
+
+
+def _candidate_transport_identity(candidate: dict | None) -> str | None:
+    if not isinstance(candidate, dict):
+        return None
+    raw_url = str(candidate.get("url") or "").strip()
+    source = str(candidate.get("source") or "").strip().lower()
+    if source in {"youtube", "youtube_music"}:
+        video_id = extract_video_id(raw_url) or extract_video_id(candidate.get("video_id"))
+        if video_id:
+            return f"youtube_video:{str(video_id).lower()}"
+    if raw_url:
+        if source:
+            return f"source_url:{source}:{raw_url.lower()}"
+        return f"url:{raw_url.lower()}"
+    return None
 
 # Helper: Detect if a value is a URL
 def _is_url(value: str | None) -> bool:
@@ -1959,14 +1973,12 @@ class SearchResolutionService:
                 return False
 
             def _transport_identity(candidate):
-                if not isinstance(candidate, dict):
-                    return None
-                raw_url = str(candidate.get("url") or "").strip()
-                video_id = extract_video_id(raw_url) or str(candidate.get("community_video_id") or "").strip()
-                if video_id:
-                    return f"youtube_video:{str(video_id).lower()}"
-                if raw_url:
-                    return f"url:{raw_url.lower()}"
+                identity = _candidate_transport_identity(candidate)
+                if identity:
+                    return identity
+                community_video_id = str((candidate or {}).get("community_video_id") or "").strip()
+                if community_video_id:
+                    return f"youtube_video:{community_video_id.lower()}"
                 return None
 
             def _merge_candidate(base, incoming):
@@ -3024,15 +3036,7 @@ class SearchResolutionService:
                 return False
 
             def _candidate_identity(candidate):
-                if not isinstance(candidate, dict):
-                    return None
-                raw_url = str(candidate.get("url") or "").strip()
-                video_id = extract_video_id(raw_url) or extract_video_id(candidate.get("video_id"))
-                if video_id:
-                    return f"youtube_video:{str(video_id).lower()}"
-                if raw_url:
-                    return f"url:{raw_url.lower()}"
-                return None
+                return _candidate_transport_identity(candidate)
 
             def _merge_candidate(base, incoming):
                 merged = dict(base or {})

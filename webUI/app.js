@@ -101,8 +101,6 @@ const HOME_SOURCE_PRIORITY_MAP = {
   youtube_music: ["youtube_music"],
   rumble: ["rumble"],
   archive_org: ["archive_org"],
-  bitchute: ["bitchute"],
-  x: ["x"],
   soundcloud: ["soundcloud"],
   bandcamp: ["bandcamp"],
 };
@@ -111,8 +109,6 @@ const HOME_GENERIC_SOURCE_PRIORITY = [
   "youtube_music",
   "rumble",
   "archive_org",
-  "bitchute",
-  "x",
   "soundcloud",
   "bandcamp",
 ];
@@ -121,8 +117,6 @@ const HOME_VIDEO_SOURCE_PRIORITY = [
   "youtube_music",
   "rumble",
   "archive_org",
-  "bitchute",
-  "x",
   "soundcloud",
   "bandcamp",
 ];
@@ -2381,8 +2375,6 @@ function updateHomeSourceToggleLabel() {
     youtube_music: "YouTube Music",
     rumble: "Rumble",
     archive_org: "Archive.org",
-    bitchute: "BitChute",
-    x: "X",
     soundcloud: "SoundCloud",
     bandcamp: "Bandcamp",
   };
@@ -4491,8 +4483,6 @@ function renderHomeCandidateRow(candidate, item) {
     youtube_music: "YouTube Music",
     rumble: "Rumble",
     archive_org: "Archive.org",
-    bitchute: "BitChute",
-    x: "X",
     soundcloud: "SoundCloud",
     bandcamp: "Bandcamp",
   };

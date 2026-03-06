@@ -6,8 +6,9 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from typing import Protocol, runtime_checkable
 
 import requests
@@ -25,7 +26,11 @@ _DUCKDUCKGO_HTML_SEARCH_URL = "https://duckduckgo.com/html/"
 _DEFAULT_SITE_SEARCH_TIMEOUT_SEC = 4.0
 _DEFAULT_SITE_SEARCH_TIMEOUT_LIGHTWEIGHT_SEC = 2.0
 _SEARCH_LINK_RE = re.compile(
-    r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+    r"<a[^>]+class=(?:\"[^\"]*result__a[^\"]*\"|'[^']*result__a[^']*')[^>]+href=(?:\"([^\"]+)\"|'([^']+)')[^>]*>(.*?)</a>",
+    re.IGNORECASE | re.DOTALL,
+)
+_ANY_LINK_RE = re.compile(
+    r"<a[^>]+href=(?:\"([^\"]+)\"|'([^']+)')[^>]*>(.*?)</a>",
     re.IGNORECASE | re.DOTALL,
 )
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -46,6 +51,22 @@ def _sanitize_source_name(value):
     source = re.sub(r"[^a-z0-9_]+", "_", source)
     source = source.strip("_")
     return source
+
+
+def _normalize_search_phrase(*parts):
+    ordered = []
+    seen = set()
+    for part in parts:
+        text = str(part or "").strip()
+        if not text:
+            continue
+        for token in text.split():
+            key = token.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(token.strip())
+    return " ".join(ordered).strip()
 
 
 def _normalize_domain_list(domains):
@@ -95,10 +116,90 @@ def _strip_html_tags(value):
     return html.unescape(text).strip()
 
 
+def _coerce_text(value):
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, list):
+        for item in value:
+            text = _coerce_text(item)
+            if text:
+                return text
+    return None
+
+
+def _clean_result_title(value, *, fallback=None):
+    text = _coerce_text(value) or _coerce_text(fallback) or ""
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or "Untitled"
+
+
+def _normalize_mediatype_values(value):
+    values = []
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text:
+            values.append(text)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            text = str(item or "").strip().lower()
+            if text:
+                values.append(text)
+    elif value is not None:
+        text = str(value).strip().lower()
+        if text:
+            values.append(text)
+    return values
+
+
+def _rumble_oembed_enrich(url, *, timeout_sec):
+    try:
+        response = requests.get(
+            "https://rumble.com/api/Media/oembed.json",
+            params={"url": url},
+            timeout=max(0.5, float(timeout_sec or 1.2)),
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+    except Exception:
+        return {}
+    if not response.ok:
+        return {}
+    try:
+        payload = response.json()
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        "title": _coerce_text(payload.get("title")),
+        "thumbnail_url": _coerce_text(payload.get("thumbnail_url")),
+        "uploader": _coerce_text(payload.get("author_name")),
+    }
+
+
+def _extract_anchor_links(html_body, *, base_url):
+    rows = []
+    for match in _ANY_LINK_RE.finditer(str(html_body or "")):
+        href = (match.group(1) or match.group(2) or "").strip()
+        if not href:
+            continue
+        if href.startswith("//"):
+            href = f"https:{href}"
+        elif href.startswith("/"):
+            href = urljoin(base_url, href)
+        title = _strip_html_tags(match.group(3))
+        rows.append({"url": href, "title": title})
+    return rows
+
+
 def _unwrap_duckduckgo_result_url(url):
     raw = str(url or "").strip()
     if not raw:
         return None
+    if raw.startswith("//"):
+        raw = f"https:{raw}"
+    elif raw.startswith("/"):
+        raw = f"https://duckduckgo.com{raw}"
     if not _is_http_url(raw):
         return None
     try:
@@ -119,6 +220,7 @@ def _duckduckgo_site_search(query, *, domains, limit, timeout_sec):
     q = str(query or "").strip()
     if not q:
         return []
+    started = time.perf_counter()
     domain_terms = " OR ".join(f"site:{domain}" for domain in domains if domain)
     full_query = f"({domain_terms}) {q}".strip() if domain_terms else q
     headers = {
@@ -143,22 +245,39 @@ def _duckduckgo_site_search(query, *, domains, limit, timeout_sec):
     rows = []
     seen_urls = set()
     max_results = max(1, int(limit or 5))
-    for match in _SEARCH_LINK_RE.finditer(html_body):
-        href = _unwrap_duckduckgo_result_url(match.group(1))
-        if not href or not _is_http_url(href):
-            continue
-        if not _host_matches_domains(href, domains):
-            continue
-        key = href.lower()
-        if key in seen_urls:
-            continue
-        seen_urls.add(key)
-        title = _strip_html_tags(match.group(2))
-        if not title:
-            title = href
-        rows.append({"url": href, "title": title})
-        if len(rows) >= max_results:
-            break
+    def _consume_matches(matches):
+        for match in matches:
+            href_value = match.group(1) or match.group(2)
+            href = _unwrap_duckduckgo_result_url(href_value)
+            if not href or not _is_http_url(href):
+                continue
+            if not _host_matches_domains(href, domains):
+                continue
+            key = href.lower()
+            if key in seen_urls:
+                continue
+            seen_urls.add(key)
+            title = _strip_html_tags(match.group(3))
+            if not title:
+                title = href
+            rows.append({"url": href, "title": title})
+            if len(rows) >= max_results:
+                break
+
+    _consume_matches(_SEARCH_LINK_RE.finditer(html_body))
+    if not rows:
+        _consume_matches(_ANY_LINK_RE.finditer(html_body))
+    logging.info(
+        safe_json_dumps(
+            {
+                "event": "site_search_complete",
+                "query": q,
+                "domains": list(domains or []),
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+                "result_count": len(rows),
+            }
+        )
+    )
     return rows
 
 
@@ -406,13 +525,13 @@ class SiteSearchAdapter(SearchAdapter):
         return out
 
     def search_track(self, artist, track, album=None, limit=5, *, lightweight=False, timeout_budget_sec=None):
-        query = f"{artist} {track}".strip()
+        query = _normalize_search_phrase(artist, track)
         if album:
-            query = f"{query} {album}".strip()
+            query = _normalize_search_phrase(query, album)
         return self._search(query, limit, lightweight=lightweight, timeout_budget_sec=timeout_budget_sec)
 
     def search_album(self, artist, album, limit=5, *, lightweight=False, timeout_budget_sec=None):
-        query = f"{artist} {album}".strip()
+        query = _normalize_search_phrase(artist, album)
         return self._search(query, limit, lightweight=lightweight, timeout_budget_sec=timeout_budget_sec)
 
     def source_modifier(self, candidate):
@@ -709,41 +828,207 @@ class BandcampAdapter(_YtDlpSearchMixin):
         return 1.05
 
 
-BUILTIN_SITE_ADAPTER_SPECS = (
-    CustomAdapterSpec(
-        source="rumble",
-        domains=("rumble.com",),
-        source_modifier=0.84,
-        query_suffix="video",
-    ),
-    CustomAdapterSpec(
-        source="archive_org",
-        domains=("archive.org",),
-        source_modifier=0.82,
-        query_suffix="video",
-    ),
-    CustomAdapterSpec(
-        source="bitchute",
-        domains=("bitchute.com",),
-        source_modifier=0.80,
-        query_suffix="video",
-    ),
-    CustomAdapterSpec(
-        source="x",
-        domains=("x.com", "twitter.com"),
-        source_modifier=0.72,
-        query_suffix="video",
-    ),
-)
+class RumbleAdapter(SiteSearchAdapter):
+    def __init__(self):
+        super().__init__(
+            source="rumble",
+            domains=("rumble.com",),
+            source_modifier_value=0.84,
+            query_suffix="video",
+        )
+
+    def _search(self, query, limit, *, lightweight=False, timeout_budget_sec=None):
+        q = str(query or "").strip()
+        if not q:
+            return []
+        timeout_sec = 2.0 if lightweight else 4.0
+        if timeout_budget_sec is not None:
+            try:
+                timeout_sec = min(timeout_sec, max(0.5, float(timeout_budget_sec)))
+            except Exception:
+                pass
+        started = time.perf_counter()
+        try:
+            response = requests.get(
+                "https://rumble.com/search/video",
+                params={"q": q},
+                timeout=timeout_sec,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            html_body = response.text if response.ok else ""
+            links = _extract_anchor_links(html_body, base_url="https://rumble.com")
+            rows = []
+            seen = set()
+            for link in links:
+                url = str(link.get("url") or "").strip()
+                if not _is_http_url(url) or not _host_matches_domains(url, self.domains):
+                    continue
+                path = (urlparse(url).path or "").strip().lower()
+                if not path.startswith("/v"):
+                    continue
+                key = url.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({"url": url, "title": _clean_result_title(link.get("title"), fallback="Rumble Video")})
+                if len(rows) >= max(1, int(limit or 5)):
+                    break
+            # Enrich from Rumble oEmbed for stable title + thumbnail.
+            if rows:
+                oembed_timeout = 1.0 if lightweight else 1.5
+                max_workers = min(4, len(rows))
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = {
+                        pool.submit(_rumble_oembed_enrich, row["url"], timeout_sec=oembed_timeout): row
+                        for row in rows
+                        if _is_http_url(row.get("url"))
+                    }
+                    for fut in as_completed(futures):
+                        row = futures[fut]
+                        try:
+                            enriched = fut.result() or {}
+                        except Exception:
+                            enriched = {}
+                        if _coerce_text(enriched.get("title")):
+                            row["title"] = _clean_result_title(enriched.get("title"), fallback=row.get("title"))
+                        if _is_http_url(enriched.get("thumbnail_url")):
+                            row["thumbnail_url"] = enriched.get("thumbnail_url")
+                        if _coerce_text(enriched.get("uploader")):
+                            row["uploader"] = enriched.get("uploader")
+        except Exception:
+            rows = []
+        logging.info(
+            safe_json_dumps(
+                {
+                    "event": "site_search_complete",
+                    "query": q,
+                    "domains": list(self.domains),
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "result_count": len(rows),
+                }
+            )
+        )
+        return [
+            {
+                "source": self.source,
+                "video_id": None,
+                "url": row.get("url"),
+                "title": _clean_result_title(row.get("title"), fallback="Rumble Video"),
+                "uploader": row.get("uploader"),
+                "channel": row.get("uploader"),
+                "thumbnail_url": row.get("thumbnail_url"),
+                "artist_detected": row.get("uploader"),
+                "album_detected": None,
+                "track_detected": _clean_result_title(row.get("title"), fallback="Rumble Video"),
+                "duration_sec": None,
+                "artwork_url": row.get("thumbnail_url"),
+                "raw_meta_json": "{}",
+                "official": False,
+                "isrc": None,
+                "track_count": None,
+                "view_count": None,
+            }
+            for row in rows
+            if _is_http_url(row.get("url"))
+        ]
 
 
-def _build_site_adapter(spec):
-    return SiteSearchAdapter(
-        source=spec.source,
-        domains=spec.domains,
-        source_modifier_value=spec.source_modifier,
-        query_suffix=spec.query_suffix,
-    )
+class ArchiveOrgAdapter(SiteSearchAdapter):
+    def __init__(self):
+        super().__init__(
+            source="archive_org",
+            domains=("archive.org",),
+            source_modifier_value=0.82,
+            query_suffix="video",
+        )
+
+    def _search(self, query, limit, *, lightweight=False, timeout_budget_sec=None):
+        q = str(query or "").strip()
+        if not q:
+            return []
+        timeout_sec = 2.0 if lightweight else 4.0
+        if timeout_budget_sec is not None:
+            try:
+                timeout_sec = min(timeout_sec, max(0.5, float(timeout_budget_sec)))
+            except Exception:
+                pass
+        started = time.perf_counter()
+        rows = []
+        try:
+            response = requests.get(
+                "https://archive.org/advancedsearch.php",
+                params={
+                    # Prefer video-like records while keeping recall for broad queries.
+                    "q": f"({q}) AND mediatype:(movies OR movingimage OR video)",
+                    "fl[]": ["identifier", "title", "creator", "mediatype"],
+                    "rows": max(1, int(limit or 5)),
+                    "page": 1,
+                    "output": "json",
+                },
+                timeout=timeout_sec,
+            )
+            payload = response.json() if response.ok else {}
+            docs = ((payload or {}).get("response") or {}).get("docs") or []
+            for doc in docs:
+                if not isinstance(doc, dict):
+                    continue
+                identifier = str(doc.get("identifier") or "").strip()
+                if not identifier:
+                    continue
+                media_types = _normalize_mediatype_values(doc.get("mediatype"))
+                if media_types and not any(mt in {"movies", "movingimage", "video"} for mt in media_types):
+                    continue
+                title = _clean_result_title(doc.get("title"), fallback=identifier)
+                thumbnail_url = f"https://archive.org/services/img/{identifier}"
+                rows.append(
+                    {
+                        "url": f"https://archive.org/details/{identifier}",
+                        "title": title,
+                        "uploader": _coerce_text(doc.get("creator")),
+                        "thumbnail_url": thumbnail_url,
+                    }
+                )
+                if len(rows) >= max(1, int(limit or 5)):
+                    break
+        except Exception:
+            rows = []
+        logging.info(
+            safe_json_dumps(
+                {
+                    "event": "site_search_complete",
+                    "query": q,
+                    "domains": list(self.domains),
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "result_count": len(rows),
+                }
+            )
+        )
+        return [
+            {
+                "source": self.source,
+                "video_id": None,
+                "url": row.get("url"),
+                "title": row.get("title"),
+                "uploader": row.get("uploader"),
+                "channel": row.get("uploader"),
+                "thumbnail_url": row.get("thumbnail_url"),
+                "artist_detected": row.get("uploader"),
+                "album_detected": None,
+                "track_detected": row.get("title"),
+                "duration_sec": None,
+                "artwork_url": row.get("thumbnail_url"),
+                "raw_meta_json": "{}",
+                "official": False,
+                "isrc": None,
+                "track_count": None,
+                "view_count": None,
+            }
+            for row in rows
+            if _is_http_url(row.get("url"))
+        ]
+
+
+BUILTIN_SITE_ADAPTER_SPECS = ()
 
 
 def _load_adapter_file(path):
@@ -862,7 +1147,8 @@ def default_adapters(config=None):
         YouTubeMusicAdapter(),
         YouTubeAdapter(),
         SoundCloudAdapter(),
+        RumbleAdapter(),
+        ArchiveOrgAdapter(),
     ]
-    adapters.extend(_build_site_adapter(spec) for spec in BUILTIN_SITE_ADAPTER_SPECS)
     adapters.extend(_load_custom_adapters(config=config))
     return {adapter.source: adapter for adapter in adapters if getattr(adapter, "source", "")}

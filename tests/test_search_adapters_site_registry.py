@@ -31,10 +31,70 @@ def _load_search_adapters_module():
 def test_default_adapters_include_new_site_sources():
     mod = _load_search_adapters_module()
     adapters = mod.default_adapters(config={})
-    assert "bitchute" in adapters
-    assert "x" in adapters
     assert "archive_org" in adapters
     assert "rumble" in adapters
+
+
+def test_archive_org_adapter_uses_advancedsearch_api(monkeypatch):
+    mod = _load_search_adapters_module()
+
+    class _Resp:
+        ok = True
+
+        def json(self):
+            return {
+                "response": {
+                    "docs": [
+                        {
+                            "identifier": "example-item",
+                            "title": "Example Archive Video",
+                            "creator": "Archive Author",
+                            "mediatype": ["movies"],
+                        }
+                    ]
+                }
+            }
+
+    def _fake_get(*_args, **_kwargs):
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "get", _fake_get)
+    adapter = mod.ArchiveOrgAdapter()
+    rows = adapter.search_track("fox", "news", limit=3, lightweight=True)
+    assert rows
+    assert rows[0]["url"] == "https://archive.org/details/example-item"
+    assert rows[0]["title"] == "Example Archive Video"
+    assert rows[0]["thumbnail_url"] == "https://archive.org/services/img/example-item"
+
+
+def test_rumble_adapter_enriches_title_and_thumbnail_from_oembed(monkeypatch):
+    mod = _load_search_adapters_module()
+
+    class _RespSearch:
+        ok = True
+        text = '<a href="/v5abcd-sample-video.html">placeholder</a>'
+
+    class _RespOEmbed:
+        ok = True
+
+        def json(self):
+            return {
+                "title": "Sample Rumble Title",
+                "thumbnail_url": "https://sp.rmbl.ws/s8/1/ab/cd/ef/Sample.jpg",
+                "author_name": "Sample Channel",
+            }
+
+    def _fake_get(url, *args, **kwargs):
+        if "oembed" in str(url):
+            return _RespOEmbed()
+        return _RespSearch()
+
+    monkeypatch.setattr(mod.requests, "get", _fake_get)
+    adapter = mod.RumbleAdapter()
+    rows = adapter.search_track("sample", "video", limit=3, lightweight=True)
+    assert rows
+    assert rows[0]["title"] == "Sample Rumble Title"
+    assert rows[0]["thumbnail_url"] == "https://sp.rmbl.ws/s8/1/ab/cd/ef/Sample.jpg"
 
 
 def test_default_adapters_load_custom_site_adapter_from_json(tmp_path):
@@ -63,3 +123,46 @@ def test_default_adapters_load_custom_site_adapter_from_json(tmp_path):
     adapter = adapters["my_video_mirror"]
     assert getattr(adapter, "source", "") == "my_video_mirror"
     assert "media.example.org" in tuple(getattr(adapter, "domains", ()))
+
+
+def test_duckduckgo_site_search_parses_protocol_relative_redirect_links(monkeypatch):
+    mod = _load_search_adapters_module()
+
+    class _Resp:
+        ok = True
+        text = (
+            '<html><body>'
+            '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frumble.com%2Fvabc123">'
+            "Rumble Result"
+            "</a>"
+            "</body></html>"
+        )
+
+    def _fake_get(*_args, **_kwargs):
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "get", _fake_get)
+    rows = mod._duckduckgo_site_search(  # type: ignore[attr-defined]
+        "example query",
+        domains=("rumble.com",),
+        limit=5,
+        timeout_sec=2.0,
+    )
+    assert len(rows) == 1
+    assert rows[0]["url"] == "https://rumble.com/vabc123"
+
+
+def test_site_search_adapter_dedupes_repeated_terms(monkeypatch):
+    mod = _load_search_adapters_module()
+
+    captured = {}
+
+    def _fake_search(query, *, domains, limit, timeout_sec):
+        captured["query"] = query
+        return []
+
+    monkeypatch.setattr(mod, "_duckduckgo_site_search", _fake_search)
+    adapter = mod.SiteSearchAdapter(source="test_site", domains=["example.com"], query_suffix="video")
+    adapter.search_track("fox news", "fox news", limit=5, lightweight=True)
+    assert captured["query"] == "fox news video"
+
