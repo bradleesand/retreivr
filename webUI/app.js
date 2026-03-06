@@ -193,6 +193,10 @@ async function refreshHomeSourceOptions() {
   if (!sources.length) {
     sources = ["youtube", "youtube_music", "rumble", "archive_org", "soundcloud", "bandcamp"];
   }
+  if ((state.homeMediaMode || "video") === "video") {
+    const videoExcluded = new Set(["youtube_music", "soundcloud", "bandcamp"]);
+    sources = sources.filter((source) => !videoExcluded.has(String(source || "").trim().toLowerCase()));
+  }
   const existingChecked = new Set(
     Array.from(panel.querySelectorAll("input[type=checkbox][data-source]:checked")).map((el) => el.dataset.source)
   );
@@ -2603,6 +2607,7 @@ function setHomeMediaMode(mode, { persist = true, clearResultsOnDisable = true }
   state.homeMediaMode = nextMode;
   state.homeMusicMode = nextMode !== "video";
   updateHomeMusicModeUI();
+  refreshHomeSourceOptions();
   if (previous !== state.homeMusicMode) {
     clearMusicResultsHistory();
   }
