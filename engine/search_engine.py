@@ -3092,8 +3092,9 @@ class SearchResolutionService:
             use_lightweight_discovery = (
                 bool(self.lightweight_discovery_enabled) and request_media_type in {"generic", "video"}
             )
+            lightweight_had_timeouts = False
             def _execute_adapter_pass(*, lightweight_mode):
-                nonlocal adapters_completed
+                nonlocal adapters_completed, lightweight_had_timeouts
                 futures = {}
                 adapter_started_at = {}
                 pass_started_monotonic = time.perf_counter()
@@ -3241,6 +3242,7 @@ class SearchResolutionService:
                             for fut, source, started in expired:
                                 pending.discard(fut)
                                 fut.cancel()
+                                lightweight_had_timeouts = True
                                 adapters_completed += 1
                                 self.store.update_request_progress(
                                     request_id,
@@ -3271,13 +3273,17 @@ class SearchResolutionService:
             # --- Parallel adapter execution (bounded) ---
             _execute_adapter_pass(lightweight_mode=use_lightweight_discovery)
 
-            if use_lightweight_discovery and not scored:
+            if use_lightweight_discovery and (not scored or lightweight_had_timeouts):
                 _log_event(
                     logging.INFO,
                     "adapter_lightweight_fallback_full",
                     request_id=request_id,
                     item_id=item["id"],
-                    reason="no_candidates_after_lightweight_pass",
+                    reason=(
+                        "no_candidates_after_lightweight_pass"
+                        if not scored
+                        else "lightweight_timeout_incomplete"
+                    ),
                 )
                 adapters_completed = 0
                 self.store.update_request_progress(
