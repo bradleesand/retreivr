@@ -6019,7 +6019,11 @@ async def run_search_resolution_once(payload: dict = Body(default_factory=dict))
             candidate = raw.strip()
             if candidate:
                 requested_id = candidate
-    request_id = service.run_search_resolution_once(request_id=requested_id)
+    # Resolver is synchronous/heavy; run it off the event loop so polling endpoints
+    # can continue serving incremental search updates while resolution is in progress.
+    request_id = await anyio.to_thread.run_sync(
+        lambda: service.run_search_resolution_once(request_id=requested_id)
+    )
     return {"request_id": request_id, "requested_request_id": requested_id}
 
 
