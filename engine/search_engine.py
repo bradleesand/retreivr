@@ -175,7 +175,16 @@ ITEM_STATUSES = {
     "failed",
 }
 
-DEFAULT_SOURCE_PRIORITY = ["bandcamp", "youtube_music", "soundcloud"]
+DEFAULT_SOURCE_PRIORITY = [
+    "youtube",
+    "youtube_music",
+    "rumble",
+    "archive_org",
+    "bitchute",
+    "x",
+    "soundcloud",
+    "bandcamp",
+]
 MUSIC_TRACK_SOURCE_PRIORITY = ("youtube_music", "youtube", "soundcloud", "bandcamp")
 MUSIC_TRACK_SOURCE_PRIORITY_WITH_MB = ("mb_relationship",) + MUSIC_TRACK_SOURCE_PRIORITY
 MUSIC_TRACK_PENALIZE_TOKENS = ("live", "cover", "karaoke", "remix", "reaction", "ft.", "feat.", "instrumental")
@@ -987,8 +996,8 @@ class SearchResolutionService:
     def __init__(self, *, search_db_path, queue_db_path, adapters=None, config=None, paths=None, canonical_resolver=None):
         self.search_db_path = search_db_path
         self.queue_db_path = queue_db_path
-        self.adapters = adapters or default_adapters()
         self.config = config or {}
+        self.adapters = adapters or default_adapters(config=self.config)
         self.debug_music_scoring = self._as_bool(self.config.get("debug_music_scoring"))
         self.music_source_match_threshold = _normalize_threshold(
             self.config.get("music_source_match_threshold", MUSIC_TRACK_THRESHOLD),

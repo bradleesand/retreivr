@@ -1,8 +1,13 @@
 import logging
 import hashlib
+import html
+import json
+import os
+import re
 import threading
 import time
-from urllib.parse import urlparse
+from dataclasses import dataclass
+from urllib.parse import parse_qs, unquote, urlparse
 from typing import Protocol, runtime_checkable
 
 import requests
@@ -16,6 +21,14 @@ _DISCOVERY_YTDLP_REGISTRY_LOCK = threading.Lock()
 
 _YOUTUBE_INNERTUBE_SEARCH_URL = "https://www.youtube.com/youtubei/v1/search"
 _YOUTUBE_INNERTUBE_CLIENT_VERSION = "2.20240304.00.00"
+_DUCKDUCKGO_HTML_SEARCH_URL = "https://duckduckgo.com/html/"
+_DEFAULT_SITE_SEARCH_TIMEOUT_SEC = 4.0
+_DEFAULT_SITE_SEARCH_TIMEOUT_LIGHTWEIGHT_SEC = 2.0
+_SEARCH_LINK_RE = re.compile(
+    r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 def _is_http_url(value):
     if not value or not isinstance(value, str):
@@ -24,6 +37,137 @@ def _is_http_url(value):
         return urlparse(value).scheme in ("http", "https")
     except Exception:
         return False
+
+
+def _sanitize_source_name(value):
+    source = str(value or "").strip().lower()
+    if not source:
+        return ""
+    source = re.sub(r"[^a-z0-9_]+", "_", source)
+    source = source.strip("_")
+    return source
+
+
+def _normalize_domain_list(domains):
+    if isinstance(domains, str):
+        domains = [domains]
+    if not isinstance(domains, (list, tuple, set)):
+        return []
+    out = []
+    for value in domains:
+        domain = str(value or "").strip().lower()
+        if not domain:
+            continue
+        domain = domain.replace("https://", "").replace("http://", "")
+        domain = domain.split("/")[0].strip(".")
+        if domain:
+            out.append(domain)
+    deduped = []
+    seen = set()
+    for domain in out:
+        if domain in seen:
+            continue
+        seen.add(domain)
+        deduped.append(domain)
+    return deduped
+
+
+def _host_matches_domains(url, domains):
+    if not domains:
+        return True
+    try:
+        host = (urlparse(url).hostname or "").strip().lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    for domain in domains:
+        normalized = str(domain or "").strip().lower()
+        if not normalized:
+            continue
+        if host == normalized or host.endswith(f".{normalized}"):
+            return True
+    return False
+
+
+def _strip_html_tags(value):
+    text = _HTML_TAG_RE.sub("", str(value or ""))
+    return html.unescape(text).strip()
+
+
+def _unwrap_duckduckgo_result_url(url):
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    if not _is_http_url(raw):
+        return None
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return None
+    host = (parsed.hostname or "").lower()
+    if host.endswith("duckduckgo.com"):
+        query = parse_qs(parsed.query or "")
+        uddg_values = query.get("uddg") or []
+        if uddg_values:
+            resolved = unquote(str(uddg_values[0] or "").strip())
+            return resolved if _is_http_url(resolved) else None
+    return raw
+
+
+def _duckduckgo_site_search(query, *, domains, limit, timeout_sec):
+    q = str(query or "").strip()
+    if not q:
+        return []
+    domain_terms = " OR ".join(f"site:{domain}" for domain in domains if domain)
+    full_query = f"({domain_terms}) {q}".strip() if domain_terms else q
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        response = requests.get(
+            _DUCKDUCKGO_HTML_SEARCH_URL,
+            params={"q": full_query},
+            headers=headers,
+            timeout=max(0.5, float(timeout_sec or _DEFAULT_SITE_SEARCH_TIMEOUT_SEC)),
+        )
+    except Exception:
+        logging.exception("duckduckgo_site_search_failed query=%s", full_query)
+        return []
+    if not response.ok:
+        return []
+    html_body = response.text or ""
+    rows = []
+    seen_urls = set()
+    max_results = max(1, int(limit or 5))
+    for match in _SEARCH_LINK_RE.finditer(html_body):
+        href = _unwrap_duckduckgo_result_url(match.group(1))
+        if not href or not _is_http_url(href):
+            continue
+        if not _host_matches_domains(href, domains):
+            continue
+        key = href.lower()
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        title = _strip_html_tags(match.group(2))
+        if not title:
+            title = href
+        rows.append({"url": href, "title": title})
+        if len(rows) >= max_results:
+            break
+    return rows
+
+
+@dataclass(frozen=True)
+class CustomAdapterSpec:
+    source: str
+    domains: tuple[str, ...]
+    source_modifier: float = 0.8
+    query_suffix: str = ""
 
 
 def _extract_youtube_video_id(value):
@@ -194,6 +338,85 @@ class MusicSearchAdapter(Protocol):
 
     def search_music_track(self, query: str, limit: int) -> list[dict]:
         ...
+
+
+class SiteSearchAdapter(SearchAdapter):
+    def __init__(
+        self,
+        *,
+        source,
+        domains,
+        source_modifier_value=0.8,
+        query_suffix="",
+    ):
+        self.source = _sanitize_source_name(source)
+        self.domains = tuple(_normalize_domain_list(domains))
+        try:
+            self._source_modifier_value = float(source_modifier_value)
+        except Exception:
+            self._source_modifier_value = 0.8
+        self._source_modifier_value = max(0.1, min(2.0, self._source_modifier_value))
+        self.query_suffix = str(query_suffix or "").strip()
+
+    def _search(self, query, limit, *, lightweight=False, timeout_budget_sec=None):
+        if not query:
+            return []
+        timeout_sec = _DEFAULT_SITE_SEARCH_TIMEOUT_LIGHTWEIGHT_SEC if lightweight else _DEFAULT_SITE_SEARCH_TIMEOUT_SEC
+        if timeout_budget_sec is not None:
+            try:
+                timeout_sec = min(timeout_sec, max(0.5, float(timeout_budget_sec)))
+            except Exception:
+                pass
+        effective_query = str(query).strip()
+        if self.query_suffix:
+            effective_query = f"{effective_query} {self.query_suffix}".strip()
+        rows = _duckduckgo_site_search(
+            effective_query,
+            domains=self.domains,
+            limit=limit,
+            timeout_sec=timeout_sec,
+        )
+        out = []
+        for row in rows:
+            url = row.get("url")
+            title = row.get("title")
+            if not _is_http_url(url) or not title:
+                continue
+            out.append(
+                {
+                    "source": self.source,
+                    "video_id": None,
+                    "url": url,
+                    "title": title,
+                    "uploader": None,
+                    "channel": None,
+                    "thumbnail_url": None,
+                    "artist_detected": None,
+                    "album_detected": None,
+                    "track_detected": title,
+                    "duration_sec": None,
+                    "artwork_url": None,
+                    "raw_meta_json": "{}",
+                    "official": False,
+                    "isrc": None,
+                    "track_count": None,
+                    "view_count": None,
+                }
+            )
+        return out
+
+    def search_track(self, artist, track, album=None, limit=5, *, lightweight=False, timeout_budget_sec=None):
+        query = f"{artist} {track}".strip()
+        if album:
+            query = f"{query} {album}".strip()
+        return self._search(query, limit, lightweight=lightweight, timeout_budget_sec=timeout_budget_sec)
+
+    def search_album(self, artist, album, limit=5, *, lightweight=False, timeout_budget_sec=None):
+        query = f"{artist} {album}".strip()
+        return self._search(query, limit, lightweight=lightweight, timeout_budget_sec=timeout_budget_sec)
+
+    def source_modifier(self, candidate):
+        return self._source_modifier_value
 
 
 class _YtDlpSearchMixin(SearchAdapter):
@@ -486,6 +709,160 @@ class BandcampAdapter(_YtDlpSearchMixin):
         return 1.05
 
 
-def default_adapters():
-    adapters = [BandcampAdapter(), YouTubeMusicAdapter(), YouTubeAdapter(), SoundCloudAdapter()]
-    return {adapter.source: adapter for adapter in adapters}
+BUILTIN_SITE_ADAPTER_SPECS = (
+    CustomAdapterSpec(
+        source="rumble",
+        domains=("rumble.com",),
+        source_modifier=0.84,
+        query_suffix="video",
+    ),
+    CustomAdapterSpec(
+        source="archive_org",
+        domains=("archive.org",),
+        source_modifier=0.82,
+        query_suffix="video",
+    ),
+    CustomAdapterSpec(
+        source="bitchute",
+        domains=("bitchute.com",),
+        source_modifier=0.80,
+        query_suffix="video",
+    ),
+    CustomAdapterSpec(
+        source="x",
+        domains=("x.com", "twitter.com"),
+        source_modifier=0.72,
+        query_suffix="video",
+    ),
+)
+
+
+def _build_site_adapter(spec):
+    return SiteSearchAdapter(
+        source=spec.source,
+        domains=spec.domains,
+        source_modifier_value=spec.source_modifier,
+        query_suffix=spec.query_suffix,
+    )
+
+
+def _load_adapter_file(path):
+    extension = os.path.splitext(path)[1].strip().lower()
+    with open(path, "r", encoding="utf-8") as handle:
+        if extension == ".json":
+            return json.load(handle)
+        if extension in {".yaml", ".yml"}:
+            try:
+                import yaml  # type: ignore
+            except Exception:
+                logging.warning("custom_adapter_yaml_unavailable path=%s", path)
+                return None
+            return yaml.safe_load(handle)
+    return None
+
+
+def _parse_custom_adapter_specs(raw_payload):
+    if not isinstance(raw_payload, dict):
+        return []
+    raw_adapters = raw_payload.get("adapters")
+    if not isinstance(raw_adapters, list):
+        return []
+    specs = []
+    for raw in raw_adapters:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("enabled") is False:
+            continue
+        adapter_type = str(raw.get("type") or "site_search").strip().lower()
+        if adapter_type != "site_search":
+            continue
+        source = _sanitize_source_name(raw.get("source"))
+        if not source:
+            continue
+        domains = tuple(_normalize_domain_list(raw.get("domains") or raw.get("domain")))
+        if not domains:
+            continue
+        try:
+            source_modifier = float(raw.get("source_modifier", 0.8))
+        except Exception:
+            source_modifier = 0.8
+        query_suffix = str(raw.get("query_suffix") or "").strip()
+        specs.append(
+            CustomAdapterSpec(
+                source=source,
+                domains=domains,
+                source_modifier=source_modifier,
+                query_suffix=query_suffix,
+            )
+        )
+    return specs
+
+
+def _resolve_custom_adapter_paths(config):
+    cfg = config if isinstance(config, dict) else {}
+    configured = cfg.get("custom_search_adapters_file")
+    paths = []
+    if isinstance(configured, str) and configured.strip():
+        paths.append(configured.strip())
+    elif isinstance(configured, (list, tuple, set)):
+        for value in configured:
+            if isinstance(value, str) and value.strip():
+                paths.append(value.strip())
+    if not paths:
+        paths = [
+            "config/custom_search_adapters.yaml",
+            "config/custom_search_adapters.yml",
+            "config/custom_search_adapters.json",
+        ]
+    deduped = []
+    seen = set()
+    for path in paths:
+        key = os.path.abspath(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
+
+
+def _load_custom_adapters(config=None):
+    adapters = []
+    for path in _resolve_custom_adapter_paths(config):
+        if not os.path.exists(path):
+            continue
+        try:
+            payload = _load_adapter_file(path)
+            specs = _parse_custom_adapter_specs(payload)
+            for spec in specs:
+                adapters.append(
+                    SiteSearchAdapter(
+                        source=spec.source,
+                        domains=spec.domains,
+                        source_modifier_value=spec.source_modifier,
+                        query_suffix=spec.query_suffix,
+                    )
+                )
+            logging.info(
+                safe_json_dumps(
+                    {
+                        "event": "custom_search_adapters_loaded",
+                        "path": path,
+                        "count": len(specs),
+                    }
+                )
+            )
+        except Exception:
+            logging.exception("custom_search_adapters_load_failed path=%s", path)
+    return adapters
+
+
+def default_adapters(config=None):
+    adapters = [
+        BandcampAdapter(),
+        YouTubeMusicAdapter(),
+        YouTubeAdapter(),
+        SoundCloudAdapter(),
+    ]
+    adapters.extend(_build_site_adapter(spec) for spec in BUILTIN_SITE_ADAPTER_SPECS)
+    adapters.extend(_load_custom_adapters(config=config))
+    return {adapter.source: adapter for adapter in adapters if getattr(adapter, "source", "")}

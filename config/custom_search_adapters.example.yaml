@@ -1,0 +1,16 @@
+version: 1
+adapters:
+  - source: custom_video_site
+    type: site_search
+    enabled: true
+    domains:
+      - example.com
+      - videos.example.net
+    source_modifier: 0.82
+    query_suffix: video
+
+  - source: docs_archive
+    type: site_search
+    enabled: false
+    domain: archive.example.org
+    source_modifier: 0.78

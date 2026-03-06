@@ -274,6 +274,7 @@ def apply_config_defaults(config):
     normalized.setdefault("community_cache_publish_mode", "off")
     normalized.setdefault("community_cache_publish_min_score", 0.78)
     normalized.setdefault("community_cache_publish_outbox_dir", "")
+    normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
 
     return normalized
 
@@ -461,6 +462,16 @@ def validate_config(config):
     community_cache_publish_outbox_dir = config.get("community_cache_publish_outbox_dir")
     if community_cache_publish_outbox_dir is not None and not isinstance(community_cache_publish_outbox_dir, str):
         errors.append("community_cache_publish_outbox_dir must be a string")
+
+    custom_adapter_file = config.get("custom_search_adapters_file")
+    if custom_adapter_file is not None:
+        if isinstance(custom_adapter_file, str):
+            pass
+        elif isinstance(custom_adapter_file, list):
+            if not all(isinstance(entry, str) for entry in custom_adapter_file):
+                errors.append("custom_search_adapters_file list entries must be strings")
+        else:
+            errors.append("custom_search_adapters_file must be a string or list of strings")
 
     return errors
 

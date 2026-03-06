@@ -99,11 +99,33 @@ const HOME_SOURCE_PRIORITY_MAP = {
   auto: null,
   youtube: ["youtube"],
   youtube_music: ["youtube_music"],
+  rumble: ["rumble"],
+  archive_org: ["archive_org"],
+  bitchute: ["bitchute"],
+  x: ["x"],
   soundcloud: ["soundcloud"],
   bandcamp: ["bandcamp"],
 };
-const HOME_GENERIC_SOURCE_PRIORITY = ["youtube_music", "soundcloud", "bandcamp", "youtube"];
-const HOME_VIDEO_SOURCE_PRIORITY = ["youtube", "youtube_music", "soundcloud", "bandcamp"];
+const HOME_GENERIC_SOURCE_PRIORITY = [
+  "youtube",
+  "youtube_music",
+  "rumble",
+  "archive_org",
+  "bitchute",
+  "x",
+  "soundcloud",
+  "bandcamp",
+];
+const HOME_VIDEO_SOURCE_PRIORITY = [
+  "youtube",
+  "youtube_music",
+  "rumble",
+  "archive_org",
+  "bitchute",
+  "x",
+  "soundcloud",
+  "bandcamp",
+];
 const HOME_VIDEO_KEYWORDS = ["show", "podcast", "episode", "interview"];
 const HOME_PREVIEW_EMBED_BUILDERS = {
   youtube: buildYouTubeHomePreviewEmbedUrl,
@@ -2285,6 +2307,10 @@ function updateHomeSourceToggleLabel() {
   const labelMap = {
     youtube: "YouTube",
     youtube_music: "YouTube Music",
+    rumble: "Rumble",
+    archive_org: "Archive.org",
+    bitchute: "BitChute",
+    x: "X",
     soundcloud: "SoundCloud",
     bandcamp: "Bandcamp",
   };
@@ -4391,6 +4417,10 @@ function renderHomeCandidateRow(candidate, item) {
   const sourceLabelMap = {
     youtube: "YouTube",
     youtube_music: "YouTube Music",
+    rumble: "Rumble",
+    archive_org: "Archive.org",
+    bitchute: "BitChute",
+    x: "X",
     soundcloud: "SoundCloud",
     bandcamp: "Bandcamp",
   };

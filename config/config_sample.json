@@ -84,5 +84,6 @@
   "community_cache_publish_enabled": false,
   "community_cache_publish_mode": "off",
   "community_cache_publish_min_score": 0.78,
-  "community_cache_publish_outbox_dir": ""
+  "community_cache_publish_outbox_dir": "",
+  "custom_search_adapters_file": "config/custom_search_adapters.yaml"
 }
