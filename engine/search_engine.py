@@ -3273,17 +3273,13 @@ class SearchResolutionService:
             # --- Parallel adapter execution (bounded) ---
             _execute_adapter_pass(lightweight_mode=use_lightweight_discovery)
 
-            if use_lightweight_discovery and (not scored or lightweight_had_timeouts):
+            if use_lightweight_discovery and not scored:
                 _log_event(
                     logging.INFO,
                     "adapter_lightweight_fallback_full",
                     request_id=request_id,
                     item_id=item["id"],
-                    reason=(
-                        "no_candidates_after_lightweight_pass"
-                        if not scored
-                        else "lightweight_timeout_incomplete"
-                    ),
+                    reason="no_candidates_after_lightweight_pass",
                 )
                 adapters_completed = 0
                 self.store.update_request_progress(
@@ -3292,6 +3288,14 @@ class SearchResolutionService:
                     adapters_completed=0,
                 )
                 _execute_adapter_pass(lightweight_mode=False)
+            elif use_lightweight_discovery and lightweight_had_timeouts and scored:
+                _log_event(
+                    logging.INFO,
+                    "adapter_lightweight_partial_due_timeout",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    candidates=len(scored),
+                )
 
             # --- Final selection logic below: do not change ---
             if not scored:
