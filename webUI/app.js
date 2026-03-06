@@ -39,8 +39,10 @@ const state = {
   homeBestScores: {},
   homeCandidateCache: {},
   homeCandidatesLoading: {},
+  homeCandidateRefreshPending: {},
   homeCandidateData: {},
   homeSearchPollStart: null,
+  homeResultPollInFlight: false,
   homeSearchControlsEnabled: true,
   pendingAdvancedRequestId: null,
   spotifyPlaylistStatus: {},
@@ -76,29 +78,56 @@ const oauthState = {
   authUrl: "",
   account: "",
 };
+const previewState = {
+  open: false,
+  source: "",
+  title: "",
+  embedUrl: "",
+};
 const BROWSE_DEFAULTS = {
   configDir: "",
   mediaRoot: "",
   tokensDir: "",
 };
-const GITHUB_REPO = "Retreivr/retreivr";
-const GITHUB_RELEASE_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-const GITHUB_RELEASE_PAGE = "https://github.com/Retreivr/retreivr/releases";
-const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at";
-const RELEASE_CACHE_KEY = "yt_archiver_release_cache";
-const RELEASE_VERSION_KEY = "yt_archiver_release_app_version";
+const VERSION_LATEST_URL = "/api/version/latest";
+const VERSION_REFERENCE_PAGE = "https://github.com/sudoStacks/retreivr/pkgs/container/retreivr";
+const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at_v2";
+const RELEASE_CACHE_KEY = "yt_archiver_release_cache_v2";
+const RELEASE_VERSION_KEY = "yt_archiver_release_app_version_v2";
 const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
 const HOME_MUSIC_DEBUG_KEY = "retreivr.debug.music";
 const HOME_SOURCE_PRIORITY_MAP = {
   auto: null,
   youtube: ["youtube"],
   youtube_music: ["youtube_music"],
+  rumble: ["rumble"],
+  archive_org: ["archive_org"],
   soundcloud: ["soundcloud"],
   bandcamp: ["bandcamp"],
 };
-const HOME_GENERIC_SOURCE_PRIORITY = ["youtube_music", "soundcloud", "bandcamp", "youtube"];
-const HOME_VIDEO_SOURCE_PRIORITY = ["youtube", "youtube_music", "soundcloud", "bandcamp"];
+const HOME_GENERIC_SOURCE_PRIORITY = [
+  "youtube",
+  "youtube_music",
+  "rumble",
+  "archive_org",
+  "soundcloud",
+  "bandcamp",
+];
+const HOME_VIDEO_SOURCE_PRIORITY = [
+  "youtube",
+  "youtube_music",
+  "rumble",
+  "archive_org",
+  "soundcloud",
+  "bandcamp",
+];
 const HOME_VIDEO_KEYWORDS = ["show", "podcast", "episode", "interview"];
+const HOME_PREVIEW_EMBED_BUILDERS = {
+  youtube: buildYouTubeHomePreviewEmbedUrl,
+  youtube_music: buildYouTubeHomePreviewEmbedUrl,
+  rumble: buildRumbleHomePreviewEmbedUrl,
+  archive_org: buildArchiveOrgHomePreviewEmbedUrl,
+};
 const HOME_STATUS_LABELS = {
   queued: "Searching",
   searching: "Searching",
@@ -127,7 +156,8 @@ const HOME_STATUS_CLASS_MAP = {
 };
 const HOME_FINAL_STATUSES = new Set(["completed", "completed_with_skips", "failed"]);
 const HOME_RESULT_TIMEOUT_MS = 18000;
-const HOME_RESULT_POLL_INTERVAL_MS = 1000;
+const HOME_RESULT_POLL_INTERVAL_MS = 300;
+const HOME_NO_CANDIDATE_STREAK_LIMIT = 12;
 const DIRECT_URL_PLAYLIST_ERROR =
   "Playlist URLs are not supported in Direct URL mode. Please add this playlist via Scheduler or Playlist settings.";
 const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
@@ -135,6 +165,61 @@ const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+function formatSourceLabel(source) {
+  const key = String(source || "").trim().toLowerCase();
+  const labelMap = {
+    youtube: "YouTube",
+    youtube_music: "YouTube Music",
+    rumble: "Rumble",
+    archive_org: "Archive.org",
+    soundcloud: "SoundCloud",
+    bandcamp: "Bandcamp",
+  };
+  if (labelMap[key]) return labelMap[key];
+  return key
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+async function refreshHomeSourceOptions() {
+  const panel = $("#home-source-panel");
+  if (!panel) return;
+  let sources = [];
+  try {
+    const data = await fetchJson("/api/search/sources");
+    sources = Array.isArray(data?.sources) ? data.sources.map((v) => String(v || "").trim()).filter(Boolean) : [];
+  } catch (_err) {
+    sources = [];
+  }
+  if (!sources.length) {
+    sources = ["youtube", "youtube_music", "rumble", "archive_org", "soundcloud", "bandcamp"];
+  }
+  if ((state.homeMediaMode || "video") === "video") {
+    const videoExcluded = new Set(["youtube_music", "soundcloud", "bandcamp"]);
+    sources = sources.filter((source) => !videoExcluded.has(String(source || "").trim().toLowerCase()));
+  }
+  const existingChecked = new Set(
+    Array.from(panel.querySelectorAll("input[type=checkbox][data-source]:checked")).map((el) => el.dataset.source)
+  );
+  panel.textContent = "";
+  sources.forEach((source, index) => {
+    const label = document.createElement("label");
+    label.className = "home-source-pill";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.source = source;
+    input.checked = existingChecked.size ? existingChecked.has(source) : source === "youtube" || index === 0;
+    const span = document.createElement("span");
+    span.textContent = formatSourceLabel(source);
+    label.appendChild(input);
+    label.appendChild(span);
+    panel.appendChild(label);
+  });
+  updateHomeSourceToggleLabel();
+}
 
 function normalizePageName(page) {
   if (!page) {
@@ -502,6 +587,187 @@ function extractPlaylistIdFromUrl(value) {
   return null;
 }
 
+function normalizePreviewSourceKey(source) {
+  return String(source || "").trim().toLowerCase();
+}
+
+function extractYouTubeVideoIdFromUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (host === "youtu.be") {
+      const id = parsed.pathname.replace(/^\/+/, "").split("/")[0];
+      return id || null;
+    }
+    if (host.includes("youtube.com")) {
+      const id = parsed.searchParams.get("v");
+      if (id) return id;
+      const parts = parsed.pathname.split("/").filter(Boolean);
+      const embedIdx = parts.findIndex((part) => part === "embed" || part === "shorts");
+      if (embedIdx >= 0 && parts[embedIdx + 1]) {
+        return parts[embedIdx + 1];
+      }
+    }
+  } catch (_err) {
+    return null;
+  }
+  return null;
+}
+
+function buildYouTubeHomePreviewEmbedUrl(url) {
+  const videoId = extractYouTubeVideoIdFromUrl(url);
+  if (!videoId) {
+    return null;
+  }
+  return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0&modestbranding=1`;
+}
+
+function buildRumbleHomePreviewEmbedUrl(url, candidate) {
+  const parseRawMeta = () => {
+    const raw = candidate?.raw_meta_json;
+    if (!raw || typeof raw !== "string") return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_err) {
+      return {};
+    }
+  };
+  const rawMeta = parseRawMeta();
+  const embedded = String(rawMeta.embed_url || "").trim();
+  if (embedded) {
+    try {
+      const parsed = new URL(embedded);
+      const host = (parsed.hostname || "").toLowerCase();
+      if (host.endsWith("rumble.com") && parsed.pathname.includes("/embed/")) {
+        const next = new URL(embedded);
+        next.searchParams.set("autoplay", "2");
+        return next.toString();
+      }
+    } catch (_err) {
+      // continue to URL-derived fallback
+    }
+  }
+  const raw = String(url || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (!host.endsWith("rumble.com")) return null;
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (!parts.length) return null;
+    const slug = String(parts[0] || "").toLowerCase();
+    // Common Rumble video path is /v<id>-title.html
+    const idMatch = slug.match(/^(v[a-z0-9]+)/i);
+    if (!idMatch || !idMatch[1]) return null;
+    return `https://rumble.com/embed/${encodeURIComponent(idMatch[1])}/?autoplay=2`;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function buildArchiveOrgHomePreviewEmbedUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (!host.endsWith("archive.org")) return null;
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts.length >= 2 && parts[0] === "details") {
+      const identifier = String(parts[1] || "").trim();
+      if (!identifier) return null;
+      return `https://archive.org/embed/${encodeURIComponent(identifier)}`;
+    }
+  } catch (_err) {
+    return null;
+  }
+  return null;
+}
+
+function buildHomePreviewDescriptor(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+  const source = normalizePreviewSourceKey(candidate.source);
+  const url = String(candidate.url || "").trim();
+  if (!source || !url || !isValidHttpUrl(url)) {
+    return null;
+  }
+  const builder = HOME_PREVIEW_EMBED_BUILDERS[source];
+  if (typeof builder !== "function") {
+    return null;
+  }
+  const embedUrl = builder(url, candidate);
+  if (!embedUrl || !isValidHttpUrl(embedUrl)) {
+    return null;
+  }
+  return {
+    source,
+    title: String(candidate.title || "").trim() || "Preview",
+    embedUrl,
+  };
+}
+
+function buildHomePreviewDescriptorFromRow(row) {
+  if (!row) return null;
+  const previewButton = row.querySelector('button[data-action="home-preview"]');
+  if (!previewButton) return null;
+  const embedUrl = String(previewButton.dataset.previewEmbedUrl || "").trim();
+  if (!embedUrl || !isValidHttpUrl(embedUrl)) return null;
+  return {
+    embedUrl,
+    source: String(previewButton.dataset.previewSource || "").trim(),
+    title: String(previewButton.dataset.previewTitle || "").trim() || "Preview",
+  };
+}
+
+function openHomePreviewModal(descriptor) {
+  if (!descriptor || !descriptor.embedUrl) {
+    return;
+  }
+  const modal = $("#home-preview-modal");
+  const frame = $("#home-preview-frame");
+  const titleEl = $("#home-preview-title");
+  const sourceEl = $("#home-preview-source");
+  if (!modal || !frame || !titleEl || !sourceEl) {
+    return;
+  }
+  const sourceLabels = {
+    youtube: "YouTube",
+    youtube_music: "YouTube Music",
+    rumble: "Rumble",
+    archive_org: "Archive.org",
+  };
+  previewState.open = true;
+  previewState.source = descriptor.source || "";
+  previewState.title = descriptor.title || "Preview";
+  previewState.embedUrl = descriptor.embedUrl;
+  titleEl.textContent = descriptor.title || "Preview";
+  sourceEl.textContent = `Source: ${sourceLabels[descriptor.source] || descriptor.source || "Unknown"}`;
+  frame.src = descriptor.embedUrl;
+  modal.classList.remove("hidden");
+  updatePollingState();
+}
+
+function closeHomePreviewModal() {
+  const modal = $("#home-preview-modal");
+  const frame = $("#home-preview-frame");
+  if (frame) {
+    frame.src = "about:blank";
+  }
+  if (modal) {
+    modal.classList.add("hidden");
+  }
+  previewState.open = false;
+  previewState.source = "";
+  previewState.title = "";
+  previewState.embedUrl = "";
+  updatePollingState();
+}
+
 function computeResolvedDestinationPath(raw) {
   const base = BROWSE_DEFAULTS.mediaRoot || "/downloads";
   const trimmed = (raw || "").trim();
@@ -575,7 +841,7 @@ function setupNavActions() {
 
 function updatePollingState() {
   const importModalOpen = !$("#import-progress-modal")?.classList.contains("hidden");
-  state.pollingPaused = browserState.open || oauthState.open || importModalOpen || state.configDirty || state.inputFocused;
+  state.pollingPaused = browserState.open || oauthState.open || previewState.open || importModalOpen || state.configDirty || state.inputFocused;
 }
 
 function withPollingGuard(fn) {
@@ -611,6 +877,88 @@ function formatDuration(seconds) {
     return `${mins}m ${secs}s`;
   }
   return `${secs}s`;
+}
+
+function formatCandidatePostedDate(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return "";
+  }
+  const postedLabel = String(candidate.posted_label || "").trim();
+  if (postedLabel) {
+    return postedLabel;
+  }
+
+  const parseRawMeta = () => {
+    const raw = candidate.raw_meta_json;
+    if (!raw || typeof raw !== "string") return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_err) {
+      return {};
+    }
+  };
+
+  const rawMeta = parseRawMeta();
+  const rawLabel = String(
+    rawMeta.posted_label || rawMeta.published_time_text || rawMeta.publishedTimeText || rawMeta.published_label || ""
+  ).trim();
+  if (rawLabel) {
+    return rawLabel;
+  }
+  const direct = [
+    candidate.posted_at,
+    candidate.published_at,
+    candidate.publish_date,
+    candidate.upload_date,
+    rawMeta.upload_date,
+    rawMeta.release_date,
+    rawMeta.timestamp,
+    rawMeta.release_timestamp,
+  ];
+
+  const parseValue = (value) => {
+    if (value === null || value === undefined || value === "") return null;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const ms = value > 1e12 ? value : value * 1000;
+      const d = new Date(ms);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const text = String(value).trim();
+    if (!text) return null;
+    if (/^\d{8}$/.test(text)) {
+      const year = Number(text.slice(0, 4));
+      const month = Number(text.slice(4, 6));
+      const day = Number(text.slice(6, 8));
+      const d = new Date(Date.UTC(year, month - 1, day));
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    if (/^\d{10,13}$/.test(text)) {
+      const n = Number(text);
+      if (!Number.isFinite(n)) return null;
+      const ms = text.length === 13 ? n : n * 1000;
+      const d = new Date(ms);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const d = new Date(text);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  for (const value of direct) {
+    const parsed = parseValue(value);
+    if (parsed) {
+      try {
+        return parsed.toLocaleDateString(undefined, {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        });
+      } catch (_err) {
+        return parsed.toISOString().slice(0, 10);
+      }
+    }
+  }
+  return "";
 }
 
 function toFiniteNumber(value) {
@@ -831,7 +1179,7 @@ function applyReleaseStatus(currentVersion, latestTag) {
   }
   const safeTag = sanitizeVersionTag(latest);
   const link = document.createElement("a");
-  link.href = GITHUB_RELEASE_PAGE;
+  link.href = VERSION_REFERENCE_PAGE;
   link.target = "_blank";
   link.rel = "noopener";
   link.textContent = `v${safeTag}`;
@@ -879,12 +1227,12 @@ async function checkRelease(currentVersion) {
   }
 
   try {
-    const response = await fetch(GITHUB_RELEASE_URL, { cache: "no-store" });
+    const response = await fetch(VERSION_LATEST_URL, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
     const data = await response.json();
-    const tag = data.tag_name || "";
+    const tag = data.latest_version || "";
     localStorage.setItem(RELEASE_CHECK_KEY, String(now));
     localStorage.setItem(RELEASE_CACHE_KEY, JSON.stringify({ tag }));
     localStorage.setItem(RELEASE_VERSION_KEY, normalizedVersion);
@@ -2133,16 +2481,8 @@ function getHomeSourcePriority() {
   if (!checked.length) {
     return null;
   }
-
-  // If all sources selected, treat as auto (null)
-  const allSources = Array.from(
-    panel.querySelectorAll("input[type=checkbox][data-source]")
-  ).map((el) => el.dataset.source);
-
-  if (checked.length === allSources.length) {
-    return null;
-  }
-
+  // Return explicit checked list even when all are selected so custom sources
+  // are included without relying on static fallback defaults.
   return checked;
 }
 
@@ -2169,13 +2509,7 @@ function updateHomeSourceToggleLabel() {
     toggle.textContent = "Sources: None";
     return;
   }
-  const labelMap = {
-    youtube: "YouTube",
-    youtube_music: "YouTube Music",
-    soundcloud: "SoundCloud",
-    bandcamp: "Bandcamp",
-  };
-  const labels = checked.map((input) => labelMap[input.dataset.source] || input.dataset.source);
+  const labels = checked.map((input) => formatSourceLabel(input.dataset.source));
   const summary = labels.length <= 2 ? labels.join(", ") : `${labels.length} selected`;
   toggle.textContent = `Sources: ${summary}`;
 }
@@ -2355,6 +2689,7 @@ function setHomeMediaMode(mode, { persist = true, clearResultsOnDisable = true }
   state.homeMediaMode = nextMode;
   state.homeMusicMode = nextMode !== "video";
   updateHomeMusicModeUI();
+  refreshHomeSourceOptions();
   if (previous !== state.homeMusicMode) {
     clearMusicResultsHistory();
   }
@@ -2574,9 +2909,10 @@ function maybeReleaseHomeSearchControls(requestId, requestStatus, hasVisibleCand
 
 function stopHomeResultPolling() {
   if (state.homeResultsTimer) {
-    clearInterval(state.homeResultsTimer);
+    clearTimeout(state.homeResultsTimer);
     state.homeResultsTimer = null;
   }
+  state.homeResultPollInFlight = false;
   state.homeSearchPollStart = null;
 }
 
@@ -3337,6 +3673,7 @@ function clearLegacyHomeSearchState() {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateRefreshPending = {};
   const resultsList = $("#home-results-list");
   if (resultsList) {
     resultsList.textContent = "";
@@ -3395,6 +3732,7 @@ async function handleHomeStandardSearch(autoEnqueue, inputValue, messageEl) {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateRefreshPending = {};
   state.homeSearchRequestId = data.request_id;
   state.homeSearchMode = autoEnqueue ? "download" : "searchOnly";
   updateHomeViewAdvancedLink();
@@ -4129,7 +4467,11 @@ function updateHomeResultItemCard(card, item) {
 }
 
 function scheduleHomeCandidateRefresh(item, container) {
-  if (!item || !item.id || !container || state.homeCandidatesLoading[item.id]) {
+  if (!item || !item.id || !container) {
+    return;
+  }
+  if (state.homeCandidatesLoading[item.id]) {
+    state.homeCandidateRefreshPending[item.id] = true;
     return;
   }
   const preloadedCandidates = Array.isArray(item.candidates) ? item.candidates : null;
@@ -4157,7 +4499,10 @@ async function loadHomeCandidates(item, container, preloadedCandidates = null) {
     placeholder.textContent = "Fetching candidates…";
     let candidates = Array.isArray(preloadedCandidates) ? preloadedCandidates : [];
     if (!candidates.length) {
-      const data = await fetchJson(`/api/search/items/${encodeURIComponent(item.id)}/candidates`);
+      const data = await fetchJson(
+        `/api/search/items/${encodeURIComponent(item.id)}/candidates`,
+        { cache: "no-store" }
+      );
       candidates = data.candidates || [];
     }
     if (!candidates.length) {
@@ -4202,31 +4547,36 @@ async function loadHomeCandidates(item, container, preloadedCandidates = null) {
     if (Number.isFinite(bestScore)) {
       recordHomeCandidateScore(requestId, bestScore);
     }
-    // Enrich with job-state after candidate rows are visible.
-    let jobSnapshot = null;
-    try {
-      jobSnapshot = await fetchHomeJobSnapshot(requestId);
-    } catch (err) {
-      jobSnapshot = null;
-    }
-    if (jobSnapshot) {
-      candidates.forEach((candidate) => {
-        if (!candidate?.id) return;
-        const selector = `[data-candidate-id="${CSS.escape(candidate.id)}"]`;
-        const row = container.querySelector(selector);
-        if (!row) return;
-        const job = candidate.url ? jobSnapshot.jobsByUrl.get(candidate.url) : null;
-        updateHomeCandidateRowState(row, candidate, item, job || null);
-      });
-      if (!state.homeJobTimer) {
-        const hasActive = Array.from(jobSnapshot.jobsByUrl.values()).some((job) =>
-          ["queued", "claimed", "downloading", "postprocessing"].includes(job.status)
-        );
-        if (hasActive) {
-          startHomeJobPolling(requestId);
+    // Enrich job-state asynchronously so rendering is never blocked.
+    Promise.resolve()
+      .then(async () => {
+        if (!requestId) return null;
+        try {
+          return await fetchHomeJobSnapshot(requestId);
+        } catch (_err) {
+          return null;
         }
-      }
-    }
+      })
+      .then((jobSnapshot) => {
+        if (!jobSnapshot) return;
+        candidates.forEach((candidate) => {
+          if (!candidate?.id) return;
+          const selector = `[data-candidate-id="${CSS.escape(candidate.id)}"]`;
+          const row = container.querySelector(selector);
+          if (!row) return;
+          const job = candidate.url ? jobSnapshot.jobsByUrl.get(candidate.url) : null;
+          updateHomeCandidateRowState(row, candidate, item, job || null);
+        });
+        if (!state.homeJobTimer) {
+          const hasActive = Array.from(jobSnapshot.jobsByUrl.values()).some((job) =>
+            ["queued", "claimed", "downloading", "postprocessing"].includes(job.status)
+          );
+          if (hasActive) {
+            startHomeJobPolling(requestId);
+          }
+        }
+      })
+      .catch(() => {});
   } catch (err) {
     container.textContent = "";
     const errorEl = document.createElement("div");
@@ -4235,6 +4585,10 @@ async function loadHomeCandidates(item, container, preloadedCandidates = null) {
     container.appendChild(errorEl);
   } finally {
     state.homeCandidatesLoading[item.id] = false;
+    if (state.homeCandidateRefreshPending[item.id]) {
+      state.homeCandidateRefreshPending[item.id] = false;
+      setTimeout(() => scheduleHomeCandidateRefresh(item, container), 0);
+    }
   }
 }
 
@@ -4251,35 +4605,10 @@ function renderHomeCandidateRow(candidate, item) {
     row.dataset.url = candidate.url;
   }
 
-  const extractYouTubeVideoId = (value) => {
-    const raw = String(value || "").trim();
-    if (!raw) return null;
-    try {
-      const parsed = new URL(raw);
-      const host = (parsed.hostname || "").toLowerCase();
-      if (host === "youtu.be") {
-        const id = parsed.pathname.replace(/^\/+/, "").split("/")[0];
-        return id || null;
-      }
-      if (host.includes("youtube.com")) {
-        const id = parsed.searchParams.get("v");
-        if (id) return id;
-        const parts = parsed.pathname.split("/").filter(Boolean);
-        const embedIdx = parts.findIndex((part) => part === "embed" || part === "shorts");
-        if (embedIdx >= 0 && parts[embedIdx + 1]) {
-          return parts[embedIdx + 1];
-        }
-      }
-    } catch (_) {
-      return null;
-    }
-    return null;
-  };
-
   const fallbackYouTubeThumb = (() => {
     const source = String(candidate.source || "").toLowerCase();
     if (!source.startsWith("youtube")) return null;
-    const videoId = extractYouTubeVideoId(candidate.url);
+    const videoId = extractYouTubeVideoIdFromUrl(candidate.url);
     return videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : null;
   })();
 
@@ -4300,14 +4629,8 @@ function renderHomeCandidateRow(candidate, item) {
 
   const info = document.createElement("div");
   info.className = "home-candidate-info";
-  const sourceLabelMap = {
-    youtube: "YouTube",
-    youtube_music: "YouTube Music",
-    soundcloud: "SoundCloud",
-    bandcamp: "Bandcamp",
-  };
   const sourceKey = (candidate.source || "").toLowerCase();
-  const sourceLabel = sourceLabelMap[sourceKey] || candidate.source || "Unknown";
+  const sourceLabel = formatSourceLabel(sourceKey) || candidate.source || "Unknown";
   const title = candidate.title || candidate.source || "-";
   const detail = [candidate.artist_detected, candidate.album_detected, candidate.track_detected]
     .filter(Boolean)
@@ -4385,8 +4708,31 @@ function renderHomeCandidateRow(candidate, item) {
     openLink.target = "_blank";
     openLink.rel = "noopener noreferrer";
     action.appendChild(openLink);
+
+    const previewDescriptor = buildHomePreviewDescriptor(candidate);
+    if (previewDescriptor) {
+      const previewButton = document.createElement("button");
+      previewButton.type = "button";
+      previewButton.className = "button ghost small home-candidate-preview";
+      previewButton.textContent = "Preview";
+      previewButton.dataset.action = "home-preview";
+      previewButton.dataset.previewEmbedUrl = previewDescriptor.embedUrl;
+      previewButton.dataset.previewSource = previewDescriptor.source;
+      previewButton.dataset.previewTitle = previewDescriptor.title;
+      action.appendChild(previewButton);
+      titleEl.dataset.previewEnabled = "true";
+      artwork.dataset.previewEnabled = "true";
+    }
   }
   row.appendChild(action);
+
+  const postedDate = formatCandidatePostedDate(candidate);
+  if (postedDate) {
+    const postedEl = document.createElement("div");
+    postedEl.className = "home-candidate-posted";
+    postedEl.textContent = `Posted: ${postedDate}`;
+    row.appendChild(postedEl);
+  }
 
   return row;
 }
@@ -4763,6 +5109,7 @@ function showHomeDirectUrlError(url, message, messageEl) {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateRefreshPending = {};
   state.homeCandidateData = {};
   stopHomeJobPolling();
   showHomeResults(true);
@@ -4788,6 +5135,7 @@ function showHomeDirectUrlPreview(preview) {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateRefreshPending = {};
   state.homeCandidateData = {};
   stopHomeJobPolling();
   showHomeResults(true);
@@ -5008,7 +5356,10 @@ async function refreshHomeResults(requestId) {
   if (!container) return null;
   try {
     const previousContext = state.homeRequestContext[requestId] || {};
-    const data = await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}`);
+    const data = await fetchJson(
+      `/api/search/requests/${encodeURIComponent(requestId)}`,
+      { cache: "no-store" }
+    );
     const requestStatus = data.request?.status || "queued";
     const requestMediaType = data.request?.media_type || "";
     const items = data.items || [];
@@ -5122,7 +5473,7 @@ function guardHomeSearchNoCandidates(requestId, requestStatus, items) {
   if (watchingStates.has(requestStatus) && !hasCandidates) {
     const streak = (state.homeNoCandidateStreaks[requestId] || 0) + 1;
     state.homeNoCandidateStreaks[requestId] = streak;
-    if (streak >= 3) {
+    if (streak >= HOME_NO_CANDIDATE_STREAK_LIMIT) {
       stopHomeResultPolling();
       setHomeResultsStatus("No candidates returned");
       setHomeResultsDetail(
@@ -5152,22 +5503,40 @@ function startHomeResultPolling(requestId) {
   showHomeResults(true);
   state.homeSearchPollStart = Date.now();
   const tick = async () => {
-    const status = await refreshHomeResults(requestId);
-    if (status === null) {
+    if (state.homeSearchRequestId !== requestId) {
       stopHomeResultPolling();
       return;
     }
-    const elapsed = state.homeSearchPollStart ? Date.now() - state.homeSearchPollStart : 0;
-    const hasVisibleCandidates = document.querySelectorAll("#home-results-list .home-candidate-row").length > 0;
-    if (elapsed >= HOME_RESULT_TIMEOUT_MS && !hasVisibleCandidates) {
-      abortHomeResultPolling("No adapters responded in time. Please retry or use Advanced Search.");
+    if (state.homeResultPollInFlight) {
+      state.homeResultsTimer = setTimeout(tick, HOME_RESULT_POLL_INTERVAL_MS);
       return;
     }
-    if (status && ["completed", "completed_with_skips", "failed"].includes(status)) {
-      stopHomeResultPolling();
+    state.homeResultPollInFlight = true;
+    let shouldContinue = true;
+    try {
+      const status = await refreshHomeResults(requestId);
+      if (status === null) {
+        stopHomeResultPolling();
+        return;
+      }
+      const elapsed = state.homeSearchPollStart ? Date.now() - state.homeSearchPollStart : 0;
+      const hasVisibleCandidates = document.querySelectorAll("#home-results-list .home-candidate-row").length > 0;
+      if (elapsed >= HOME_RESULT_TIMEOUT_MS && !hasVisibleCandidates) {
+        abortHomeResultPolling("No adapters responded in time. Please retry or use Advanced Search.");
+        return;
+      }
+      if (status && ["completed", "completed_with_skips", "failed"].includes(status)) {
+        stopHomeResultPolling();
+        shouldContinue = false;
+        return;
+      }
+    } finally {
+      state.homeResultPollInFlight = false;
+    }
+    if (shouldContinue && state.homeSearchRequestId === requestId) {
+      state.homeResultsTimer = setTimeout(tick, HOME_RESULT_POLL_INTERVAL_MS);
     }
   };
-  state.homeResultsTimer = setInterval(tick, HOME_RESULT_POLL_INTERVAL_MS);
   tick();
 }
 
@@ -5381,6 +5750,7 @@ async function handleHomePlaylistUrlPreview(url, playlistId, messageEl) {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateRefreshPending = {};
   state.homeCandidateData = {};
   state.homeDirectPreview = {
     title: `YouTube Playlist (${playlistId})`,
@@ -7181,12 +7551,12 @@ function bindEvents() {
         closePanel();
       }
     });
-    homeSourcePanel
-      .querySelectorAll("input[type=checkbox][data-source]")
-      .forEach((input) => {
-        input.addEventListener("change", updateHomeSourceToggleLabel);
-      });
-    updateHomeSourceToggleLabel();
+    homeSourcePanel.addEventListener("change", (event) => {
+      if (event.target && event.target.matches('input[type="checkbox"][data-source]')) {
+        updateHomeSourceToggleLabel();
+      }
+    });
+    refreshHomeSourceOptions();
   }
   const homeAdvancedToggle = document.querySelector("#home-advanced-toggle");
   const homeAdvancedPanel = document.querySelector("#home-advanced-panel");
@@ -7207,6 +7577,15 @@ function bindEvents() {
   const homeResultsList = $("#home-results-list");
   if (homeResultsList) {
     homeResultsList.addEventListener("click", async (event) => {
+      const previewTarget = event.target.closest(".home-candidate-artwork, .home-candidate-title");
+      if (previewTarget) {
+        const row = previewTarget.closest(".home-candidate-row");
+        const descriptor = buildHomePreviewDescriptorFromRow(row);
+        if (descriptor) {
+          openHomePreviewModal(descriptor);
+          return;
+        }
+      }
       const cancelIntentButton = event.target.closest('button[data-action="home-intent-cancel"]');
       if (cancelIntentButton) {
         resetHomeIntentConfirmation();
@@ -7235,6 +7614,19 @@ function bindEvents() {
         } finally {
           confirmIntentButton.disabled = false;
         }
+        return;
+      }
+      const previewButton = event.target.closest('button[data-action="home-preview"]');
+      if (previewButton) {
+        const previewEmbedUrl = String(previewButton.dataset.previewEmbedUrl || "").trim();
+        if (!previewEmbedUrl || !isValidHttpUrl(previewEmbedUrl)) {
+          return;
+        }
+        openHomePreviewModal({
+          embedUrl: previewEmbedUrl,
+          source: String(previewButton.dataset.previewSource || "").trim(),
+          title: String(previewButton.dataset.previewTitle || "").trim() || "Preview",
+        });
         return;
       }
       const directButton = event.target.closest('button[data-action="home-direct-download"]');
@@ -7469,6 +7861,18 @@ function bindEvents() {
     importProgressModal.addEventListener("click", (event) => {
       if (event.target === importProgressModal) {
         closeImportProgressModal();
+      }
+    });
+  }
+  const homePreviewClose = $("#home-preview-close");
+  if (homePreviewClose) {
+    homePreviewClose.addEventListener("click", closeHomePreviewModal);
+  }
+  const homePreviewModal = $("#home-preview-modal");
+  if (homePreviewModal) {
+    homePreviewModal.addEventListener("click", (event) => {
+      if (event.target === homePreviewModal) {
+        closeHomePreviewModal();
       }
     });
   }

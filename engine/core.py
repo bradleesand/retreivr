@@ -42,8 +42,6 @@ _SPOTIFY_PLAYLIST_RE = re.compile(
     r"^(?:https?://open\.spotify\.com/playlist/|spotify:playlist:)([A-Za-z0-9]+)"
 )
 _COMMUNITY_PUBLISH_MODES = {"off", "dry_run", "write_outbox"}
-_SEARCH_CACHE_MAX_ENTRIES_DEFAULT = 50000
-_SEARCH_CACHE_SEED_TOP_N_DEFAULT = 30
 
 
 def _install_google_auth_filter():
@@ -276,12 +274,7 @@ def apply_config_defaults(config):
     normalized.setdefault("community_cache_publish_mode", "off")
     normalized.setdefault("community_cache_publish_min_score", 0.78)
     normalized.setdefault("community_cache_publish_outbox_dir", "")
-
-    normalized.setdefault("search_cache_enabled", True)
-    normalized.setdefault("search_cache_ttl_days", 0)
-    normalized.setdefault("search_cache_prune_on_failure", True)
-    normalized.setdefault("search_cache_max_entries", _SEARCH_CACHE_MAX_ENTRIES_DEFAULT)
-    normalized.setdefault("search_cache_seed_top_n", _SEARCH_CACHE_SEED_TOP_N_DEFAULT)
+    normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
 
     return normalized
 
@@ -470,34 +463,15 @@ def validate_config(config):
     if community_cache_publish_outbox_dir is not None and not isinstance(community_cache_publish_outbox_dir, str):
         errors.append("community_cache_publish_outbox_dir must be a string")
 
-    search_cache_enabled = config.get("search_cache_enabled")
-    if search_cache_enabled is not None and not isinstance(search_cache_enabled, bool):
-        errors.append("search_cache_enabled must be true/false")
-
-    search_cache_ttl_days = config.get("search_cache_ttl_days")
-    if search_cache_ttl_days is not None:
-        if not isinstance(search_cache_ttl_days, int):
-            errors.append("search_cache_ttl_days must be an integer")
-        elif search_cache_ttl_days < 0:
-            errors.append("search_cache_ttl_days must be >= 0")
-
-    search_cache_prune_on_failure = config.get("search_cache_prune_on_failure")
-    if search_cache_prune_on_failure is not None and not isinstance(search_cache_prune_on_failure, bool):
-        errors.append("search_cache_prune_on_failure must be true/false")
-
-    search_cache_max_entries = config.get("search_cache_max_entries")
-    if search_cache_max_entries is not None:
-        if not isinstance(search_cache_max_entries, int):
-            errors.append("search_cache_max_entries must be an integer")
-        elif search_cache_max_entries < 1000:
-            errors.append("search_cache_max_entries must be >= 1000")
-
-    search_cache_seed_top_n = config.get("search_cache_seed_top_n")
-    if search_cache_seed_top_n is not None:
-        if not isinstance(search_cache_seed_top_n, int):
-            errors.append("search_cache_seed_top_n must be an integer")
-        elif search_cache_seed_top_n < 1:
-            errors.append("search_cache_seed_top_n must be >= 1")
+    custom_adapter_file = config.get("custom_search_adapters_file")
+    if custom_adapter_file is not None:
+        if isinstance(custom_adapter_file, str):
+            pass
+        elif isinstance(custom_adapter_file, list):
+            if not all(isinstance(entry, str) for entry in custom_adapter_file):
+                errors.append("custom_search_adapters_file list entries must be strings")
+        else:
+            errors.append("custom_search_adapters_file must be a string or list of strings")
 
     return errors
 

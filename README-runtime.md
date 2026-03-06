@@ -60,3 +60,7 @@ The runtime bundle version matches the Docker image tag for that release.
 
 - Full source code and development files are available in the main repository.
 - The runtime bundle is intended for simplified Docker deployment only.
+- Optional custom search adapters can be defined in `config/custom_search_adapters.yaml`.
+  - Start from `config/custom_search_adapters.example.yaml`.
+  - Point `custom_search_adapters_file` in `config/config.json` to your YAML/JSON file path.
+  - Custom adapters that load successfully are exposed automatically in Home source selection.
