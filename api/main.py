@@ -7341,6 +7341,29 @@ async def get_search_candidates(item_id: str):
     return {"candidates": candidates}
 
 
+@app.get("/api/search/sources")
+async def get_search_sources():
+    service = app.state.search_service
+    adapters = getattr(service, "adapters", {}) or {}
+    keys = [str(key).strip() for key in adapters.keys() if str(key).strip()]
+    preferred_order = [
+        "youtube",
+        "youtube_music",
+        "rumble",
+        "archive_org",
+        "soundcloud",
+        "bandcamp",
+    ]
+    ranked = sorted(
+        keys,
+        key=lambda value: (
+            preferred_order.index(value) if value in preferred_order else len(preferred_order) + 100,
+            value,
+        ),
+    )
+    return {"sources": ranked}
+
+
 @app.post("/api/search/items/{item_id}/enqueue")
 async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayload):
     service = app.state.search_service

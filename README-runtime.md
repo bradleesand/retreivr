@@ -63,3 +63,4 @@ The runtime bundle version matches the Docker image tag for that release.
 - Optional custom search adapters can be defined in `config/custom_search_adapters.yaml`.
   - Start from `config/custom_search_adapters.example.yaml`.
   - Point `custom_search_adapters_file` in `config/config.json` to your YAML/JSON file path.
+  - Custom adapters that load successfully are exposed automatically in Home source selection.

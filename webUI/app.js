@@ -162,6 +162,57 @@ const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
+function formatSourceLabel(source) {
+  const key = String(source || "").trim().toLowerCase();
+  const labelMap = {
+    youtube: "YouTube",
+    youtube_music: "YouTube Music",
+    rumble: "Rumble",
+    archive_org: "Archive.org",
+    soundcloud: "SoundCloud",
+    bandcamp: "Bandcamp",
+  };
+  if (labelMap[key]) return labelMap[key];
+  return key
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+async function refreshHomeSourceOptions() {
+  const panel = $("#home-source-panel");
+  if (!panel) return;
+  let sources = [];
+  try {
+    const data = await fetchJson("/api/search/sources");
+    sources = Array.isArray(data?.sources) ? data.sources.map((v) => String(v || "").trim()).filter(Boolean) : [];
+  } catch (_err) {
+    sources = [];
+  }
+  if (!sources.length) {
+    sources = ["youtube", "youtube_music", "rumble", "archive_org", "soundcloud", "bandcamp"];
+  }
+  const existingChecked = new Set(
+    Array.from(panel.querySelectorAll("input[type=checkbox][data-source]:checked")).map((el) => el.dataset.source)
+  );
+  panel.textContent = "";
+  sources.forEach((source, index) => {
+    const label = document.createElement("label");
+    label.className = "home-source-pill";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.source = source;
+    input.checked = existingChecked.size ? existingChecked.has(source) : source === "youtube" || index === 0;
+    const span = document.createElement("span");
+    span.textContent = formatSourceLabel(source);
+    label.appendChild(input);
+    label.appendChild(span);
+    panel.appendChild(label);
+  });
+  updateHomeSourceToggleLabel();
+}
+
 function normalizePageName(page) {
   if (!page) {
     return "home";
@@ -2334,16 +2385,8 @@ function getHomeSourcePriority() {
   if (!checked.length) {
     return null;
   }
-
-  // If all sources selected, treat as auto (null)
-  const allSources = Array.from(
-    panel.querySelectorAll("input[type=checkbox][data-source]")
-  ).map((el) => el.dataset.source);
-
-  if (checked.length === allSources.length) {
-    return null;
-  }
-
+  // Return explicit checked list even when all are selected so custom sources
+  // are included without relying on static fallback defaults.
   return checked;
 }
 
@@ -2370,15 +2413,7 @@ function updateHomeSourceToggleLabel() {
     toggle.textContent = "Sources: None";
     return;
   }
-  const labelMap = {
-    youtube: "YouTube",
-    youtube_music: "YouTube Music",
-    rumble: "Rumble",
-    archive_org: "Archive.org",
-    soundcloud: "SoundCloud",
-    bandcamp: "Bandcamp",
-  };
-  const labels = checked.map((input) => labelMap[input.dataset.source] || input.dataset.source);
+  const labels = checked.map((input) => formatSourceLabel(input.dataset.source));
   const summary = labels.length <= 2 ? labels.join(", ") : `${labels.length} selected`;
   toggle.textContent = `Sources: ${summary}`;
 }
@@ -4478,16 +4513,8 @@ function renderHomeCandidateRow(candidate, item) {
 
   const info = document.createElement("div");
   info.className = "home-candidate-info";
-  const sourceLabelMap = {
-    youtube: "YouTube",
-    youtube_music: "YouTube Music",
-    rumble: "Rumble",
-    archive_org: "Archive.org",
-    soundcloud: "SoundCloud",
-    bandcamp: "Bandcamp",
-  };
   const sourceKey = (candidate.source || "").toLowerCase();
-  const sourceLabel = sourceLabelMap[sourceKey] || candidate.source || "Unknown";
+  const sourceLabel = formatSourceLabel(sourceKey) || candidate.source || "Unknown";
   const title = candidate.title || candidate.source || "-";
   const detail = [candidate.artist_detected, candidate.album_detected, candidate.track_detected]
     .filter(Boolean)
@@ -7382,12 +7409,12 @@ function bindEvents() {
         closePanel();
       }
     });
-    homeSourcePanel
-      .querySelectorAll("input[type=checkbox][data-source]")
-      .forEach((input) => {
-        input.addEventListener("change", updateHomeSourceToggleLabel);
-      });
-    updateHomeSourceToggleLabel();
+    homeSourcePanel.addEventListener("change", (event) => {
+      if (event.target && event.target.matches('input[type="checkbox"][data-source]')) {
+        updateHomeSourceToggleLabel();
+      }
+    });
+    refreshHomeSourceOptions();
   }
   const homeAdvancedToggle = document.querySelector("#home-advanced-toggle");
   const homeAdvancedPanel = document.querySelector("#home-advanced-panel");
