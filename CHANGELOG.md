@@ -5,11 +5,11 @@ All notable changes to this project will be documented here.
 ## v0.9.8 — Fast Discovery + Video Preview + Adapter Extensibility
 
 ### High-Level
-This release focuses on homepage search UX and discovery speed: incremental/as-resolved rendering, lightweight video discovery, and embedded preview support for supported sources, while keeping deterministic acquisition/download behavior unchanged.
+This release focuses on homepage discovery responsiveness and operator usability. Search now renders incrementally as sources resolve, lightweight video discovery is prioritized, and supported sources can be previewed inline before enqueue. Deterministic acquisition and download behavior remain unchanged.
 
 ### Added
 - Homepage video preview flow with `Preview` action on result cards for supported adapters.
-- Preview can be triggered from video title/thumbnail clicks (same behavior as `Preview` button).
+- Preview trigger parity on title/thumbnail clicks (same behavior as the `Preview` button).
 - Structured custom adapter framework with user-facing `config/custom_search_adapters.example.yaml` template.
 - New video discovery adapters integrated for `rumble` and `archive_org`.
 - Discovery timing instrumentation and source-level adapter progress logging.
@@ -40,6 +40,10 @@ This release focuses on homepage search UX and discovery speed: incremental/as-r
 - Homepage candidate refresh race conditions that caused delayed or dropped incremental rows.
 - Rumble/archive preview wiring and embed behavior reliability on homepage preview modal.
 - Search-card metadata regressions (including posted-date rendering on result cards).
+
+### Upgrade Notes
+- No required config migration for existing installs.
+- To add site-search adapters, copy `config/custom_search_adapters.example.yaml` to `config/custom_search_adapters.yaml` and ensure `custom_search_adapters_file` is set in `config/config.json`.
 
 ## v0.9.7 — Community Cache + Local Search Cache + Watcher/Telegram Hardening
 
