@@ -59,6 +59,7 @@ const state = {
   playlistImportJobId: null,
   playlistImportPollTimer: null,
   playlistImportInProgress: false,
+  settingsActiveSectionId: "settings-core",
   logsStickToBottom: true,
 };
 const browserState = {
@@ -125,6 +126,8 @@ const HOME_VIDEO_SOURCE_PRIORITY = [
 const HOME_VIDEO_KEYWORDS = ["show", "podcast", "episode", "interview"];
 const HOME_MUSIC_MODE_FORMATS = ["mp3", "m4a"];
 const HOME_MUSIC_VIDEO_MODE_FORMATS = ["mp4", "mkv", "webm"];
+const SETTINGS_ADVANCED_MODE_KEY = "retreivr_settings_advanced_mode";
+const SETTINGS_ALL_SECTION_ID = "settings-all";
 const HOME_PREVIEW_EMBED_BUILDERS = {
   youtube: buildYouTubeHomePreviewEmbedUrl,
   youtube_music: buildYouTubeHomePreviewEmbedUrl,
@@ -229,6 +232,9 @@ function normalizePageName(page) {
     return "home";
   }
   const cleanPage = String(page).split("?")[0] || page;
+  if (cleanPage === "settings" || String(cleanPage).startsWith("settings-")) {
+    return "config";
+  }
   if (cleanPage === "search" || cleanPage === "advanced") {
     return "info";
   }
@@ -510,6 +516,12 @@ function setPage(page) {
     if (!state.config || !state.configDirty) {
       loadConfig().then(async () => {
         await refreshSpotifyConfig();
+        const sectionHash = String(window.location.hash || "").replace("#", "");
+        if (sectionHash.startsWith("settings-")) {
+          setActiveSettingsSection(sectionHash, { jump: false, smooth: false });
+        } else {
+          setActiveSettingsSection(state.settingsActiveSectionId || "settings-core", { jump: false, smooth: false });
+        }
         if (consumeSpotifyConnectedHashFlag()) {
           await refreshSpotifyConfig();
           setConfigNotice("Spotify connected successfully.", false, true);
@@ -517,6 +529,12 @@ function setPage(page) {
       });
     }
     refreshSchedule();
+    const sectionHash = String(window.location.hash || "").replace("#", "");
+    if (sectionHash.startsWith("settings-")) {
+      requestAnimationFrame(() => setActiveSettingsSection(sectionHash, { jump: false, smooth: false }));
+    } else {
+      requestAnimationFrame(() => setActiveSettingsSection(state.settingsActiveSectionId || "settings-core", { jump: false, smooth: false }));
+    }
   } else if (target === "info") {
     refreshMetrics();
     refreshVersion();
@@ -830,6 +848,134 @@ function updateHomeDestinationResolved() {
   const value = $("#home-destination")?.value;
   const resolved = computeResolvedDestinationPath(value);
   display.textContent = `Resolved: ${resolved}`;
+}
+
+function loadSettingsAdvancedModePreference() {
+  return false;
+}
+
+function isSettingsAdvancedModeEnabled() {
+  return !!$("#settings-advanced-mode")?.checked;
+}
+
+function getAllowedSettingsSectionIds() {
+  const advancedEnabled = isSettingsAdvancedModeEnabled();
+  return $$(".settings-section[data-settings-section]")
+    .filter((section) => {
+      const isAdvanced = String(section.dataset.settingsLevel || "").trim().toLowerCase() === "advanced";
+      return advancedEnabled || !isAdvanced;
+    })
+    .map((section) => section.id)
+    .filter(Boolean);
+}
+
+function updateSettingsSectionNavState(activeSectionId = "") {
+  const normalizedActive = String(activeSectionId || "").trim();
+  const advancedEnabled = isSettingsAdvancedModeEnabled();
+  $$(".settings-nav-link[data-settings-link]").forEach((link) => {
+    const href = String(link.getAttribute("href") || "");
+    const sectionId = href.startsWith("#") ? href.slice(1) : href;
+    const isAdvanced = String(link.dataset.settingsLevel || "").trim().toLowerCase() === "advanced";
+    link.classList.toggle("hidden", isAdvanced && !advancedEnabled);
+    link.classList.toggle("active", normalizedActive && sectionId === normalizedActive);
+  });
+  const select = $("#settings-section-select");
+  if (select) {
+    Array.from(select.options).forEach((option) => {
+      const isAdvanced = String(option.dataset.settingsLevel || "").trim().toLowerCase() === "advanced";
+      const shouldHide = isAdvanced && !advancedEnabled;
+      option.hidden = shouldHide;
+      option.disabled = shouldHide;
+    });
+    if (normalizedActive) {
+      select.value = normalizedActive;
+    }
+  }
+}
+
+function setActiveSettingsSection(sectionId, { jump = false, smooth = true } = {}) {
+  const allowed = getAllowedSettingsSectionIds();
+  if (!allowed.length) {
+    return;
+  }
+  const requested = String(sectionId || "").trim();
+  const nextActive = requested === SETTINGS_ALL_SECTION_ID
+    ? SETTINGS_ALL_SECTION_ID
+    : (allowed.includes(requested) ? requested : (allowed[0] || "settings-core"));
+  state.settingsActiveSectionId = nextActive;
+  $$(".settings-section[data-settings-section]").forEach((section) => {
+    const isAllowed = allowed.includes(section.id);
+    const shouldShow = nextActive === SETTINGS_ALL_SECTION_ID ? isAllowed : (isAllowed && section.id === nextActive);
+    section.classList.toggle("hidden", !shouldShow);
+    section.dataset.settingsVisible = shouldShow ? "1" : "0";
+    section.setAttribute("aria-hidden", shouldShow ? "false" : "true");
+  });
+  syncSettingsMainWidthLock();
+  updateSettingsSectionNavState(nextActive);
+  if (jump) {
+    if (nextActive === SETTINGS_ALL_SECTION_ID) {
+      const firstVisible = $$(".settings-section[data-settings-section]").find((section) => !section.classList.contains("hidden"));
+      if (firstVisible) {
+        firstVisible.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+      }
+      return;
+    }
+    const activeSection = document.getElementById(nextActive);
+    if (activeSection) {
+      activeSection.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+    }
+  }
+}
+
+function applySettingsAdvancedMode(enabled, { persist = true } = {}) {
+  const normalized = !!enabled;
+  const toggle = $("#settings-advanced-mode");
+  if (toggle) {
+    toggle.checked = normalized;
+  }
+  if (persist) {
+    try {
+      localStorage.setItem(SETTINGS_ADVANCED_MODE_KEY, normalized ? "1" : "0");
+    } catch {
+      // ignore storage failures
+    }
+  }
+  $$("[data-settings-level='advanced']").forEach((node) => {
+    const tag = String(node.tagName || "").toUpperCase();
+    const isStructural = tag === "OPTION"
+      || node.classList.contains("settings-nav-link")
+      || node.classList.contains("settings-section");
+    if (isStructural) {
+      return;
+    }
+    node.classList.toggle("hidden", !normalized);
+  });
+  setActiveSettingsSection(state.settingsActiveSectionId);
+}
+
+function syncSettingsMainWidthLock() {
+  const panel = $("#config-panel");
+  const layout = panel?.querySelector(".settings-layout");
+  if (!panel || !layout) {
+    return;
+  }
+  const isStacked = window.matchMedia("(max-width: 1200px)").matches;
+  let width = 0;
+  if (isStacked) {
+    width = Math.floor(layout.clientWidth || 0);
+  } else {
+    const sidebar = layout.querySelector(".settings-sidebar");
+    const sidebarWidth = sidebar ? Math.floor(sidebar.getBoundingClientRect().width || 0) : 0;
+    const computed = window.getComputedStyle(layout);
+    const gapValue = (computed.columnGap && computed.columnGap !== "normal")
+      ? computed.columnGap
+      : computed.gap;
+    const gap = Number.parseFloat(gapValue || "0") || 0;
+    width = Math.floor((layout.clientWidth || 0) - sidebarWidth - gap);
+  }
+  if (width > 0) {
+    panel.style.setProperty("--settings-main-locked-width", `${width}px`);
+  }
 }
 
 function syncConfigSectionCollapsedStates() {
@@ -6746,17 +6892,6 @@ function addPlaylistRow(entry = {}) {
       <span>Account</span>
       <select class="playlist-account"></select>
     </label>
-    <label class="field playlist-cell playlist-cell-format">
-      <span>Format</span>
-      <select class="playlist-format">
-        <option value="">(default)</option>
-        <option value="mkv">mkv</option>
-        <option value="mp4">mp4</option>
-        <option value="webm">webm</option>
-        <option value="mp3">mp3</option>
-        <option value="m4a">m4a</option>
-      </select>
-    </label>
     <label class="field inline playlist-cell playlist-cell-mode">
       <span>Media mode</span>
       <select class="playlist-media-mode hidden" aria-hidden="true" tabindex="-1">
@@ -6769,6 +6904,17 @@ function addPlaylistRow(entry = {}) {
         <button type="button" class="home-media-mode-pill" data-mode="music_video" role="radio" aria-checked="false">MV</button>
         <button type="button" class="home-media-mode-pill" data-mode="music" role="radio" aria-checked="false">Music</button>
       </div>
+    </label>
+    <label class="field inline playlist-cell playlist-cell-format">
+      <span>Format</span>
+      <select class="playlist-format">
+        <option value="">(default)</option>
+        <option value="mkv">mkv</option>
+        <option value="mp4">mp4</option>
+        <option value="webm">webm</option>
+        <option value="mp3">mp3</option>
+        <option value="m4a">m4a</option>
+      </select>
     </label>
     <label class="field inline playlist-cell playlist-cell-subscribe">
       <span class="playlist-subscribe-label">
@@ -7740,7 +7886,8 @@ function bindEvents() {
     button.addEventListener("click", () => {
       const page = button.dataset.page || "home";
       setPage(page);
-      window.location.hash = page;
+      const hashTarget = button.dataset.hash || page;
+      window.location.hash = hashTarget;
     });
   });
 
@@ -8326,6 +8473,48 @@ function bindEvents() {
   document.addEventListener("click", clearConfigNotice);
   document.addEventListener("input", clearConfigNotice);
 
+  const settingsAdvancedToggle = $("#settings-advanced-mode");
+  if (settingsAdvancedToggle) {
+    settingsAdvancedToggle.addEventListener("change", () => {
+      applySettingsAdvancedMode(settingsAdvancedToggle.checked, { persist: false });
+    });
+    settingsAdvancedToggle.checked = false;
+    applySettingsAdvancedMode(false, { persist: false });
+  }
+
+  const settingsNav = $("#settings-nav");
+  if (settingsNav) {
+    settingsNav.addEventListener("click", (event) => {
+      const link = event.target.closest(".settings-nav-link");
+      if (!link) return;
+      event.preventDefault();
+      const href = String(link.getAttribute("href") || "");
+      const targetId = href.startsWith("#") ? href.slice(1) : "";
+      if (targetId) {
+        setActiveSettingsSection(targetId, { jump: false, smooth: false });
+        if (window.location.hash !== `#${targetId}`) {
+          history.replaceState(null, "", `#${targetId}`);
+        }
+      }
+    });
+  }
+
+  const settingsSelect = $("#settings-section-select");
+  if (settingsSelect) {
+    settingsSelect.addEventListener("change", () => {
+      const targetId = String(settingsSelect.value || "").trim();
+      if (!targetId) return;
+      setActiveSettingsSection(targetId, { jump: false, smooth: false });
+      if (window.location.hash !== `#${targetId}`) {
+        history.replaceState(null, "", `#${targetId}`);
+      }
+    });
+  }
+
+  window.addEventListener("resize", () => {
+    syncSettingsMainWidthLock();
+  });
+
   const configPanel = $("#config-panel");
   if (configPanel) {
     configPanel.addEventListener("input", () => {
@@ -8350,6 +8539,8 @@ function bindEvents() {
     spotifyEnabledToggle.addEventListener("change", syncConfigSectionCollapsedStates);
   }
   syncConfigSectionCollapsedStates();
+  syncSettingsMainWidthLock();
+  setActiveSettingsSection(state.settingsActiveSectionId || "settings-core", { jump: false, smooth: false });
 
 }
 

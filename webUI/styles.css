@@ -180,6 +180,11 @@ html, body {
   height: 100%;
 }
 
+html {
+  /* Prevent layout width jumps when content height differs between sections. */
+  overflow-y: scroll;
+}
+
 body {
   margin: 0;
   font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -187,6 +192,7 @@ body {
   line-height: 1.5;
   background: #0b0f14;
   overflow-x: hidden;
+  scrollbar-gutter: stable both-edges;
 }
 
 :root[data-theme="light"] body {
@@ -1340,15 +1346,74 @@ body.home-page .home-candidate-source-tag {
   flex-direction: column;
 }
 
+#metrics-panel .metrics-main {
+  display: flex;
+  gap: 18px;
+  align-items: stretch;
+}
+
 #metrics-panel .panel-body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 #metrics-panel .panel-footer {
-  margin-top: auto;
-  padding-top: 12px;
+  margin-top: 0;
+  padding-top: 0;
+  min-width: 290px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+}
+
+#metrics-panel .version-block {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+#metrics-panel .version-block .stat {
+  min-width: 120px;
+}
+
+#metrics-panel .info-footer-links {
+  margin-top: 16px;
+}
+
+#metrics-panel .home-footer-brand .sudostacks-logo {
+  height: 52px;
+  width: auto;
+  max-width: min(320px, 78vw);
+  border-radius: 6px;
+}
+
+@media (max-width: 900px) {
+  #metrics-panel .metrics-main {
+    flex-direction: column;
+  }
+
+  #metrics-panel .panel-footer {
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  #metrics-panel .version-block {
+    justify-content: flex-start;
+  }
+
+  #metrics-panel .home-footer-brand .sudostacks-logo {
+    height: 44px;
+    max-width: min(280px, 82vw);
+  }
+}
+
+@media (max-width: 600px) {
+  #metrics-panel .home-footer-brand .sudostacks-logo {
+    height: 38px;
+    max-width: min(240px, 86vw);
+  }
 }
 
 .stack {
@@ -1384,12 +1449,14 @@ body.home-page .home-candidate-source-tag {
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
+  justify-content: center;
+  align-items: center;
 }
 
 .info-footer-links a {
   font-size: 13px;
   font-weight: 600;
-  color: var(--accent);
+  color: #ef4444;
   text-decoration: none;
 }
 
@@ -1544,6 +1611,166 @@ body.home-page .home-footer-brand .sudostacks-logo {
 #config-panel {
   max-width: 1400px;
   margin: 0 auto;
+  --settings-sidebar-width: 240px;
+  --settings-layout-gap: 18px;
+  --settings-main-inline-size: var(--settings-main-locked-width, calc(100% - var(--settings-sidebar-width) - var(--settings-layout-gap)));
+}
+
+#config-panel .settings-layout {
+  display: flex;
+  gap: var(--settings-layout-gap);
+  align-items: start;
+  width: 100%;
+}
+
+#config-panel .settings-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#config-panel .settings-header-notice {
+  margin: 8px 0 2px;
+}
+
+#config-panel .settings-sidebar {
+  position: sticky;
+  top: 78px;
+  flex: 0 0 var(--settings-sidebar-width);
+  width: var(--settings-sidebar-width);
+  min-width: var(--settings-sidebar-width);
+  max-width: var(--settings-sidebar-width);
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(15, 23, 36, 0.45);
+}
+
+:root[data-theme="light"] #config-panel .settings-sidebar {
+  background: #f8fafc;
+}
+
+#config-panel .field.inline.settings-advanced-control {
+  height: 40px;
+  min-height: 40px;
+  flex: 0 0 auto;
+  max-width: none;
+  padding: 0 10px;
+  justify-content: space-between;
+  align-items: center;
+  box-sizing: border-box;
+}
+
+#config-panel .settings-advanced-control > span {
+  white-space: nowrap;
+}
+
+#config-panel .settings-advanced-control.hidden,
+#config-panel .settings-nav-link.hidden {
+  display: none !important;
+}
+
+#config-panel .settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#config-panel .settings-nav-link {
+  display: block;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+#config-panel .settings-nav-link:hover {
+  color: var(--text);
+  border-color: var(--border);
+  background: rgba(148, 163, 184, 0.08);
+}
+
+#config-panel .settings-nav-link.active {
+  color: #ffffff;
+  background: #ef4444;
+  border-color: #ef4444;
+}
+
+#config-panel .settings-main {
+  flex: 0 0 var(--settings-main-inline-size);
+  min-width: 0;
+  width: var(--settings-main-inline-size);
+  max-width: var(--settings-main-inline-size);
+  align-self: stretch;
+}
+
+#config-panel .settings-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 16px;
+  width: 100%;
+  max-width: 100%;
+}
+
+#config-panel .settings-section {
+  scroll-margin-top: 92px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  align-self: stretch;
+  gap: 12px;
+  width: var(--settings-main-inline-size);
+  max-width: var(--settings-main-inline-size);
+}
+
+#config-panel .settings-section > *,
+#config-panel .settings-actions-row {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+#config-panel .settings-section.hidden,
+#config-panel .settings-section[data-settings-visible="0"] {
+  display: none !important;
+}
+
+#config-panel .settings-section-heading {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+}
+
+#config-panel .runtime-extras-grid {
+  margin-top: 10px;
+}
+
+#config-panel .settings-mobile-jump {
+  display: none;
+}
+
+#config-panel .settings-actions-row {
+  position: sticky;
+  bottom: 6px;
+  z-index: 3;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, #0f1724 88%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+:root[data-theme="light"] #config-panel .settings-actions-row {
+  background: color-mix(in srgb, #f8fafc 92%, transparent);
 }
 
 #config-panel .stack {
@@ -1551,6 +1778,8 @@ body.home-page .home-footer-brand .sudostacks-logo {
 }
 
 #config-panel .group {
+  width: 100%;
+  max-width: 100%;
   padding: 14px;
   border-radius: 14px;
 }
@@ -1675,6 +1904,12 @@ body.home-page .home-footer-brand .sudostacks-logo {
   background: rgba(148, 163, 184, 0.07);
 }
 
+#config-panel .field.inline.settings-advanced-control {
+  height: 40px;
+  min-height: 40px;
+  padding: 0 10px;
+}
+
 #config-panel .field.inline > span {
   text-transform: none;
   letter-spacing: 0.2px;
@@ -1745,6 +1980,49 @@ body.home-page .home-footer-brand .sudostacks-logo {
 }
 
 @media (max-width: 1200px) {
+  #config-panel {
+    --settings-main-inline-size: 100%;
+  }
+
+  #config-panel .settings-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  #config-panel .settings-sidebar {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    position: static;
+    top: auto;
+    padding: 10px;
+  }
+
+  #config-panel .settings-main {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  #config-panel .settings-header-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  #config-panel .settings-nav {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  #config-panel .settings-nav-link {
+    white-space: nowrap;
+    flex: 0 0 auto;
+  }
+
   #config-panel .grid.two {
     grid-template-columns: minmax(280px, 1fr);
   }
@@ -1809,6 +2087,27 @@ body.home-page .home-footer-brand .sudostacks-logo {
 }
 
 @media (max-width: 760px) {
+  #config-panel .settings-sidebar {
+    gap: 8px;
+  }
+
+  #config-panel .settings-mobile-jump {
+    display: block;
+  }
+
+  #config-panel .settings-header-actions {
+    width: 100%;
+  }
+
+  #config-panel .settings-nav {
+    display: none;
+  }
+
+  #config-panel .settings-actions-row {
+    position: static;
+    backdrop-filter: none;
+  }
+
   #config-panel .panel-header-row {
     flex-direction: column;
     align-items: flex-start;
@@ -1841,6 +2140,25 @@ body.home-page .home-footer-brand .sudostacks-logo {
 
 .music-meta-layout .row {
   align-items: flex-end;
+}
+
+#settings-tagging #music-meta-group,
+#settings-tagging #music-meta-details,
+#settings-tagging .music-meta-layout {
+  width: 100%;
+  max-width: 100%;
+}
+
+#settings-tagging .music-meta-layout .row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px 12px;
+  align-items: end;
+}
+
+#settings-tagging .music-meta-layout .row > .field {
+  width: 100%;
+  max-width: none;
 }
 
 .field span {
@@ -2360,8 +2678,8 @@ a[aria-disabled="true"] {
 }
 
 .playlist-row .playlist-cell-format {
-  flex: 0 1 140px;
-  max-width: 180px;
+  flex: 0 1 220px;
+  max-width: 260px;
 }
 
 .playlist-row .playlist-cell-mode {
@@ -2371,9 +2689,20 @@ a[aria-disabled="true"] {
 }
 
 .playlist-row .field.inline.playlist-cell-mode {
-  flex: 1 1 420px;
-  max-width: 500px;
-  min-width: 340px;
+  flex: 1 1 360px;
+  max-width: 440px;
+  min-width: 320px;
+}
+
+.playlist-row .field.inline.playlist-cell-format {
+  flex: 0 1 220px;
+  max-width: 260px;
+  min-width: 180px;
+}
+
+.playlist-row .field.inline.playlist-cell-format .playlist-format {
+  min-height: 40px;
+  height: 40px;
 }
 
 .playlist-row .field.inline {
@@ -2499,6 +2828,29 @@ body.home-page #config-panel .playlist-row .button.playlist-remove-button:hover 
 
 #add-playlist {
   margin-top: 10px;
+  background: #16a34a;
+  border: 1px solid #16a34a;
+  color: #ffffff;
+}
+
+#add-playlist:hover {
+  background: #15803d;
+  border-color: #15803d;
+  color: #ffffff;
+}
+
+body.home-page #config-panel #add-playlist,
+:root[data-theme="light"] body.home-page #config-panel #add-playlist {
+  background: #16a34a;
+  border-color: #16a34a;
+  color: #ffffff;
+}
+
+body.home-page #config-panel #add-playlist:hover,
+:root[data-theme="light"] body.home-page #config-panel #add-playlist:hover {
+  background: #15803d;
+  border-color: #15803d;
+  color: #ffffff;
 }
 
 #add-account {
