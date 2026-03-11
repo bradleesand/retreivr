@@ -5292,7 +5292,7 @@ async def _watcher_supervisor():
             startup_logged = True
         min_interval_minutes = policy.get("min_interval_minutes") or 5
         interval_seconds = max(60, int(min_interval_minutes * 60))
-        max_sleep_seconds = max(interval_seconds * 3, 900)
+        max_sleep_seconds = _watcher_next_poll_skew_limit_seconds(policy, watch)
         if delta_seconds > max_sleep_seconds:
             clamped = now + timedelta(seconds=min(30, interval_seconds))
             logging.warning(
@@ -5401,6 +5401,34 @@ def _watcher_supervisor_task_done(task: asyncio.Task):
     if not loop or loop.is_closed():
         return
     loop.create_task(_restart_watcher_supervisor())
+
+
+def _watcher_next_poll_skew_limit_seconds(policy, watch):
+    min_interval = 5
+    max_interval = 360
+    if isinstance(policy, dict):
+        try:
+            min_interval = int(policy.get("min_interval_minutes") or min_interval)
+        except Exception:
+            min_interval = 5
+        try:
+            max_interval = int(policy.get("max_interval_minutes") or max_interval)
+        except Exception:
+            max_interval = 360
+    min_interval = max(1, min_interval)
+    max_interval = max(min_interval, max_interval)
+    current_interval = None
+    if isinstance(watch, dict):
+        try:
+            current_interval = int(watch.get("current_interval_min"))
+        except Exception:
+            current_interval = None
+    if isinstance(current_interval, int):
+        effective_interval = max(min_interval, min(max_interval, current_interval))
+    else:
+        effective_interval = min_interval
+    # Skew should exceed plausible adaptive cadence by a wide margin.
+    return max(900, effective_interval * 60 * 3, max_interval * 60 * 2)
 
 
 async def _restart_watcher_supervisor(delay_seconds: int = 5):

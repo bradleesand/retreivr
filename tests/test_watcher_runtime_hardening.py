@@ -173,3 +173,30 @@ def test_restart_watcher_supervisor_respects_lock_recovery(monkeypatch) -> None:
     assert starts["count"] == 0
     assert module.app.state.watcher_status.get("state") == "disabled"
     assert module.app.state.watcher_status.get("batch_active") is False
+
+
+def test_watcher_skew_limit_allows_max_backoff_interval() -> None:
+    module = _load_api_main()
+    policy = {
+        "min_interval_minutes": 5,
+        "max_interval_minutes": 360,
+        "idle_backoff_factor": 2,
+        "active_reset_minutes": 5,
+        "downtime": {"enabled": False, "start": "23:00", "end": "09:00", "timezone": "UTC"},
+    }
+    watch = {"current_interval_min": 360}
+    skew_limit = module._watcher_next_poll_skew_limit_seconds(policy, watch)
+    assert skew_limit >= 21600
+
+
+def test_watcher_skew_limit_has_guardrail_without_watch_state() -> None:
+    module = _load_api_main()
+    policy = {
+        "min_interval_minutes": 5,
+        "max_interval_minutes": 360,
+        "idle_backoff_factor": 2,
+        "active_reset_minutes": 5,
+        "downtime": {"enabled": False, "start": "23:00", "end": "09:00", "timezone": "UTC"},
+    }
+    skew_limit = module._watcher_next_poll_skew_limit_seconds(policy, {})
+    assert skew_limit >= 900
