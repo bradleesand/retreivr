@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 import urllib.parse
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Thread
@@ -42,6 +43,46 @@ _SPOTIFY_PLAYLIST_RE = re.compile(
     r"^(?:https?://open\.spotify\.com/playlist/|spotify:playlist:)([A-Za-z0-9]+)"
 )
 _COMMUNITY_PUBLISH_MODES = {"off", "dry_run", "write_outbox"}
+_DEFAULT_CONFIG_TEMPLATE = None
+
+
+def _deep_copy_json_compatible(value):
+    return json.loads(json.dumps(value))
+
+
+def _load_default_config_template():
+    global _DEFAULT_CONFIG_TEMPLATE
+    if isinstance(_DEFAULT_CONFIG_TEMPLATE, dict):
+        return _deep_copy_json_compatible(_DEFAULT_CONFIG_TEMPLATE)
+
+    defaults = {}
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+        sample_path = repo_root / "config" / "config_sample.json"
+        with sample_path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            defaults = loaded
+    except Exception:
+        logging.warning("Failed to load config sample defaults", exc_info=True)
+    _DEFAULT_CONFIG_TEMPLATE = defaults if isinstance(defaults, dict) else {}
+    return _deep_copy_json_compatible(_DEFAULT_CONFIG_TEMPLATE)
+
+
+def _merge_missing_defaults(current, defaults):
+    if isinstance(current, dict) and isinstance(defaults, dict):
+        merged = {}
+        for key, default_value in defaults.items():
+            if key in current:
+                merged[key] = _merge_missing_defaults(current[key], default_value)
+            else:
+                merged[key] = _deep_copy_json_compatible(default_value)
+        for key, current_value in current.items():
+            if key not in merged:
+                merged[key] = current_value
+        return merged
+    # Lists and scalars: user value wins whenever present.
+    return current
 
 
 def _install_google_auth_filter():
@@ -259,7 +300,28 @@ def apply_config_defaults(config):
     if not isinstance(config, dict):
         return config
 
+    original = dict(config)
     normalized = dict(config)
+
+    template_defaults = _load_default_config_template()
+    if isinstance(template_defaults, dict) and template_defaults:
+        normalized = _merge_missing_defaults(normalized, template_defaults)
+
+    # Preserve prior behavior for upgrades: if watcher policy didn't exist before,
+    # keep downtime disabled by default instead of inheriting sample downtime=true.
+    if "watch_policy" not in original:
+        normalized["watch_policy"] = {
+            "min_interval_minutes": 5,
+            "max_interval_minutes": 360,
+            "idle_backoff_factor": 2,
+            "active_reset_minutes": 5,
+            "downtime": {
+                "enabled": False,
+                "start": "23:00",
+                "end": "09:00",
+                "timezone": "local",
+            },
+        }
 
     lookup_enabled = normalized.get("community_cache_lookup_enabled")
     legacy_lookup = normalized.get("community_cache_enabled")
