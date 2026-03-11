@@ -162,6 +162,8 @@ USER_PLAYLISTS_JOB_ID = "spotify_user_playlists_watch"
 SPOTIFY_PLAYLISTS_WATCH_JOB_ID = "spotify_playlists_watch"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
+WATCHER_BATCH_MAX_WAIT_SECONDS = 300
+WATCHER_TELEGRAM_COOLDOWN_SECONDS = 300
 COVER_ART_CACHE_TTL_SECONDS = 3600
 COVER_ART_NEGATIVE_CACHE_TTL_SECONDS = 120
 DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
@@ -5054,6 +5056,10 @@ async def _watcher_supervisor():
         "pending_playlists": set(),
         "last_detection_ts": None,
         "batch_active": False,
+        "batch_opened_ts": None,
+        "batch_opened_at": None,
+        "polled_playlists": set(),
+        "last_telegram_sent_ts": None,
     }
     while True:
         if not _ensure_watcher_lock_runtime():
@@ -5137,7 +5143,17 @@ async def _watcher_supervisor():
         if (pending_count and batch_state["last_detection_ts"] is not None
                 and not batch_state["batch_active"]):
             elapsed = time.monotonic() - batch_state["last_detection_ts"]
-            if elapsed >= WATCHER_QUIET_WINDOW_SECONDS:
+            opened_elapsed = (
+                time.monotonic() - batch_state["batch_opened_ts"]
+                if batch_state.get("batch_opened_ts") is not None
+                else elapsed
+            )
+            required_playlists = set(playlist_map.keys())
+            polled_playlists = set(batch_state.get("polled_playlists") or set())
+            all_playlists_polled = bool(required_playlists) and required_playlists.issubset(polled_playlists)
+            if elapsed >= WATCHER_QUIET_WINDOW_SECONDS and (
+                all_playlists_polled or opened_elapsed >= WATCHER_BATCH_MAX_WAIT_SECONDS
+            ):
                 _set_watcher_status(
                     "batch_ready",
                     pending_playlists_count=pending_count,
@@ -5145,8 +5161,13 @@ async def _watcher_supervisor():
                     batch_active=False,
                 )
                 logging.info(
-                    "Watcher: quiet window elapsed (%ss), preparing batch run",
+                    "Watcher: quiet window elapsed (%ss), preparing batch run all_playlists_polled=%s "
+                    "opened_elapsed=%ss required=%s polled=%s",
                     WATCHER_QUIET_WINDOW_SECONDS,
+                    all_playlists_polled,
+                    int(opened_elapsed),
+                    len(required_playlists),
+                    len(polled_playlists),
                 )
                 batch_state["batch_active"] = True
                 batch_playlists = list(batch_state["pending_playlists"])
@@ -5161,7 +5182,7 @@ async def _watcher_supervisor():
                     "Watcher: starting batch run playlists=%s",
                     ",".join(batch_playlists),
                 )
-                batch_started_at = datetime.now(timezone.utc).isoformat()
+                batch_started_at = batch_state.get("batch_opened_at") or datetime.now(timezone.utc).isoformat()
                 batch_job_ids: list[str] = []
                 for playlist_id in batch_playlists:
                     pl = playlist_map.get(playlist_id)
@@ -5197,17 +5218,18 @@ async def _watcher_supervisor():
                         logging.info("Watcher: batch deferred playlist_id=%s", playlist_id)
                     else:
                         logging.debug("Watcher: batch skipped (run active) playlist_id=%s", playlist_id)
+                attempted_job_ids = list(dict.fromkeys(batch_job_ids))
                 completed_job_ids: list[str] = []
                 failed_job_ids: list[str] = []
-                if batch_job_ids:
+                if attempted_job_ids:
                     conn = None
                     try:
                         conn = sqlite3.connect(app.state.paths.db_path)
                         cur = conn.cursor()
-                        placeholders = ",".join("?" for _ in batch_job_ids)
+                        placeholders = ",".join("?" for _ in attempted_job_ids)
                         cur.execute(
                             f"SELECT id, status FROM download_jobs WHERE id IN ({placeholders})",
-                            batch_job_ids,
+                            attempted_job_ids,
                         )
                         for raw_id, raw_status in cur.fetchall():
                             normalized = str(raw_status or "").strip().lower()
@@ -5225,7 +5247,7 @@ async def _watcher_supervisor():
                                 pass
                 attempted_success = len(completed_job_ids)
                 attempted_failed = len(failed_job_ids)
-                attempted_total = attempted_success + attempted_failed
+                attempted_total = len(attempted_job_ids)
                 logging.info(
                     "Watcher: batch complete playlists=%s attempted_total=%s attempted_success=%s attempted_failed=%s",
                     len(batch_playlists),
@@ -5234,23 +5256,37 @@ async def _watcher_supervisor():
                     attempted_failed,
                 )
                 if batch_playlists and attempted_total > 0:
-                    batch_finished_at = datetime.now(timezone.utc).isoformat()
-                    watcher_summary_status = SimpleNamespace(
-                        run_successes=list(completed_job_ids) + list(failed_job_ids),
-                        run_failures=0,
-                    )
-                    result = notify_run_summary(
-                        config,
-                        run_type="watcher",
-                        status=watcher_summary_status,
-                        started_at=batch_started_at,
-                        finished_at=batch_finished_at,
-                    )
-                    logging.info(
-                        "Watcher: batch telegram dispatched sent=%s attempted=%s",
-                        bool(result.get("sent")) if isinstance(result, dict) else False,
-                        int(result.get("attempted") or 0) if isinstance(result, dict) else 0,
-                    )
+                    cooldown_remaining = None
+                    if batch_state.get("last_telegram_sent_ts") is not None:
+                        elapsed_since_tg = time.monotonic() - batch_state["last_telegram_sent_ts"]
+                        if elapsed_since_tg < WATCHER_TELEGRAM_COOLDOWN_SECONDS:
+                            cooldown_remaining = int(WATCHER_TELEGRAM_COOLDOWN_SECONDS - elapsed_since_tg)
+                    if cooldown_remaining is not None and cooldown_remaining > 0:
+                        logging.info(
+                            "Watcher: batch telegram skipped (cooldown) remaining=%ss attempted=%s",
+                            cooldown_remaining,
+                            attempted_total,
+                        )
+                    else:
+                        batch_finished_at = datetime.now(timezone.utc).isoformat()
+                        watcher_summary_status = SimpleNamespace(
+                            run_successes=list(attempted_job_ids),
+                            run_failures=0,
+                        )
+                        result = notify_run_summary(
+                            config,
+                            run_type="watcher",
+                            status=watcher_summary_status,
+                            started_at=batch_started_at,
+                            finished_at=batch_finished_at,
+                        )
+                        if isinstance(result, dict) and bool(result.get("sent")):
+                            batch_state["last_telegram_sent_ts"] = time.monotonic()
+                        logging.info(
+                            "Watcher: batch telegram dispatched sent=%s attempted=%s",
+                            bool(result.get("sent")) if isinstance(result, dict) else False,
+                            int(result.get("attempted") or 0) if isinstance(result, dict) else 0,
+                        )
                 elif batch_playlists:
                     logging.info(
                         "Watcher: batch telegram skipped (no attempted downloads) playlists=%s",
@@ -5258,6 +5294,9 @@ async def _watcher_supervisor():
                     )
                 batch_state["batch_active"] = False
                 batch_state["last_detection_ts"] = None
+                batch_state["batch_opened_ts"] = None
+                batch_state["batch_opened_at"] = None
+                batch_state["polled_playlists"] = set()
                 _set_watcher_status("idle", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
                 logging.info("Watcher: batch state reset, resuming monitoring")
                 continue
@@ -5343,7 +5382,18 @@ async def _watcher_supervisor():
             continue
 
         candidates.sort(key=lambda item: item[0])
-        next_poll_at, pl, watch = candidates[0]
+        selected = candidates[0]
+        if pending_count and not batch_state["batch_active"]:
+            polled = set(batch_state.get("polled_playlists") or set())
+            unpolled = []
+            for item in candidates:
+                item_playlist_key = item[1].get("playlist_id") or item[1].get("id")
+                item_playlist_id = extract_playlist_id(item_playlist_key) or item_playlist_key
+                if item_playlist_id and item_playlist_id not in polled:
+                    unpolled.append(item)
+            if unpolled:
+                selected = sorted(unpolled, key=lambda item: item[0])[0]
+        next_poll_at, pl, watch = selected
         if last_candidate_state != "available":
             logging.info("Watcher: candidates available")
             last_candidate_state = "available"
@@ -5451,6 +5501,8 @@ async def _watcher_supervisor():
             else {}
         )
         pending_before = len(batch_state["pending_playlists"])
+        polled_playlist_key = pl.get("playlist_id") or pl.get("id")
+        polled_playlist_id = extract_playlist_id(polled_playlist_key) or polled_playlist_key
         _set_watcher_status(
             "polling",
             last_poll_ts=_format_iso(now),
@@ -5460,6 +5512,19 @@ async def _watcher_supervisor():
         )
         await _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batch_state)
         pending_after = len(batch_state["pending_playlists"])
+        if pending_after > 0 and polled_playlist_id:
+            polled_set = batch_state.get("polled_playlists")
+            if not isinstance(polled_set, set):
+                polled_set = set()
+                batch_state["polled_playlists"] = polled_set
+            polled_set.add(polled_playlist_id)
+            if batch_state.get("batch_opened_ts") is None:
+                batch_state["batch_opened_ts"] = time.monotonic()
+                batch_state["batch_opened_at"] = datetime.now(timezone.utc).isoformat()
+        if pending_after == 0 and not batch_state["batch_active"]:
+            batch_state["batch_opened_ts"] = None
+            batch_state["batch_opened_at"] = None
+            batch_state["polled_playlists"] = set()
         if pending_after > pending_before:
             logging.info("Watcher poll complete: updates detected")
         else:
