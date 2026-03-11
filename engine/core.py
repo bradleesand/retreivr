@@ -106,7 +106,7 @@ def _install_google_auth_filter():
         match = _GOOGLE_AUTH_RETRY.search(msg)
         if match:
             attempt, total = match.groups()
-            record.msg = f"Signing into Google OAuth. Attempt {attempt}/{total}."
+            record.msg = f"Refreshing credentials - Attempt {attempt}/{total}"
             record.args = ()
         return True
 
@@ -865,9 +865,9 @@ def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=Non
                 try:
                     creds.refresh(Request())
                     if name in refresh_log_state:
-                        logging.debug("OAuth refreshed for account=%s", name)
+                        logging.debug("[Success] Credentials Refreshed account=%s", name)
                     else:
-                        logging.info("OAuth refreshed for account=%s", name)
+                        logging.info("[Success] Credentials Refreshed account=%s", name)
                         refresh_log_state.add(name)
                     cached["client"] = youtube_service(creds)
                 except RefreshError as exc:
@@ -884,9 +884,9 @@ def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=Non
                 try:
                     creds.refresh(Request())
                     if name in refresh_log_state:
-                        logging.debug("OAuth refreshed for account=%s", name)
+                        logging.debug("[Success] Credentials Refreshed account=%s", name)
                     else:
-                        logging.info("OAuth refreshed for account=%s", name)
+                        logging.info("[Success] Credentials Refreshed account=%s", name)
                         refresh_log_state.add(name)
                 except RefreshError as exc:
                     logging.error("OAuth refresh failed for account %s: %s", name, exc)
