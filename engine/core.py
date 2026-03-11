@@ -275,6 +275,10 @@ def apply_config_defaults(config):
     normalized.setdefault("community_cache_publish_min_score", 0.78)
     normalized.setdefault("community_cache_publish_outbox_dir", "")
     normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
+    normalized.setdefault("music_skip_metadata_probe", True)
+    normalized.setdefault("music_candidate_cooldown_enabled", True)
+    normalized.setdefault("music_candidate_cooldown_seconds", 21600)
+    normalized.setdefault("music_candidate_cooldown_min_failures", 1)
 
     return normalized
 
@@ -372,6 +376,18 @@ def validate_config(config):
     cookie_file = config.get("yt_dlp_cookies")
     if cookie_file is not None and not isinstance(cookie_file, str):
         errors.append("yt_dlp_cookies must be a string")
+    music_skip_probe = config.get("music_skip_metadata_probe")
+    if music_skip_probe is not None and not isinstance(music_skip_probe, bool):
+        errors.append("music_skip_metadata_probe must be true/false")
+    music_candidate_cooldown_enabled = config.get("music_candidate_cooldown_enabled")
+    if music_candidate_cooldown_enabled is not None and not isinstance(music_candidate_cooldown_enabled, bool):
+        errors.append("music_candidate_cooldown_enabled must be true/false")
+    music_candidate_cooldown_seconds = config.get("music_candidate_cooldown_seconds")
+    if music_candidate_cooldown_seconds is not None and not isinstance(music_candidate_cooldown_seconds, int):
+        errors.append("music_candidate_cooldown_seconds must be an integer")
+    music_candidate_cooldown_min_failures = config.get("music_candidate_cooldown_min_failures")
+    if music_candidate_cooldown_min_failures is not None and not isinstance(music_candidate_cooldown_min_failures, int):
+        errors.append("music_candidate_cooldown_min_failures must be an integer")
 
     youtube_cfg = config.get("youtube")
     if youtube_cfg is not None:
