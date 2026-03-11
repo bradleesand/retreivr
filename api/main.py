@@ -164,6 +164,8 @@ DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
 WATCHER_BATCH_MAX_WAIT_SECONDS = 300
 WATCHER_TELEGRAM_COOLDOWN_SECONDS = 300
+WATCHER_SUMMARY_WAIT_SECONDS = 900
+WATCHER_SUMMARY_POLL_SECONDS = 2
 COVER_ART_CACHE_TTL_SECONDS = 3600
 COVER_ART_NEGATIVE_CACHE_TTL_SECONDS = 120
 DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
@@ -5238,29 +5240,50 @@ async def _watcher_supervisor():
                 completed_job_ids: list[str] = []
                 failed_job_ids: list[str] = []
                 if attempted_job_ids:
-                    conn = None
-                    try:
-                        conn = sqlite3.connect(app.state.paths.db_path)
-                        cur = conn.cursor()
-                        placeholders = ",".join("?" for _ in attempted_job_ids)
-                        cur.execute(
-                            f"SELECT id, status FROM download_jobs WHERE id IN ({placeholders})",
-                            attempted_job_ids,
-                        )
-                        for raw_id, raw_status in cur.fetchall():
-                            normalized = str(raw_status or "").strip().lower()
-                            if normalized == "completed":
-                                completed_job_ids.append(str(raw_id))
-                            elif normalized in {"failed", "cancelled"}:
-                                failed_job_ids.append(str(raw_id))
-                    except Exception:
-                        logging.exception("Watcher batch attempted-summary query failed")
-                    finally:
-                        if conn is not None:
-                            try:
-                                conn.close()
-                            except Exception:
-                                pass
+                    pending_job_ids = set(attempted_job_ids)
+                    summary_deadline = time.monotonic() + WATCHER_SUMMARY_WAIT_SECONDS
+                    while pending_job_ids:
+                        conn = None
+                        try:
+                            conn = sqlite3.connect(app.state.paths.db_path)
+                            cur = conn.cursor()
+                            placeholders = ",".join("?" for _ in attempted_job_ids)
+                            cur.execute(
+                                f"SELECT id, status FROM download_jobs WHERE id IN ({placeholders})",
+                                attempted_job_ids,
+                            )
+                            seen_terminal: set[str] = set()
+                            for raw_id, raw_status in cur.fetchall():
+                                job_id = str(raw_id)
+                                normalized = str(raw_status or "").strip().lower()
+                                if normalized == "completed":
+                                    completed_job_ids.append(job_id)
+                                    seen_terminal.add(job_id)
+                                elif normalized in {"failed", "cancelled"}:
+                                    failed_job_ids.append(job_id)
+                                    seen_terminal.add(job_id)
+                            completed_job_ids = list(dict.fromkeys(completed_job_ids))
+                            failed_job_ids = list(dict.fromkeys(failed_job_ids))
+                            pending_job_ids = set(attempted_job_ids) - seen_terminal
+                        except Exception:
+                            logging.exception("Watcher batch attempted-summary query failed")
+                            break
+                        finally:
+                            if conn is not None:
+                                try:
+                                    conn.close()
+                                except Exception:
+                                    pass
+                        if not pending_job_ids:
+                            break
+                        if time.monotonic() >= summary_deadline:
+                            logging.info(
+                                "Watcher: summary wait timeout pending_jobs=%s waited=%ss",
+                                len(pending_job_ids),
+                                WATCHER_SUMMARY_WAIT_SECONDS,
+                            )
+                            break
+                        await asyncio.sleep(WATCHER_SUMMARY_POLL_SECONDS)
                 attempted_success = len(completed_job_ids)
                 attempted_failed = len(failed_job_ids)
                 attempted_total = len(attempted_job_ids)
@@ -5285,8 +5308,13 @@ async def _watcher_supervisor():
                         )
                     else:
                         batch_finished_at = datetime.now(timezone.utc).isoformat()
+                        summary_job_ids = (
+                            list(completed_job_ids) + list(failed_job_ids)
+                            if (completed_job_ids or failed_job_ids)
+                            else list(attempted_job_ids)
+                        )
                         watcher_summary_status = SimpleNamespace(
-                            run_successes=list(attempted_job_ids),
+                            run_successes=summary_job_ids,
                             run_failures=0,
                         )
                         result = notify_run_summary(
