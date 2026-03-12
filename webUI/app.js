@@ -7804,6 +7804,36 @@ async function updateYtdlp() {
   }
 }
 
+async function reconcileMusicLibrary() {
+  const button = $("#library-reconcile-button");
+  const messageEl = $("#library-reconcile-message");
+  const originalLabel = button ? button.textContent : "Reconcile Music Library";
+  try {
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Reconciling...";
+    }
+    setNotice(messageEl, "Scanning existing music files and backfilling database entries...", false);
+    const data = await fetchJson("/api/library/reconcile", { method: "POST" });
+    const summary = [
+      `${data.jobs_inserted || 0} jobs`,
+      `${data.history_inserted || 0} history`,
+      `${data.isrc_records_inserted || 0} ISRC`,
+      `${data.skipped_existing_jobs || 0} already known`,
+      `${data.skipped_missing_identity || 0} missing tags`,
+      `${data.errors || 0} errors`,
+    ].join(" • ");
+    setNotice(messageEl, `Library reconcile completed: ${summary}.`, false);
+  } catch (err) {
+    setNotice(messageEl, `Library reconcile failed: ${err.message}`, true);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+}
+
 async function startRun(payload, opts = {}) {
   const messageEl = opts.messageEl || $("#home-search-message");
   try {
@@ -8450,6 +8480,10 @@ function bindEvents() {
   const spotifyDisconnectBtn = $("#spotify-disconnect-btn");
   if (spotifyDisconnectBtn) {
     spotifyDisconnectBtn.addEventListener("click", disconnectSpotify);
+  }
+  const libraryReconcileButton = $("#library-reconcile-button");
+  if (libraryReconcileButton) {
+    libraryReconcileButton.addEventListener("click", reconcileMusicLibrary);
   }
 
   $("#add-account").addEventListener("click", () => addAccountRow("", {}));

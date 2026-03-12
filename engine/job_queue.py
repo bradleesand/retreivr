@@ -591,6 +591,17 @@ def _extract_music_binding_ids(job: DownloadJob) -> tuple[str | None, str | None
     ).strip() or None
     return recording_mbid, release_mbid
 
+
+def _candidate_canonical_ids(canonical_id: str | None) -> list[str]:
+    cid = str(canonical_id or "").strip()
+    if not cid:
+        return []
+    candidates = [cid]
+    parts = cid.split(":")
+    if len(parts) == 5 and parts[0] == "music_track" and parts[2] != "unknown-release":
+        candidates.append(f"{parts[0]}:{parts[1]}:unknown-release:{parts[3]}:{parts[4]}")
+    return candidates
+
 class DownloadJobStore:
     def __init__(self, db_path):
         self.db_path = db_path
@@ -869,8 +880,10 @@ class DownloadJobStore:
             params = []
             dest_clause = "resolved_destination=?" if destination is not None else "resolved_destination IS NULL"
             if canonical_id:
-                clauses.append(f"(canonical_id=? AND {dest_clause})")
-                params.append(canonical_id)
+                candidate_ids = _candidate_canonical_ids(canonical_id)
+                canonical_placeholders = ", ".join("?" for _ in candidate_ids)
+                clauses.append(f"(canonical_id IN ({canonical_placeholders}) AND {dest_clause})")
+                params.extend(candidate_ids)
                 if destination is not None:
                     params.append(destination)
             if url:
@@ -907,20 +920,23 @@ class DownloadJobStore:
             conn.close()
 
     def get_job_by_canonical_id(self, canonical_id):
-        cid = str(canonical_id or "").strip()
-        if not cid:
+        candidate_ids = _candidate_canonical_ids(canonical_id)
+        if not candidate_ids:
             return None
         conn = self._connect()
         try:
             cur = conn.cursor()
+            placeholders = ", ".join("?" for _ in candidate_ids)
             cur.execute(
                 """
                 SELECT * FROM download_jobs
-                WHERE canonical_id=?
+                WHERE canonical_id IN ("""
+                + placeholders
+                + """)
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                (cid,),
+                tuple(candidate_ids),
             )
             row = cur.fetchone()
             if not row:

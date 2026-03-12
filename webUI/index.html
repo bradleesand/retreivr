@@ -622,6 +622,18 @@
                   <div class="notice">Final format currently applies to video output; music uses <code>music_final_format</code> from config.json.</div>
                 </div>
               </div>
+              <div class="group">
+                <div class="group-title">Library Reconcile</div>
+                <div class="grid two">
+                  <div class="notice">
+                    Scan music files under the configured downloads/music folders and backfill database entries for existing tracks.
+                  </div>
+                  <div class="row">
+                    <button id="library-reconcile-button" class="button ghost" type="button">Reconcile Music Library</button>
+                  </div>
+                </div>
+                <div id="library-reconcile-message" class="notice" role="status"></div>
+              </div>
               <div class="group" data-settings-level="advanced">
                 <div class="group-title">Filename Templates</div>
                 <div class="grid two runtime-extras-grid">

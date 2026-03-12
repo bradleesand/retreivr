@@ -145,6 +145,7 @@ from scheduler.jobs.spotify_playlist_watch import (
 from metadata.importers.dispatcher import import_playlist as import_playlist_file_bytes
 from engine.import_pipeline import process_imported_tracks
 from engine.import_m3u_builder import write_import_m3u_from_batch
+from library.reconcile import reconcile_music_library
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 2
@@ -8695,6 +8696,16 @@ async def api_put_config(payload: dict = Body(...)):
         await _disable_watcher_runtime("config updated (enable_watcher=false)")
 
     return {"status": "updated"}
+
+
+@app.post("/api/library/reconcile")
+async def api_reconcile_library():
+    config = _read_config_or_404()
+    summary = reconcile_music_library(
+        db_path=app.state.paths.db_path,
+        config=config if isinstance(config, dict) else {},
+    )
+    return safe_json({"status": "completed", **summary})
 
 
 @app.get("/api/history")
