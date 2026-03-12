@@ -31,10 +31,11 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Used for intentional media consumption... avoid getting sucked into the algorithms
 - Optional Telegram summaries
 
-## 0.9.6 Highlights
-- Runtime release workflow for versioned GHCR publishing
-- Minimal runtime bundle zip assets for simplified Docker deployment
-- Music matching robustness improvements across discovery/scoring/retry paths
+## 0.9.11 Highlights
+- Provenance tags embedded across music and video download paths
+- Library Reconcile workflow for importing existing media on disk into Retreivr state
+- Stronger destination/default behavior across Video, Music Video, and Music modes
+- Album-download destination handling fixed for Music workflows
 
 ---
 
@@ -123,7 +124,7 @@ Related controls:
 ---
 
 ## Upgrade Notes
-If you are upgrading to `0.9.6`, pull latest image and restart:
+If you are upgrading to `0.9.11`, pull the latest image and restart:
 ```bash
 docker compose -f docker/docker-compose.yml pull
 docker compose -f docker/docker-compose.yml up -d

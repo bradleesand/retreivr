@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.11 — Provenance + Reconcile + Defaults Hardening
+
+### High-Level
+This release is a practical hardening step toward `v1.0.0`. It strengthens file traceability, expands library reconciliation beyond music-only workflows, and tightens destination/default behavior so operators can move existing libraries into Retreivr with less duplicate risk and less ambiguity.
+
+### Added
+- Retreivr provenance tags embedded into music downloads and video/music-video downloads.
+- Library reconcile workflow in Settings for backfilling known media on disk into Retreivr database state.
+- Operator guide for `v1.0` expectations and download-default behavior.
+- Mode-specific Home default format controls for Video, Music Video, and Music workflows.
+
+### Changed
+- Library reconcile now scans audio and video files, not only music files.
+- Home destination and format defaults were tightened so Video, Music Video, and Music modes resolve more predictably.
+- Dedicated music-search defaults now align better with the newer Home music destination model.
+- Version resolution for provenance/runtime metadata now prefers explicit runtime version, then installed package metadata, then project version from source checkout.
+
+### Fixed
+- Full-album music downloads now honor the selected Music destination instead of falling back to the single-download folder.
+- Reconciled music can now participate in stronger duplicate prevention through global ISRC awareness and canonical-ID fallback matching.
+- Settings download-default layout was cleaned up so destinations and format selectors are clearer and mode-specific.
+
 ## v0.9.10 — Watcher/Telegram Hardening + Config Upgrade Safety
 
 ### High-Level
