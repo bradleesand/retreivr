@@ -1,15 +1,51 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
+from pathlib import Path
 from typing import Any
 
 
-def get_retreivr_version() -> str:
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _normalize_version(value: Any) -> str:
+    text = str(value or "").strip()
+    return text if text and text.lower() != "unknown" else ""
+
+
+def _read_version_from_pyproject() -> str:
+    pyproject_path = _REPO_ROOT / "pyproject.toml"
     try:
-        return str(importlib_metadata.version("retreivr")).strip() or "unknown"
+        content = pyproject_path.read_text(encoding="utf-8")
     except Exception:
-        return "unknown"
+        return ""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("version"):
+            continue
+        _, _, raw_value = stripped.partition("=")
+        normalized = _normalize_version(raw_value.strip().strip("\"'"))
+        if normalized:
+            return normalized
+    return ""
+
+
+def get_retreivr_version() -> str:
+    env_version = _normalize_version(os.environ.get("RETREIVR_VERSION"))
+    if env_version:
+        return env_version
+    try:
+        package_version = _normalize_version(importlib_metadata.version("retreivr"))
+        if package_version:
+            return package_version
+    except Exception:
+        pass
+    pyproject_version = _read_version_from_pyproject()
+    if pyproject_version:
+        return pyproject_version
+    return "unknown"
 
 
 def utc_now_iso() -> str:

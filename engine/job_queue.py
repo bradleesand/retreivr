@@ -35,7 +35,7 @@ from media.path_builder import build_music_relative_layout
 from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
 from metadata.services.musicbrainz_service import get_musicbrainz_service
-from library.provenance import build_file_provenance
+from library.provenance import build_file_provenance, get_retreivr_version
 
 try:
     from engine.musicbrainz_binding import _normalize_title_for_mb_lookup, resolve_best_mb_pair
@@ -2054,7 +2054,7 @@ class DownloadWorkerEngine:
                         "selected_score": float(selected_score),
                         "duration_delta_ms": runtime_meta.get("selected_duration_delta_ms"),
                         "final_path": str(final_path or "").strip() or None,
-                        "retreivr_version": str(os.environ.get("RETREIVR_VERSION", "0.0.0")).strip(),
+                        "retreivr_version": get_retreivr_version(),
                     }
                     valid, validation_reason = _validate_community_publish_proposal(proposal)
                     if not valid:

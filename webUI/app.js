@@ -4863,6 +4863,7 @@ function renderHomeResultItem(item) {
     header.appendChild(sourceTag);
   }
   card.appendChild(header);
+  updateHomeResultDuration(card, item);
   // Remove destination line for Home page result cards (visual polish)
   // No destination line
   const candidateList = document.createElement("div");
@@ -4893,6 +4894,7 @@ function updateHomeResultItemCard(card, item) {
   } else if (header) {
     header.appendChild(newBadge);
   }
+  updateHomeResultDuration(card, item);
   const resolvedDestination = state.homeRequestContext[item.request_id]?.request?.resolved_destination;
   let destinationEl = card.querySelector(".home-result-destination");
   if (resolvedDestination) {
@@ -4954,6 +4956,12 @@ async function loadHomeCandidates(item, container, preloadedCandidates = null) {
     if (!candidates.length) {
       placeholder.textContent = "Searching…";
       return;
+    }
+    const card = item.id
+      ? document.querySelector(`.home-result-card[data-item-id="${CSS.escape(item.id)}"]`)
+      : null;
+    if (card) {
+      updateHomeResultDuration(card, item, candidates);
     }
     if (placeholder.parentElement) {
       placeholder.remove();
@@ -5181,6 +5189,48 @@ function renderHomeCandidateRow(candidate, item) {
   }
 
   return row;
+}
+
+function resolveHomeResultDurationSeconds(item, candidates = []) {
+  const itemDuration = Number(item?.duration_sec);
+  if (Number.isFinite(itemDuration) && itemDuration > 0) {
+    return itemDuration;
+  }
+  let bestCandidate = null;
+  candidates.forEach((candidate) => {
+    const candidateDuration = Number(candidate?.duration_sec);
+    if (!Number.isFinite(candidateDuration) || candidateDuration <= 0) {
+      return;
+    }
+    const candidateScore = Number(candidate?.final_score);
+    const bestScore = Number(bestCandidate?.final_score);
+    if (!bestCandidate || (Number.isFinite(candidateScore) && (!Number.isFinite(bestScore) || candidateScore > bestScore))) {
+      bestCandidate = candidate;
+    }
+  });
+  const bestDuration = Number(bestCandidate?.duration_sec);
+  return Number.isFinite(bestDuration) && bestDuration > 0 ? bestDuration : null;
+}
+
+function updateHomeResultDuration(card, item, candidates = []) {
+  if (!card) return;
+  const seconds = resolveHomeResultDurationSeconds(item, candidates);
+  let metaEl = card.querySelector(".home-result-meta");
+  if (!seconds) {
+    metaEl?.remove();
+    return;
+  }
+  if (!metaEl) {
+    metaEl = document.createElement("div");
+    metaEl.className = "home-result-meta";
+    const candidateList = card.querySelector(".home-candidate-list");
+    if (candidateList) {
+      card.insertBefore(metaEl, candidateList);
+    } else {
+      card.appendChild(metaEl);
+    }
+  }
+  metaEl.textContent = `Length: ${formatDuration(seconds)}`;
 }
 
 function renderHomeDirectUrlCard(preview, status, options = {}) {

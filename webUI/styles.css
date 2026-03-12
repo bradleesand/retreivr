@@ -982,6 +982,12 @@ body.home-page .home-source-panel .home-source-pill.selected {
   margin-top: -4px;
 }
 
+.home-result-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: -4px;
+}
+
 .home-result-badge {
   padding: 4px 12px;
   border-radius: 16px;
