@@ -595,7 +595,14 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
     return summary
 
 
-def _run_playlist_import_job(job_id: str, filename: str, payload: bytes, media_mode: str = "music") -> None:
+def _run_playlist_import_job(
+    job_id: str,
+    filename: str,
+    payload: bytes,
+    media_mode: str = "music",
+    destination_dir: str | None = None,
+    final_format: str | None = None,
+) -> None:
     try:
         _update_playlist_import_job(
             job_id,
@@ -656,8 +663,8 @@ def _run_playlist_import_job(job_id: str, filename: str, payload: bytes, media_m
                 "app_config": runtime_config,
                 "media_mode": str(media_mode or "music"),
                 "base_dir": app.state.paths.single_downloads_dir,
-                "destination_dir": None,
-                "final_format": runtime_config.get("final_format"),
+                "destination_dir": str(destination_dir or "").strip() or None,
+                "final_format": str(final_format or "").strip() or None,
                 "progress_callback": _progress,
             },
         )
@@ -6383,6 +6390,8 @@ async def create_search_request(request: dict = Body(...)):
 async def import_playlist(
     file: UploadFile = File(...),
     media_mode: str = Form("music"),
+    destination_dir: str | None = Form(None),
+    final_format: str | None = Form(None),
 ):
     filename = str(getattr(file, "filename", "") or "").strip()
     ext = Path(filename).suffix.lower()
@@ -6427,7 +6436,14 @@ async def import_playlist(
 
     thread = threading.Thread(
         target=_run_playlist_import_job,
-        args=(job_id, filename, payload, str(media_mode or "music").strip().lower() or "music"),
+        args=(
+            job_id,
+            filename,
+            payload,
+            str(media_mode or "music").strip().lower() or "music",
+            str(destination_dir or "").strip() or None,
+            str(final_format or "").strip() or None,
+        ),
         name=f"playlist-import-{job_id[:8]}",
         daemon=True,
     )
@@ -6913,6 +6929,7 @@ def download_full_album(data: dict):
         raise HTTPException(status_code=400, detail="release_group_mbid required")
     force_redownload = bool((data or {}).get("force_redownload"))
     destination = str((data or {}).get("destination") or (data or {}).get("destination_dir") or "").strip() or None
+    final_format = str((data or {}).get("final_format") or "").strip() or None
     requested_media_mode = str((data or {}).get("media_mode") or "").strip().lower()
     if requested_media_mode not in {"music", "music_video"}:
         requested_media_mode = "music"
@@ -7137,6 +7154,7 @@ def download_full_album(data: dict):
                     "origin": "music_album",
                     "origin_id": album_run_id,
                     "destination": destination,
+                    "final_format": final_format,
                     "media_mode": requested_media_mode,
                     "media_intent": "music_track",
                     "force_redownload": force_redownload,

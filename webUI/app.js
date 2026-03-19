@@ -6320,6 +6320,14 @@ async function importHomePlaylistFile() {
   formData.append("file", file, file.name);
   if (state.homeMusicMode) {
     formData.append("media_mode", state.homeMediaMode === "music_video" ? "music_video" : "music");
+    const destinationValue = getMusicModeDestinationValue();
+    const finalFormat = getMusicModeFinalFormatOverride();
+    if (destinationValue) {
+      formData.append("destination_dir", destinationValue);
+    }
+    if (finalFormat) {
+      formData.append("final_format", finalFormat);
+    }
   }
 
   if (summaryEl) {
@@ -6350,6 +6358,7 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
   const formatOverride = $("#home-format")?.value.trim();
   const mediaMode = state.homeMediaMode || "video";
   const treatAsMusic = mediaMode === "music";
+  const effectiveFormatOverride = treatAsMusic ? getMusicModeFinalFormatOverride() : formatOverride;
   const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   const playlistId = extractPlaylistIdFromUrl(url);
   if (playlistId) {
@@ -6373,8 +6382,8 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
   if (destination && deliveryMode !== "client") {
     payload.destination = destination;
   }
-  if (formatOverride) {
-    payload.final_format_override = formatOverride;
+  if (effectiveFormatOverride) {
+    payload.final_format_override = effectiveFormatOverride;
   }
   payload.music_mode = treatAsMusic;
   payload.media_mode = mediaMode;

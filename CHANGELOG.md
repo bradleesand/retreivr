@@ -15,6 +15,9 @@ This release tightens the finalization path for music downloads so partially pro
 ### Fixed
 - Reduced the chance of exposing an untagged or partially processed music file at the final destination when tagging or post-processing fails.
 - Cross-filesystem finalization no longer falls back to a visible copy directly into the final destination path before completion.
+- Home playlist file imports in Music and Music Video modes now honor the active destination and mode-specific format defaults instead of falling back to generic download locations.
+- Music Mode full-album downloads now preserve the selected audio format (for example `m4a`) across per-track enqueue expansion.
+- Music Mode direct-URL downloads now read the correct mode-specific format selector instead of the generic video format control.
 
 ## v0.9.11 — Provenance + Reconcile + Defaults Hardening
 
