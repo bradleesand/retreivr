@@ -34,6 +34,7 @@ import time
 from types import SimpleNamespace
 import requests
 import musicbrainzngs
+import socket
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -5615,7 +5616,10 @@ def _watcher_supervisor_task_done(task: asyncio.Task):
     exc = task.exception()
     if exc is None:
         return
-    logging.exception("Watcher supervisor crashed; scheduling restart", exc_info=(type(exc), exc, exc.__traceback__))
+    if _is_recoverable_watcher_exception(exc):
+        logging.warning("Watcher supervisor hit recoverable error; scheduling restart: %s", exc)
+    else:
+        logging.exception("Watcher supervisor crashed; scheduling restart", exc_info=(type(exc), exc, exc.__traceback__))
     app.state.watcher_task = None
     # Prevent stale UI/runtime state after a crash.
     _set_watcher_status("recovering", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
@@ -5626,6 +5630,21 @@ def _watcher_supervisor_task_done(task: asyncio.Task):
     if not loop or loop.is_closed():
         return
     loop.create_task(_restart_watcher_supervisor())
+
+
+def _is_recoverable_watcher_exception(exc: Exception) -> bool:
+    if isinstance(exc, (socket.gaierror, TimeoutError, ConnectionError)):
+        return True
+    text = str(exc or "").strip().lower()
+    if not text:
+        return False
+    return (
+        "remote end closed connection without response" in text
+        or "no address associated with hostname" in text
+        or "temporary failure" in text
+        or "timed out" in text
+        or "connection reset" in text
+    )
 
 
 def _watcher_next_poll_skew_limit_seconds(policy, watch):

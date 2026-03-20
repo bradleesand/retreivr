@@ -557,6 +557,21 @@ def is_music_track_intent(value):
         return False
     return str(value).strip().lower() in {"music_track", "music_track_review"}
 
+
+def _resolve_job_output_dir(output_dir, paths, *, media_intent=None):
+    raw = str(output_dir or "").strip()
+    if not raw:
+        return paths.single_downloads_dir
+    normalized_intent = str(media_intent or "").strip().lower()
+    if normalized_intent == "music_track_review":
+        review_root = str(getattr(paths, "review_queue_files_dir", "") or "").strip()
+        if review_root:
+            try:
+                return resolve_dir(raw, review_root)
+            except ValueError:
+                pass
+    return resolve_dir(raw, paths.single_downloads_dir)
+
 def _normalize_audio_format(value: str | None) -> str | None:
     if not value:
         return None
@@ -3975,7 +3990,7 @@ class YouTubeAdapter:
         filename_template = output_template.get("filename_template")
         audio_template = output_template.get("audio_filename_template")
 
-        resolved_dir = resolve_dir(output_dir, paths.single_downloads_dir)
+        resolved_dir = _resolve_job_output_dir(output_dir, paths, media_intent=media_intent)
         temp_dir = os.path.join(paths.temp_downloads_dir, job.id)
         os.makedirs(temp_dir, exist_ok=True)
 

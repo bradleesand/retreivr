@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 import time
+import socket
 
 from . import matcher
 from .providers import acoustid as acoustid_provider
@@ -22,8 +23,11 @@ class MetadataWorker(threading.Thread):
             item = self._queue.get()
             try:
                 _process_item(item)
-            except Exception:
-                logging.exception("Music metadata worker failed")
+            except Exception as exc:
+                if _is_recoverable_metadata_error(exc):
+                    logging.warning("Music metadata worker skipped recoverable error: %s", exc)
+                else:
+                    logging.exception("Music metadata worker failed")
             finally:
                 self._queue.task_done()
             rate_limit = item.get("config", {}).get("rate_limit_seconds", 1.5)
@@ -33,6 +37,21 @@ class MetadataWorker(threading.Thread):
                 rate = 1.5
             if rate > 0:
                 time.sleep(rate)
+
+
+def _is_recoverable_metadata_error(exc: Exception) -> bool:
+    if isinstance(exc, (FileNotFoundError, TimeoutError, socket.gaierror)):
+        return True
+    text = str(exc or "").strip().lower()
+    if not text:
+        return False
+    return (
+        "max() arg is an empty sequence" in text
+        or "no candidates" in text
+        or "timed out" in text
+        or "temporary failure" in text
+        or "name or service not known" in text
+    )
 
 
 def _process_item(item):

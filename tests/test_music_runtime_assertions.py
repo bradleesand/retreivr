@@ -977,6 +977,25 @@ def test_import_failure_enqueues_review_for_likely_artist_metadata_mismatch(monk
         assert captured_enqueue.get("output_template", {}).get("review_parent_job_id") == "job-import-artist-mismatch-1"
 
 
+def test_review_job_output_dir_allows_internal_review_root() -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=str(Path(tmp) / "db.sqlite"),
+            temp_downloads_dir=tmp,
+            single_downloads_dir=str(Path(tmp) / "downloads"),
+            review_queue_dir=str(Path(tmp) / "data" / "review_queue"),
+            review_queue_files_dir=str(Path(tmp) / "data" / "review_queue" / "files"),
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+        review_target = str(Path(paths.review_queue_files_dir) / "review-1")
+        resolved = jq._resolve_job_output_dir(review_target, paths, media_intent="music_track_review")
+        assert resolved == review_target
+
+
 def test_worker_binds_store_into_adapters() -> None:
     jq = _load_job_queue()
     with tempfile.TemporaryDirectory() as tmp:
