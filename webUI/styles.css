@@ -3539,3 +3539,75 @@ body.home-page .home-search-actions {
   border: 0;
   display: block;
 }
+
+.review-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.review-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.review-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.review-card {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 14px;
+  background: rgba(15, 23, 42, 0.2);
+}
+
+.review-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.review-card-heading {
+  flex: 1 1 280px;
+}
+
+.review-card-title {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.review-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.review-card-reasons,
+.review-card-metrics,
+.review-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.review-preview {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.review-preview audio,
+.review-preview video {
+  width: 100%;
+  margin-top: 8px;
+}

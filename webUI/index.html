@@ -24,6 +24,7 @@
     </button>
     <nav class="top-nav" id="primary-nav" aria-label="Primary">
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
+      <button class="button ghost small nav-button" data-page="review" type="button">Review</button>
       <button class="button ghost small nav-button" data-page="info" type="button">Info</button>
       <button class="button ghost small nav-button" data-page="status" type="button">Status</button>
       <button class="button ghost small nav-button" data-page="config" data-hash="settings" type="button">Settings</button>
@@ -239,6 +240,28 @@
           <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
         </span>
       </footer>
+    </section>
+    <section class="panel full" id="review-panel" data-page="review">
+      <div class="panel-header-row">
+        <div class="panel-title">Review Queue</div>
+        <div class="settings-header-actions">
+          <button id="review-refresh" class="button ghost small" type="button">Refresh</button>
+        </div>
+      </div>
+      <div class="notice">
+        Low-confidence music matches stay in internal Retreivr quarantine storage until you preview and accept or reject them.
+      </div>
+      <div class="review-toolbar">
+        <div id="review-summary" class="meta">Pending: 0</div>
+        <div class="review-toolbar-actions">
+          <button id="review-accept-selected" class="button ghost small" type="button" disabled>Accept Selected</button>
+          <button id="review-reject-selected" class="button ghost small remove" type="button" disabled>Reject Selected</button>
+          <button id="review-accept-all" class="button ghost small" type="button">Accept All Pending</button>
+          <button id="review-clear-selection" class="button ghost small" type="button" disabled>Clear Selection</button>
+        </div>
+      </div>
+      <div id="review-message" class="notice" role="status"></div>
+      <div id="review-list" class="review-list"></div>
     </section>
     <section class="panel full" id="status-panel" data-page="status">
       <div class="panel-title">Operations Status (Live)</div>

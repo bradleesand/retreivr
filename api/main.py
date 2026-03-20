@@ -146,6 +146,13 @@ from metadata.importers.dispatcher import import_playlist as import_playlist_fil
 from engine.import_pipeline import process_imported_tracks
 from engine.import_m3u_builder import write_import_m3u_from_batch
 from library.reconcile import reconcile_library
+from library.review_queue import (
+    REVIEW_STATUS_PENDING,
+    accept_review_queue_items,
+    get_review_queue_item,
+    list_review_queue_items,
+    reject_review_queue_items,
+)
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 2
@@ -8559,6 +8566,46 @@ async def clear_failed_download_jobs():
     finally:
         conn.close()
     return safe_json({"deleted": deleted_count, "before": before_count, "remaining": max(0, before_count - deleted_count)})
+
+
+class ReviewQueueActionPayload(BaseModel):
+    item_ids: list[str]
+
+
+@app.get("/api/review_queue")
+async def api_list_review_queue(
+    status: str = Query(REVIEW_STATUS_PENDING, max_length=32),
+    limit: int = Query(200, ge=1, le=2000),
+):
+    return safe_json(list_review_queue_items(app.state.paths.db_path, status=status, limit=limit))
+
+
+@app.post("/api/review_queue/accept")
+async def api_accept_review_queue(payload: ReviewQueueActionPayload):
+    result = accept_review_queue_items(app.state.paths.db_path, list(payload.item_ids or []))
+    return safe_json(result)
+
+
+@app.post("/api/review_queue/reject")
+async def api_reject_review_queue(payload: ReviewQueueActionPayload):
+    result = reject_review_queue_items(app.state.paths.db_path, list(payload.item_ids or []))
+    return safe_json(result)
+
+
+@app.get("/api/review_queue/{item_id}/preview")
+async def api_review_queue_preview(item_id: str):
+    item = get_review_queue_item(app.state.paths.db_path, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Review item not found")
+    file_path = str(item.get("file_path") or "").strip()
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Preview file not found")
+    allowed_roots = [app.state.paths.review_queue_dir, DOWNLOADS_DIR]
+    if not _path_allowed(file_path, allowed_roots):
+        raise HTTPException(status_code=403, detail="Preview path not allowed")
+    content_type, _ = mimetypes.guess_type(file_path)
+    headers = {"Content-Disposition": "inline"}
+    return StreamingResponse(_iter_file(file_path), media_type=content_type or "application/octet-stream", headers=headers)
 
 
 @app.get("/api/music/failures")

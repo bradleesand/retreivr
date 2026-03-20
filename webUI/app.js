@@ -11,6 +11,8 @@ const state = {
   configNoticeTimer: null,
   configNoticeClearable: false,
   currentPage: "home",
+  reviewItems: [],
+  reviewSelectedIds: new Set(),
   actionButtons: null,
   runtimeInfo: null,
   watcherStatus: null,
@@ -468,7 +470,7 @@ function setConfigNotice(message, isError = false, autoClear = false) {
 
 function setPage(page) {
   const normalized = normalizePageName(page);
-  const allowed = new Set(["home", "config", "status", "info"]);
+  const allowed = new Set(["home", "review", "config", "status", "info"]);
   const target = allowed.has(normalized) ? normalized : "home";
   state.currentPage = target;
   if (target === "home") {
@@ -514,6 +516,8 @@ function setPage(page) {
     refreshDownloads();
     refreshHistory();
     refreshLogs();
+  } else if (target === "review") {
+    refreshReviewQueue();
   } else if (target === "config") {
     if (!state.config || !state.configDirty) {
       loadConfig().then(async () => {
@@ -1177,6 +1181,15 @@ function formatDuration(seconds) {
     return `${mins}m ${secs}s`;
   }
   return `${secs}s`;
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function formatCandidatePostedDate(candidate) {
@@ -7922,6 +7935,159 @@ async function updateYtdlp() {
   }
 }
 
+function getSelectedReviewIds() {
+  return Array.from(state.reviewSelectedIds || []).filter(Boolean);
+}
+
+function updateReviewToolbarState() {
+  const selectedCount = getSelectedReviewIds().length;
+  const hasPending = Array.isArray(state.reviewItems) && state.reviewItems.length > 0;
+  const acceptSelected = $("#review-accept-selected");
+  const rejectSelected = $("#review-reject-selected");
+  const clearSelection = $("#review-clear-selection");
+  const acceptAll = $("#review-accept-all");
+  if (acceptSelected) acceptSelected.disabled = selectedCount === 0;
+  if (rejectSelected) rejectSelected.disabled = selectedCount === 0;
+  if (clearSelection) clearSelection.disabled = selectedCount === 0;
+  if (acceptAll) acceptAll.disabled = !hasPending;
+}
+
+function buildReviewMetricLabel(item, key, label, formatter = null) {
+  const details = item?.candidate_details || {};
+  let value = details[key];
+  if (value === undefined || value === null || value === "") {
+    if (key === "bitrate_kbps") {
+      value = item?.bitrate_kbps;
+    } else if (key === "duration_ms") {
+      value = item?.duration_ms;
+    }
+  }
+  if (value === undefined || value === null || value === "") {
+    return "";
+  }
+  const rendered = typeof formatter === "function" ? formatter(value) : String(value);
+  if (!rendered) return "";
+  return `<span class="chip">${label}: ${escapeHtml(String(rendered))}</span>`;
+}
+
+function renderReviewQueue() {
+  const listEl = $("#review-list");
+  const summaryEl = $("#review-summary");
+  if (!listEl || !summaryEl) {
+    return;
+  }
+  const pendingCount = Array.isArray(state.reviewItems) ? state.reviewItems.length : 0;
+  summaryEl.textContent = `Pending: ${pendingCount}`;
+  const validIds = new Set((state.reviewItems || []).map((item) => String(item.id || "").trim()).filter(Boolean));
+  state.reviewSelectedIds = new Set(getSelectedReviewIds().filter((id) => validIds.has(id)));
+  updateReviewToolbarState();
+  if (!pendingCount) {
+    listEl.innerHTML = `<div class="notice">No items currently need review.</div>`;
+    return;
+  }
+  listEl.innerHTML = state.reviewItems.map((item) => {
+    const id = String(item.id || "").trim();
+    const artist = String(item.artist || item.album_artist || "").trim();
+    const track = String(item.track || item.filename || "Unknown Track").trim();
+    const album = String(item.album || "").trim();
+    const source = String(item.source || "").trim();
+    const gate = String(item.top_failed_gate || "").trim();
+    const failureReason = String(item.failure_reason || "").trim();
+    const durationDeltaMs = item?.candidate_details?.duration_delta_ms;
+    const selected = state.reviewSelectedIds.has(id);
+    const previewTag = String(item.mime_type || "").startsWith("video/") ? "video" : "audio";
+    const metrics = [
+      buildReviewMetricLabel(item, "final_score", "Score", (value) => Number(value).toFixed(3)),
+      buildReviewMetricLabel(item, "title_similarity", "Title", (value) => Number(value).toFixed(3)),
+      buildReviewMetricLabel(item, "artist_similarity", "Artist", (value) => Number(value).toFixed(3)),
+      buildReviewMetricLabel(item, "album_similarity", "Album", (value) => Number(value).toFixed(3)),
+      buildReviewMetricLabel(item, "duration_delta_ms", "Delta", (value) => `${Math.round(Number(value))}ms`),
+      buildReviewMetricLabel(item, "duration_ms", "File length", (value) => formatDuration(Math.round(Number(value) / 1000))),
+      buildReviewMetricLabel(item, "bitrate_kbps", "Bitrate", (value) => `${Math.round(Number(value))} kbps`),
+    ].filter(Boolean).join("");
+    return `
+      <article class="review-card" data-review-id="${escapeHtml(id)}" data-artist="${escapeHtml(artist.toLowerCase())}" data-album="${escapeHtml(album.toLowerCase())}">
+        <div class="review-card-header">
+          <label class="review-select">
+            <input type="checkbox" data-action="review-select" data-review-id="${escapeHtml(id)}" ${selected ? "checked" : ""}>
+            <span>Select</span>
+          </label>
+          <div class="review-card-heading">
+            <div class="review-card-title">${escapeHtml(artist ? `${artist} - ${track}` : track)}</div>
+            <div class="meta">${escapeHtml(album || "Unknown album")}</div>
+          </div>
+          <span class="chip">${escapeHtml(source || "unknown source")}</span>
+        </div>
+        <div class="review-card-reasons">
+          ${failureReason ? `<span class="chip">${escapeHtml(failureReason.replaceAll("_", " "))}</span>` : ""}
+          ${gate ? `<span class="chip">${escapeHtml(gate.replaceAll("_", " "))}</span>` : ""}
+          ${durationDeltaMs !== undefined && durationDeltaMs !== null ? `<span class="chip">Duration delta: ${escapeHtml(String(durationDeltaMs))}ms</span>` : ""}
+        </div>
+        <div class="review-card-metrics">${metrics}</div>
+        <div class="review-card-actions">
+          <button class="button ghost small" type="button" data-action="review-toggle-preview" data-review-id="${escapeHtml(id)}">Preview</button>
+          <button class="button ghost small" type="button" data-action="review-accept" data-review-id="${escapeHtml(id)}">Accept</button>
+          <button class="button ghost small remove" type="button" data-action="review-reject" data-review-id="${escapeHtml(id)}">Reject</button>
+          <button class="button ghost small" type="button" data-action="review-accept-artist" data-review-id="${escapeHtml(id)}">Accept Artist</button>
+          <button class="button ghost small" type="button" data-action="review-accept-album" data-review-id="${escapeHtml(id)}">Accept Album</button>
+        </div>
+        <div class="review-preview hidden" data-review-preview="${escapeHtml(id)}">
+          <div class="meta">${escapeHtml(String(item.filename || "").trim())}</div>
+          <${previewTag} controls preload="metadata" src="/api/review_queue/${encodeURIComponent(id)}/preview"></${previewTag}>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+async function refreshReviewQueue() {
+  const listEl = $("#review-list");
+  const summaryEl = $("#review-summary");
+  try {
+    if (summaryEl) {
+      summaryEl.textContent = "Loading review queue...";
+    }
+    const data = await fetchJson("/api/review_queue?status=pending&limit=300");
+    state.reviewItems = Array.isArray(data.items) ? data.items : [];
+    renderReviewQueue();
+  } catch (err) {
+    if (listEl) {
+      listEl.innerHTML = `<div class="notice error">Review queue failed: ${escapeHtml(err.message || "Unknown error")}</div>`;
+    }
+    if (summaryEl) {
+      summaryEl.textContent = "Review queue unavailable";
+    }
+  }
+}
+
+async function runReviewQueueAction(action, itemIds, message) {
+  const ids = Array.isArray(itemIds) ? itemIds.filter(Boolean) : [];
+  if (!ids.length) {
+    setNotice($("#review-message"), "No review items selected.", true);
+    return;
+  }
+  try {
+    setNotice($("#review-message"), message, false);
+    const data = await fetchJson(`/api/review_queue/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_ids: ids }),
+    });
+    const errorCount = Array.isArray(data.errors) ? data.errors.length : 0;
+    const doneCount = Number(data.accepted || data.rejected || 0);
+    const label = action === "accept" ? "accepted" : "rejected";
+    setNotice(
+      $("#review-message"),
+      `${doneCount} item${doneCount === 1 ? "" : "s"} ${label}${errorCount ? ` • ${errorCount} error${errorCount === 1 ? "" : "s"}` : ""}.`,
+      errorCount > 0
+    );
+    ids.forEach((id) => state.reviewSelectedIds.delete(id));
+    await refreshReviewQueue();
+  } catch (err) {
+    setNotice($("#review-message"), `Review action failed: ${err.message}`, true);
+  }
+}
+
 async function reconcileLibrary() {
   const button = $("#library-reconcile-button");
   const messageEl = $("#library-reconcile-message");
@@ -7999,6 +8165,8 @@ function setupTimers() {
     withPollingGuard(refreshStatus);
     if (state.currentPage === "status") {
       withPollingGuard(refreshSearchQueue);
+    } else if (state.currentPage === "review") {
+      withPollingGuard(refreshReviewQueue);
     }
   }, 3000);
 
@@ -8604,6 +8772,101 @@ function bindEvents() {
   const libraryReconcileButton = $("#library-reconcile-button");
   if (libraryReconcileButton) {
     libraryReconcileButton.addEventListener("click", reconcileLibrary);
+  }
+  const reviewRefresh = $("#review-refresh");
+  if (reviewRefresh) {
+    reviewRefresh.addEventListener("click", refreshReviewQueue);
+  }
+  const reviewAcceptSelected = $("#review-accept-selected");
+  if (reviewAcceptSelected) {
+    reviewAcceptSelected.addEventListener("click", () => {
+      runReviewQueueAction("accept", getSelectedReviewIds(), "Accepting selected review items...");
+    });
+  }
+  const reviewRejectSelected = $("#review-reject-selected");
+  if (reviewRejectSelected) {
+    reviewRejectSelected.addEventListener("click", () => {
+      runReviewQueueAction("reject", getSelectedReviewIds(), "Rejecting selected review items...");
+    });
+  }
+  const reviewAcceptAll = $("#review-accept-all");
+  if (reviewAcceptAll) {
+    reviewAcceptAll.addEventListener("click", () => {
+      const ids = (state.reviewItems || []).map((item) => String(item.id || "").trim()).filter(Boolean);
+      runReviewQueueAction("accept", ids, "Accepting all pending review items...");
+    });
+  }
+  const reviewClearSelection = $("#review-clear-selection");
+  if (reviewClearSelection) {
+    reviewClearSelection.addEventListener("click", () => {
+      state.reviewSelectedIds = new Set();
+      renderReviewQueue();
+    });
+  }
+  const reviewList = $("#review-list");
+  if (reviewList) {
+    reviewList.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-action]");
+      if (button) {
+        const action = String(button.dataset.action || "").trim();
+        const reviewId = String(button.dataset.reviewId || "").trim();
+        const item = (state.reviewItems || []).find((entry) => String(entry.id || "").trim() === reviewId);
+        if (action === "review-toggle-preview") {
+          const panel = Array.from(reviewList.querySelectorAll("[data-review-preview]"))
+            .find((node) => String(node.dataset.reviewPreview || "").trim() === reviewId);
+          if (panel) {
+            panel.classList.toggle("hidden");
+            button.textContent = panel.classList.contains("hidden") ? "Preview" : "Hide Preview";
+          }
+          return;
+        }
+        if (!item) {
+          setNotice($("#review-message"), "Review item not found.", true);
+          return;
+        }
+        if (action === "review-accept") {
+          await runReviewQueueAction("accept", [reviewId], "Accepting review item...");
+          return;
+        }
+        if (action === "review-reject") {
+          await runReviewQueueAction("reject", [reviewId], "Rejecting review item...");
+          return;
+        }
+        if (action === "review-accept-artist") {
+          const artistKey = String(item.artist || item.album_artist || "").trim().toLowerCase();
+          const ids = (state.reviewItems || [])
+            .filter((entry) => String(entry.artist || entry.album_artist || "").trim().toLowerCase() === artistKey)
+            .map((entry) => String(entry.id || "").trim())
+            .filter(Boolean);
+          await runReviewQueueAction("accept", ids, "Accepting pending items from this artist...");
+          return;
+        }
+        if (action === "review-accept-album") {
+          const artistKey = String(item.artist || item.album_artist || "").trim().toLowerCase();
+          const albumKey = String(item.album || "").trim().toLowerCase();
+          const ids = (state.reviewItems || [])
+            .filter((entry) =>
+              String(entry.artist || entry.album_artist || "").trim().toLowerCase() === artistKey &&
+              String(entry.album || "").trim().toLowerCase() === albumKey
+            )
+            .map((entry) => String(entry.id || "").trim())
+            .filter(Boolean);
+          await runReviewQueueAction("accept", ids, "Accepting pending items from this album...");
+          return;
+        }
+      }
+      const checkbox = event.target.closest('input[data-action="review-select"]');
+      if (checkbox) {
+        const reviewId = String(checkbox.dataset.reviewId || "").trim();
+        if (!reviewId) return;
+        if (checkbox.checked) {
+          state.reviewSelectedIds.add(reviewId);
+        } else {
+          state.reviewSelectedIds.delete(reviewId);
+        }
+        updateReviewToolbarState();
+      }
+    });
   }
 
   $("#add-account").addEventListener("click", () => addAccountRow("", {}));

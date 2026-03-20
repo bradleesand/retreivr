@@ -36,6 +36,7 @@ from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
 from metadata.services.musicbrainz_service import get_musicbrainz_service
 from library.provenance import build_file_provenance, get_retreivr_version
+from library.review_queue import record_completed_review_item
 
 try:
     from engine.musicbrainz_binding import _normalize_title_for_mb_lookup, resolve_best_mb_pair
@@ -252,7 +253,6 @@ _MUSIC_SOURCE_PRIORITY_WEIGHTS = {
 }
 _VIDEO_CONTAINERS = {"mkv", "mp4", "webm"}
 _MUSIC_AUDIO_FORMAT_WARNED = False
-_MUSIC_REVIEW_FOLDER_NAME = "__NEEDS_REVIEW__"
 _MUSIC_DEFAULT_CONCURRENT_FRAGMENT_DOWNLOADS = 2
 _MUSIC_RESOLUTION_CACHE_MAX_ENTRIES = 256
 _MUSIC_DEFAULT_PRERESOLVE_LOOKAHEAD = 3
@@ -2934,13 +2934,21 @@ class DownloadWorkerEngine:
         review_key = candidate_id or hashlib.sha1(candidate_url.encode("utf-8")).hexdigest()[:12]
         review_canonical_id = f"review:{recording_mbid or job.id}:{review_key}"
 
-        base_music_root = resolve_dir(
+        public_music_root = resolve_dir(
             payload.get("output_dir")
             or getattr(job, "resolved_destination", None)
             or self.config.get("music_download_folder"),
             self.paths.single_downloads_dir,
         )
-        needs_review_root = os.path.join(base_music_root, _MUSIC_REVIEW_FOLDER_NAME)
+        review_files_root = str(
+            getattr(self.paths, "review_queue_files_dir", "")
+            or os.path.join(
+                getattr(self.paths, "temp_downloads_dir", None) or self.paths.single_downloads_dir,
+                "review_queue",
+                "files",
+            )
+        ).strip()
+        quarantine_root = os.path.join(review_files_root, sanitize_component(review_canonical_id))
         review_artist = str(canonical.get("artist") or payload.get("artist") or "").strip() or "Unknown Artist"
         review_track = str(canonical.get("track") or payload.get("track") or "").strip() or "Unknown Track"
         review_album = str(canonical.get("album") or payload.get("album") or "").strip() or "Unknown Album"
@@ -2994,8 +3002,8 @@ class DownloadWorkerEngine:
             source=review_source,
             url=candidate_url,
             input_url=candidate_url,
-            destination=needs_review_root,
-            base_dir=self.paths.single_downloads_dir,
+            destination=quarantine_root,
+            base_dir=review_files_root,
             final_format_override=final_format_override,
             resolved_metadata=review_metadata,
             output_template_overrides={
@@ -3003,6 +3011,8 @@ class DownloadWorkerEngine:
                 "source": "music_review",
                 "import_batch": payload.get("import_batch"),
                 "import_batch_id": payload.get("import_batch_id"),
+                "review_parent_job_id": str(getattr(job, "id", "") or "").strip() or None,
+                "review_target_destination": public_music_root,
                 "review_candidate_id": review_candidate.get("candidate_id"),
                 "review_candidate_url": candidate_url,
                 "review_failure_reason": failure_reason,
@@ -3010,6 +3020,22 @@ class DownloadWorkerEngine:
                 "review_nearest_pass_margin": review_candidate.get("nearest_pass_margin")
                 if isinstance(review_candidate.get("nearest_pass_margin"), dict)
                 else {},
+                "review_candidate_details": {
+                    "candidate_id": review_candidate.get("candidate_id"),
+                    "url": candidate_url,
+                    "source": review_candidate.get("source"),
+                    "final_score": review_candidate.get("final_score"),
+                    "title_similarity": review_candidate.get("title_similarity"),
+                    "artist_similarity": review_candidate.get("artist_similarity"),
+                    "album_similarity": review_candidate.get("album_similarity"),
+                    "duration_delta_ms": review_candidate.get("duration_delta_ms"),
+                    "duration_ms": review_candidate.get("duration_ms"),
+                    "rejection_reason": review_candidate.get("rejection_reason"),
+                    "top_failed_gate": review_candidate.get("top_failed_gate"),
+                    "nearest_pass_margin": review_candidate.get("nearest_pass_margin")
+                    if isinstance(review_candidate.get("nearest_pass_margin"), dict)
+                    else {},
+                },
             },
             canonical_id=review_canonical_id,
             canonical_url=canonical_url,
@@ -3738,12 +3764,16 @@ class DownloadWorkerEngine:
                     status=current_status,
                 )
                 return
-            record_download_history(
-                self.db_path,
-                job,
-                final_path,
-                meta=meta,
-            )
+            is_review_job = str(getattr(job, "media_intent", "") or "").strip().lower() == "music_track_review"
+            if is_review_job:
+                record_completed_review_item(self.db_path, job, final_path, meta=meta)
+            else:
+                record_download_history(
+                    self.db_path,
+                    job,
+                    final_path,
+                    meta=meta,
+                )
             if not self.store.mark_completed(job.id, file_path=final_path):
                 current_status = self.store.get_job_status(job.id)
                 _log_event(
