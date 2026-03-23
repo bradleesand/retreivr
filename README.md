@@ -31,11 +31,11 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Used for intentional media consumption... avoid getting sucked into the algorithms
 - Optional Telegram summaries
 
-## 0.9.13 Highlights
-- Internal Review Queue for low-confidence music matches, with preview and accept/reject controls
-- Review items now stay out of `/downloads` until explicitly accepted
-- Home-page review alert and Review-nav badge for pending items
-- Recoverable watcher/metadata failures log more cleanly, with hardened review-path and AcoustID handling
+## 0.9.14 Highlights
+- Automated Community Cache publisher worker for verified transport matches
+- Community Cache settings in the UI for lookup, publishing, repo/branch targeting, and PR behavior
+- Scheduled outbox ingestion that can write dataset updates and open/update a GitHub PR automatically
+- Runtime config changes now refresh the publish worker without a restart
 
 ---
 
@@ -120,11 +120,18 @@ Related controls:
 - `community_cache_publish_mode`: `off | dry_run | write_outbox`
 - `community_cache_publish_min_score`
 - `community_cache_publish_outbox_dir`
+- `community_cache_publish_repo`
+- `community_cache_publish_target_branch`
+- `community_cache_publish_branch`
+- `community_cache_publish_open_pr`
+- `community_cache_publish_poll_minutes`
+- `community_cache_publish_token_env`
+- `community_cache_publish_batch_size`
 
 ---
 
 ## Upgrade Notes
-If you are upgrading to `0.9.13`, pull the latest image and restart:
+If you are upgrading to `0.9.14`, pull the latest image and restart:
 ```bash
 docker compose -f docker/docker-compose.yml pull
 docker compose -f docker/docker-compose.yml up -d

@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.14 — Community Cache Publisher Automation
+
+### High-Level
+This release turns community-cache contribution into a built-in workflow. Retreivr can now take verified local resolution matches, stage them through the existing outbox, and automatically publish PR-ready dataset updates to the community cache repository on a schedule.
+
+### Added
+- Internal community-cache publisher worker that ingests verified outbox proposals, batches them by recording MBID, updates community dataset files, and opens or updates a GitHub pull request automatically.
+- Community Cache settings section in the web UI for lookup, proposal emission, repo/branch targeting, PR behavior, polling interval, batch size, and token env-var configuration.
+- New config defaults for automated community-cache publishing, including repo, branch, polling, token env, and batch-size controls.
+
+### Changed
+- Community-cache contribution is now a complete in-app flow: successful verified matches can emit to the outbox and be picked up by the internal publisher worker without a manual export step.
+- Runtime config updates now refresh community-cache publisher scheduling without requiring a restart.
+
 ## v0.9.13 — Review Queue + Recoverability Hardening
 
 ### High-Level

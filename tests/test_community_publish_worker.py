@@ -44,7 +44,7 @@ def test_merge_proposals_into_record_updates_existing_source_and_keeps_schema() 
             "candidate_id": "cand-1",
             "duration_ms": 200000,
             "duration_delta_ms": 0,
-            "retreivr_version": "0.9.13",
+            "retreivr_version": "0.9.14",
             "emitted_at": "2026-03-23T00:00:00+00:00",
         }
     ]
@@ -79,7 +79,7 @@ def test_community_publish_worker_ingests_outbox_and_marks_rows_published(monkey
         "selected_score": 0.97,
         "duration_delta_ms": 0,
         "final_path": "/downloads/Music/example.m4a",
-        "retreivr_version": "0.9.13",
+        "retreivr_version": "0.9.14",
     }
     (outbox_dir / "community_publish_20260323.jsonl").write_text(
         json.dumps(proposal) + "\n",
