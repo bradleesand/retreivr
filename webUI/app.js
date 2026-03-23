@@ -7119,6 +7119,19 @@ function renderConfig(cfg) {
     ? Number(cfg.community_cache_publish_min_score)
     : 0.78;
   $("#cfg-community-cache-publish-outbox-dir").value = cfg.community_cache_publish_outbox_dir ?? "";
+  $("#cfg-community-cache-publish-repo").value = cfg.community_cache_publish_repo ?? "sudostacks/retreivr-community-cache";
+  $("#cfg-community-cache-publish-target-branch").value = cfg.community_cache_publish_target_branch ?? "main";
+  $("#cfg-community-cache-publish-branch").value = cfg.community_cache_publish_branch ?? "";
+  $("#cfg-community-cache-publish-open-pr").checked = typeof cfg.community_cache_publish_open_pr === "boolean"
+    ? cfg.community_cache_publish_open_pr
+    : true;
+  $("#cfg-community-cache-publish-poll-minutes").value = Number.isFinite(cfg.community_cache_publish_poll_minutes)
+    ? Number(cfg.community_cache_publish_poll_minutes)
+    : 15;
+  $("#cfg-community-cache-publish-batch-size").value = Number.isFinite(cfg.community_cache_publish_batch_size)
+    ? Number(cfg.community_cache_publish_batch_size)
+    : 25;
+  $("#cfg-community-cache-publish-token-env").value = cfg.community_cache_publish_token_env ?? "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN";
   $("#cfg-music-template").value = cfg.music_filename_template ?? "";
   $("#cfg-yt-dlp-cookies").value = cfg.yt_dlp_cookies ?? "";
   const musicMetaDefaults = {
@@ -7759,6 +7772,60 @@ function buildConfigFromForm() {
     base.community_cache_publish_outbox_dir = publishOutboxDir;
   } else {
     delete base.community_cache_publish_outbox_dir;
+  }
+
+  const publishRepo = $("#cfg-community-cache-publish-repo").value.trim();
+  if (publishRepo) {
+    base.community_cache_publish_repo = publishRepo;
+  } else {
+    delete base.community_cache_publish_repo;
+  }
+
+  const publishTargetBranch = $("#cfg-community-cache-publish-target-branch").value.trim();
+  if (publishTargetBranch) {
+    base.community_cache_publish_target_branch = publishTargetBranch;
+  } else {
+    delete base.community_cache_publish_target_branch;
+  }
+
+  const publishBranch = $("#cfg-community-cache-publish-branch").value.trim();
+  if (publishBranch) {
+    base.community_cache_publish_branch = publishBranch;
+  } else {
+    delete base.community_cache_publish_branch;
+  }
+
+  base.community_cache_publish_open_pr = !!$("#cfg-community-cache-publish-open-pr").checked;
+
+  const publishPollMinutesRaw = $("#cfg-community-cache-publish-poll-minutes").value.trim();
+  if (publishPollMinutesRaw) {
+    const publishPollMinutes = Number.parseInt(publishPollMinutesRaw, 10);
+    if (!Number.isInteger(publishPollMinutes) || publishPollMinutes < 1) {
+      errors.push("Community cache publish poll interval must be an integer >= 1");
+    } else {
+      base.community_cache_publish_poll_minutes = publishPollMinutes;
+    }
+  } else {
+    delete base.community_cache_publish_poll_minutes;
+  }
+
+  const publishBatchSizeRaw = $("#cfg-community-cache-publish-batch-size").value.trim();
+  if (publishBatchSizeRaw) {
+    const publishBatchSize = Number.parseInt(publishBatchSizeRaw, 10);
+    if (!Number.isInteger(publishBatchSize) || publishBatchSize < 1) {
+      errors.push("Community cache publish batch size must be an integer >= 1");
+    } else {
+      base.community_cache_publish_batch_size = publishBatchSize;
+    }
+  } else {
+    delete base.community_cache_publish_batch_size;
+  }
+
+  const publishTokenEnv = $("#cfg-community-cache-publish-token-env").value.trim();
+  if (publishTokenEnv) {
+    base.community_cache_publish_token_env = publishTokenEnv;
+  } else {
+    delete base.community_cache_publish_token_env;
   }
 
   base.schedule = buildSchedulePayloadFromForm();

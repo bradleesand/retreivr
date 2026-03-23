@@ -351,6 +351,13 @@ def apply_config_defaults(config):
     normalized.setdefault("community_cache_publish_mode", "off")
     normalized.setdefault("community_cache_publish_min_score", 0.78)
     normalized.setdefault("community_cache_publish_outbox_dir", "")
+    normalized.setdefault("community_cache_publish_repo", "sudostacks/retreivr-community-cache")
+    normalized.setdefault("community_cache_publish_target_branch", "main")
+    normalized.setdefault("community_cache_publish_branch", "")
+    normalized.setdefault("community_cache_publish_open_pr", True)
+    normalized.setdefault("community_cache_publish_poll_minutes", 15)
+    normalized.setdefault("community_cache_publish_token_env", "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN")
+    normalized.setdefault("community_cache_publish_batch_size", 25)
     normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
     normalized.setdefault("music_skip_metadata_probe", True)
     normalized.setdefault("music_candidate_cooldown_enabled", True)
@@ -570,6 +577,46 @@ def validate_config(config):
     community_cache_publish_outbox_dir = config.get("community_cache_publish_outbox_dir")
     if community_cache_publish_outbox_dir is not None and not isinstance(community_cache_publish_outbox_dir, str):
         errors.append("community_cache_publish_outbox_dir must be a string")
+
+    community_cache_publish_repo = config.get("community_cache_publish_repo")
+    if community_cache_publish_repo is not None and not isinstance(community_cache_publish_repo, str):
+        errors.append("community_cache_publish_repo must be a string")
+
+    community_cache_publish_target_branch = config.get("community_cache_publish_target_branch")
+    if community_cache_publish_target_branch is not None and not isinstance(community_cache_publish_target_branch, str):
+        errors.append("community_cache_publish_target_branch must be a string")
+
+    community_cache_publish_branch = config.get("community_cache_publish_branch")
+    if community_cache_publish_branch is not None and not isinstance(community_cache_publish_branch, str):
+        errors.append("community_cache_publish_branch must be a string")
+
+    community_cache_publish_open_pr = config.get("community_cache_publish_open_pr")
+    if community_cache_publish_open_pr is not None and not isinstance(community_cache_publish_open_pr, bool):
+        errors.append("community_cache_publish_open_pr must be true/false")
+
+    community_cache_publish_poll_minutes = config.get("community_cache_publish_poll_minutes")
+    if community_cache_publish_poll_minutes is not None:
+        try:
+            poll_minutes = int(community_cache_publish_poll_minutes)
+        except (TypeError, ValueError):
+            errors.append("community_cache_publish_poll_minutes must be an integer")
+        else:
+            if poll_minutes < 1:
+                errors.append("community_cache_publish_poll_minutes must be >= 1")
+
+    community_cache_publish_token_env = config.get("community_cache_publish_token_env")
+    if community_cache_publish_token_env is not None and not isinstance(community_cache_publish_token_env, str):
+        errors.append("community_cache_publish_token_env must be a string")
+
+    community_cache_publish_batch_size = config.get("community_cache_publish_batch_size")
+    if community_cache_publish_batch_size is not None:
+        try:
+            batch_size = int(community_cache_publish_batch_size)
+        except (TypeError, ValueError):
+            errors.append("community_cache_publish_batch_size must be an integer")
+        else:
+            if batch_size < 1:
+                errors.append("community_cache_publish_batch_size must be >= 1")
 
     custom_adapter_file = config.get("custom_search_adapters_file")
     if custom_adapter_file is not None:

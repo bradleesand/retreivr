@@ -154,6 +154,11 @@ from library.review_queue import (
     list_review_queue_items,
     reject_review_queue_items,
 )
+from engine.community_publish_worker import (
+    CommunityPublishWorker,
+    apply_community_publish_defaults,
+    community_publish_worker_enabled,
+)
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 2
@@ -169,6 +174,7 @@ LIKED_SONGS_JOB_ID = "spotify_liked_songs_watch"
 SAVED_ALBUMS_JOB_ID = "spotify_saved_albums_watch"
 USER_PLAYLISTS_JOB_ID = "spotify_user_playlists_watch"
 SPOTIFY_PLAYLISTS_WATCH_JOB_ID = "spotify_playlists_watch"
+COMMUNITY_PUBLISH_JOB_ID = "community_cache_publish"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
 WATCHER_BATCH_MAX_WAIT_SECONDS = 300
@@ -2511,6 +2517,7 @@ async def startup():
     app.state.scheduler.start()
     _apply_schedule_config(schedule_config)
     _apply_spotify_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
+    _apply_community_publish_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
     if schedule_config.get("enabled") and schedule_config.get("run_on_startup"):
         asyncio.create_task(_handle_scheduled_run())
     if schedule_config.get("enabled"):
@@ -2550,6 +2557,11 @@ async def startup():
     app.state.playlist_import_jobs_lock = threading.Lock()
     app.state.playlist_import_active_count = 0
     app.state.music_cover_art_cache = {}
+    app.state.community_publish_last_summary = None
+    app.state.community_publish_worker = CommunityPublishWorker(
+        db_path=app.state.paths.db_path,
+        config_getter=get_loaded_config,
+    )
 
     app.state.worker_stop_event = threading.Event()
     app.state.worker_engine = DownloadWorkerEngine(
@@ -2570,6 +2582,14 @@ async def startup():
         daemon=True,
     )
     app.state.worker_thread.start()
+
+    if community_publish_worker_enabled(startup_cfg if isinstance(startup_cfg, dict) else {}):
+        app.state.scheduler.add_job(
+            _community_publish_schedule_tick,
+            trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=20)),
+            id=f"{COMMUNITY_PUBLISH_JOB_ID}_startup",
+            replace_existing=True,
+        )
 
 
     watch_policy = normalize_watch_policy(startup_cfg)
@@ -4445,6 +4465,58 @@ def _apply_spotify_schedule(config: dict):
         logger.info("Spotify manual playlist watch enabled")
     else:
         logger.info("Spotify manual playlist watch disabled")
+
+
+def _community_publish_schedule_tick() -> None:
+    worker = getattr(app.state, "community_publish_worker", None)
+    if worker is None:
+        return
+    try:
+        summary = worker.run_once()
+        logger.info(
+            "Community publish tick status=%s ingested=%s published=%s pr=%s branch=%s errors=%s",
+            summary.get("status"),
+            ((summary.get("ingest") or {}).get("ingested") if isinstance(summary.get("ingest"), dict) else 0),
+            summary.get("published_proposals"),
+            summary.get("pr_number"),
+            summary.get("branch"),
+            summary.get("errors"),
+        )
+        app.state.community_publish_last_summary = summary
+    except Exception:
+        logger.exception("Community publish worker tick failed")
+
+
+def _apply_community_publish_schedule(config: dict):
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return
+    try:
+        scheduler.remove_job(COMMUNITY_PUBLISH_JOB_ID)
+    except Exception:
+        pass
+
+    normalized = apply_community_publish_defaults(config if isinstance(config, dict) else {})
+    if not community_publish_worker_enabled(normalized):
+        logger.info("Community publish worker disabled by config")
+        return
+    interval = normalized.get("community_cache_publish_poll_minutes", 15)
+    try:
+        interval = int(interval)
+    except (TypeError, ValueError):
+        interval = 15
+    interval = max(1, interval)
+    start_date = datetime.now(timezone.utc) + timedelta(minutes=1)
+    scheduler.add_job(
+        _community_publish_schedule_tick,
+        trigger=IntervalTrigger(minutes=interval, start_date=start_date),
+        id=COMMUNITY_PUBLISH_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=60,
+    )
+    logger.info("Community publish worker enabled (interval=%s min)", interval)
 
 
 def _apply_schedule_config(schedule):
@@ -8764,12 +8836,19 @@ async def api_put_config(payload: dict = Body(...)):
     normalized_payload = safe_json(payload)
     app.state.loaded_config = normalized_payload if isinstance(normalized_payload, dict) else {}
     app.state.config = app.state.loaded_config
+    worker_engine = getattr(app.state, "worker_engine", None)
+    if worker_engine is not None:
+        worker_engine.config = app.state.loaded_config
+    search_service = getattr(app.state, "search_service", None)
+    if search_service is not None:
+        search_service.config = app.state.loaded_config
 
     if "schedule" in payload:
         schedule = _merge_schedule_config(payload.get("schedule"))
         app.state.schedule_config = schedule
         _apply_schedule_config(schedule)
     _apply_spotify_schedule(payload or {})
+    _apply_community_publish_schedule(payload or {})
     policy = normalize_watch_policy(payload)
     if getattr(normalize_watch_policy, "valid", True):
         app.state.watch_policy = policy

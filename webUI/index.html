@@ -820,8 +820,36 @@
                     <span>Publish outbox directory</span>
                     <input id="cfg-community-cache-publish-outbox-dir" type="text" placeholder="">
                   </label>
+                  <label class="field full">
+                    <span>Community cache repo</span>
+                    <input id="cfg-community-cache-publish-repo" type="text" placeholder="sudostacks/retreivr-community-cache">
+                  </label>
+                  <label class="field short">
+                    <span>Target branch</span>
+                    <input id="cfg-community-cache-publish-target-branch" type="text" placeholder="main">
+                  </label>
+                  <label class="field medium">
+                    <span>Publish branch</span>
+                    <input id="cfg-community-cache-publish-branch" type="text" placeholder="retreivr-community-publish/hostname">
+                  </label>
+                  <label class="field inline short">
+                    <span>Open / update pull request</span>
+                    <input id="cfg-community-cache-publish-open-pr" type="checkbox">
+                  </label>
+                  <label class="field short">
+                    <span>Poll interval (minutes)</span>
+                    <input id="cfg-community-cache-publish-poll-minutes" type="number" min="1" step="1" placeholder="15">
+                  </label>
+                  <label class="field short">
+                    <span>Batch size</span>
+                    <input id="cfg-community-cache-publish-batch-size" type="number" min="1" step="1" placeholder="25">
+                  </label>
+                  <label class="field medium">
+                    <span>GitHub token env var</span>
+                    <input id="cfg-community-cache-publish-token-env" type="text" placeholder="RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN">
+                  </label>
                 </div>
-                <div class="notice">`write_outbox` is the automatic local dump mode. When enabled, eligible verified matches are written to the outbox as downloads complete. `dry_run` logs what would be published without writing files.</div>
+                <div class="notice">`write_outbox` is the automatic local dump mode. When enabled, eligible verified matches are written to the outbox as downloads complete. The publisher worker reads that outbox on a schedule, writes dataset updates to the configured branch, and can open or update a pull request automatically. GitHub auth is read from the configured environment variable, not from the UI.</div>
               </div>
             </section>
 
