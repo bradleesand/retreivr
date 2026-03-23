@@ -14,6 +14,14 @@ from uuid import uuid4
 from metadata.importers.base import TrackIntent
 from engine.job_queue import DownloadJobStore, build_download_job_payload
 from engine.canonical_ids import build_music_track_canonical_id
+from engine.job_queue import (
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_CLAIMED,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_DOWNLOADING,
+    JOB_STATUS_POSTPROCESSING,
+    JOB_STATUS_QUEUED,
+)
 
 try:
     from engine.musicbrainz_binding import resolve_best_mb_pair
@@ -453,6 +461,30 @@ def _enqueue_music_track_job(
     return bool(created)
 
 
+def _existing_canonical_job_is_terminal_and_valid(queue_store: Any, canonical_id: str | None) -> bool:
+    if not canonical_id or not hasattr(queue_store, "get_job_by_canonical_id"):
+        return False
+    try:
+        existing = queue_store.get_job_by_canonical_id(canonical_id)
+    except Exception:
+        return False
+    if existing is None:
+        return False
+    status = str(getattr(existing, "status", "") or "").strip().lower()
+    if status in {
+        JOB_STATUS_QUEUED,
+        JOB_STATUS_CLAIMED,
+        JOB_STATUS_DOWNLOADING,
+        JOB_STATUS_POSTPROCESSING,
+    }:
+        return True
+    if status == JOB_STATUS_COMPLETED and str(getattr(existing, "file_path", "") or "").strip():
+        return True
+    if status == JOB_STATUS_CANCELLED:
+        return False
+    return False
+
+
 def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportResult:
     mb_service = _get_musicbrainz_service(config)
     queue_store = _get_queue_store(config)
@@ -644,6 +676,11 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 "artist": artist,
                 "title": title,
                 "album": album,
+                "album_artist": str(getattr(intent, "album_artist", "") or "").strip() or None,
+                "track_number": _safe_int(getattr(intent, "track_number", None)),
+                "disc_number": _safe_int(getattr(intent, "disc_number", None)),
+                "release_date": str(getattr(intent, "release_date", "") or "").strip() or None,
+                "genre": str(getattr(intent, "genre", "") or "").strip() or None,
                 "duration_ms": duration_ms,
             }
         )
@@ -725,11 +762,11 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     canonical_artist = artist or ""
                     canonical_title = title
                     canonical_album = str(selected_pair.get("album") or album or "").strip() or None
-                    release_date_raw = str(selected_pair.get("release_date") or "").strip() or None
+                    release_date_raw = str(selected_pair.get("release_date") or entry.get("release_date") or "").strip() or None
                     release_date = _extract_release_year(release_date_raw) or release_date_raw
-                    track_number = _safe_int(selected_pair.get("track_number"))
-                    disc_number = _safe_int(selected_pair.get("disc_number")) or 1
-                    resolved_duration_ms = _safe_int(selected_pair.get("duration_ms"))
+                    track_number = _safe_int(selected_pair.get("track_number")) or _safe_int(entry.get("track_number"))
+                    disc_number = _safe_int(selected_pair.get("disc_number")) or _safe_int(entry.get("disc_number")) or 1
+                    resolved_duration_ms = _safe_int(selected_pair.get("duration_ms")) or _safe_int(entry.get("duration_ms"))
                     selected_track_aliases = selected_pair.get("track_aliases")
                     if isinstance(selected_track_aliases, (list, tuple, set)):
                         normalized_aliases = [str(value).strip() for value in selected_track_aliases if str(value or "").strip()]
@@ -742,6 +779,22 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                         normalized_mb_youtube_urls = [str(value).strip() for value in selected_mb_youtube_urls if str(value or "").strip()]
                     else:
                         normalized_mb_youtube_urls = []
+                    canonical_id = build_music_track_canonical_id(
+                        canonical_artist,
+                        canonical_album,
+                        track_number,
+                        canonical_title,
+                        recording_mbid=recording_mbid,
+                        mb_release_id=release_mbid,
+                        mb_release_group_id=release_group_mbid,
+                        disc_number=disc_number,
+                    )
+                    if _existing_canonical_job_is_terminal_and_valid(queue_store, canonical_id):
+                        resolved_count += 1
+                        resolved_mbids.append(recording_mbid)
+                        processed_tracks += 1
+                        _emit_progress(phase="resolving", processed_tracks=processed_tracks)
+                        continue
                     created = _enqueue_music_track_job(
                         queue_store,
                         job_payload_builder,

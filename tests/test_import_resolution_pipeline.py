@@ -138,10 +138,14 @@ class FakeMusicBrainzService:
 class FakeQueueStore:
     def __init__(self):
         self.enqueued = []
+        self.existing_by_canonical_id = {}
 
     def enqueue_job(self, **kwargs):
         self.enqueued.append(kwargs)
         return f"job-{len(self.enqueued)}", True, None
+
+    def get_job_by_canonical_id(self, canonical_id):
+        return self.existing_by_canonical_id.get(canonical_id)
 
 
 def _spy_job_payload_builder(*, config, **kwargs):
@@ -483,3 +487,64 @@ def test_import_pipeline_progress_callback_reports_completed_work_units() -> Non
     assert snapshots[-1]["unresolved_count"] == result.unresolved_count
     assert snapshots[-1]["enqueued_count"] == result.enqueued_count
     assert snapshots[-1]["failed_count"] == result.failed_count
+
+
+def test_import_pipeline_skips_enqueue_when_canonical_job_already_exists() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-skip-1",
+                        "title": "Dreams",
+                        "ext:score": "95",
+                        "artist-credit": [{"name": "Fleetwood Mac"}],
+                        "release-list": [{"id": "release-skip-1"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    canonical_id = build_music_track_canonical_id(
+        "Fleetwood Mac",
+        "Album",
+        1,
+        "Dreams",
+        recording_mbid="mbid-skip-1",
+        mb_release_id="release-skip-1",
+        disc_number=1,
+    )
+    queue_store.existing_by_canonical_id[canonical_id] = type(
+        "ExistingJob",
+        (),
+        {
+            "status": "completed",
+            "file_path": "/downloads/Music/Fleetwood Mac/Album (2011)/01 - Dreams.m4a",
+        },
+    )()
+    intents = [
+        TrackIntent(
+            artist="Fleetwood Mac",
+            title="Dreams",
+            album="Rumours",
+            raw_line="",
+            source_format="apple_xml",
+        )
+    ]
+
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+        },
+    )
+
+    assert result.total_tracks == 1
+    assert result.resolved_count == 1
+    assert result.enqueued_count == 0
+    assert result.failed_count == 0
+    assert len(queue_store.enqueued) == 0
