@@ -55,3 +55,9 @@ def test_iter_file_range_reads_only_requested_slice(tmp_path: Path):
     payload = b"".join(media_stream.iter_file_range(str(path), 5, 9, chunk_size=2))
 
     assert payload == b"fghij"
+
+
+def test_guess_browser_media_type_normalizes_browser_playable_audio_types():
+    assert media_stream.guess_browser_media_type("sample.m4a") == "audio/mp4"
+    assert media_stream.guess_browser_media_type("sample.mp3") == "audio/mpeg"
+    assert media_stream.guess_browser_media_type("sample.aac") == "audio/aac"

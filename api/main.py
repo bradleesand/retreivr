@@ -159,7 +159,7 @@ from engine.community_publish_worker import (
     apply_community_publish_defaults,
     community_publish_worker_enabled,
 )
-from api.media_stream import build_media_file_response
+from api.media_stream import build_media_file_response, guess_browser_media_type
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 2
@@ -8695,11 +8695,10 @@ async def api_review_queue_preview(item_id: str, request: Request):
     allowed_roots = [app.state.paths.review_queue_dir, DOWNLOADS_DIR]
     if not _path_allowed(file_path, allowed_roots):
         raise HTTPException(status_code=403, detail="Preview path not allowed")
-    content_type, _ = mimetypes.guess_type(file_path)
     return build_media_file_response(
         request,
         file_path,
-        media_type=content_type or "application/octet-stream",
+        media_type=guess_browser_media_type(file_path, mimetypes.guess_type(file_path)[0]),
         content_disposition="inline",
     )
 

@@ -7,6 +7,19 @@ from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
 
+def guess_browser_media_type(file_path: str, fallback: str | None = None) -> str:
+    lowered = str(file_path or "").strip().lower()
+    if lowered.endswith(".m4a"):
+        return "audio/mp4"
+    if lowered.endswith(".mp3"):
+        return "audio/mpeg"
+    if lowered.endswith(".aac"):
+        return "audio/aac"
+    if lowered.endswith(".wav"):
+        return "audio/wav"
+    return str(fallback or "application/octet-stream")
+
+
 def iter_file_range(path: str, start: int, end: int, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
     remaining = max(0, end - start + 1)
     with open(path, "rb") as handle:
