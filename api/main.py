@@ -7147,6 +7147,86 @@ def _write_music_album_run_summary(summary: dict[str, object]) -> str:
     return str(output_path)
 
 
+def _release_media_has_track_entries(release_obj: dict) -> bool:
+    if not isinstance(release_obj, dict):
+        return False
+    media = release_obj.get("medium-list", [])
+    if not isinstance(media, list):
+        return False
+    for medium in media:
+        if not isinstance(medium, dict):
+            continue
+        track_list = medium.get("track-list", [])
+        if not isinstance(track_list, list):
+            continue
+        for track in track_list:
+            if not isinstance(track, dict):
+                continue
+            recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
+            recording_mbid = str(recording.get("id") or "").strip()
+            title = str(track.get("title") or recording.get("title") or "").strip()
+            if recording_mbid and title:
+                return True
+    return False
+
+
+def _select_release_with_tracks(mb, release_group_mbid: str, release_dicts: list[dict], *, include_tags: bool = False) -> tuple[dict, dict]:
+    official = [rel for rel in release_dicts if str(rel.get("status") or "").strip().lower() == "official"]
+    us_official = [rel for rel in official if str(rel.get("country") or "").strip().upper() == "US"]
+    ordered_candidates = us_official + [rel for rel in official if rel not in us_official] + [
+        rel for rel in release_dicts if rel not in official
+    ]
+
+    selected_release = None
+    selected_release_obj = {}
+    fallback_release = None
+    fallback_release_obj = {}
+    release_includes = ["recordings", "media", "artists"]
+    if include_tags:
+        release_includes.append("tags")
+
+    for candidate in ordered_candidates:
+        release_mbid = str(candidate.get("id") or "").strip()
+        if not release_mbid:
+            continue
+        try:
+            release_payload = mb._call_with_retry(  # noqa: SLF001
+                lambda rid=release_mbid: musicbrainzngs.get_release_by_id(
+                    rid,
+                    includes=release_includes,
+                )
+            )
+        except Exception:
+            logger.exception("[MUSIC] release fetch failed release_group=%s release=%s", release_group_mbid, release_mbid)
+            continue
+        release_obj = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
+        if fallback_release is None:
+            fallback_release = candidate
+            fallback_release_obj = release_obj if isinstance(release_obj, dict) else {}
+        if _release_media_has_track_entries(release_obj):
+            selected_release = candidate
+            selected_release_obj = release_obj if isinstance(release_obj, dict) else {}
+            logger.info(
+                "[MUSIC] selected release with tracks release_group=%s release=%s status=%s country=%s",
+                release_group_mbid,
+                release_mbid,
+                candidate.get("status"),
+                candidate.get("country"),
+            )
+            break
+
+    if selected_release is not None:
+        return selected_release, selected_release_obj
+    if fallback_release is not None:
+        logger.info(
+            "[MUSIC] no release with tracks found; falling back release_group=%s release=%s",
+            release_group_mbid,
+            fallback_release.get("id"),
+        )
+        return fallback_release, fallback_release_obj
+    raise HTTPException(status_code=502, detail="musicbrainz_release_selection_failed")
+
+
 @app.post("/api/music/album/download")
 def download_full_album(data: dict):
     release_group_mbid = str((data or {}).get("release_group_mbid") or "").strip()
@@ -7188,31 +7268,15 @@ def download_full_album(data: dict):
     if not release_dicts:
         raise HTTPException(status_code=404, detail="musicbrainz_release_group_has_no_releases")
 
-    official = [rel for rel in release_dicts if str(rel.get("status") or "").strip().lower() == "official"]
-    us_official = [rel for rel in official if str(rel.get("country") or "").strip().upper() == "US"]
-    if us_official:
-        selected_release = us_official[0]
-    elif official:
-        selected_release = official[0]
-    else:
-        selected_release = release_dicts[0]
+    selected_release, release_obj = _select_release_with_tracks(
+        mb,
+        release_group_mbid,
+        release_dicts,
+        include_tags=True,
+    )
     release_mbid = str(selected_release.get("id") or "").strip()
     if not release_mbid:
         raise HTTPException(status_code=502, detail="musicbrainz_release_selection_failed")
-
-    try:
-        release_payload = mb._call_with_retry(  # noqa: SLF001
-            lambda: musicbrainzngs.get_release_by_id(
-                release_mbid,
-                # Keep include list contract-safe; use tags fallback for genre best-effort.
-                includes=["recordings", "media", "artists", "tags"],
-            )
-        )
-    except Exception:
-        logger.exception("[MUSIC] release fetch failed release=%s", release_mbid)
-        raise HTTPException(status_code=502, detail="musicbrainz_release_fetch_failed")
-
-    release_obj = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
     release_title = str(release_obj.get("title") or "").strip() or None
     release_date = str(release_obj.get("date") or "").strip() or None
     release_artist_credit = release_obj.get("artist-credit", []) if isinstance(release_obj, dict) else []
@@ -7600,9 +7664,12 @@ def music_album_tracks(
             "tracks": [],
         }
 
-    official = [rel for rel in release_dicts if str(rel.get("status") or "").strip().lower() == "official"]
-    us_official = [rel for rel in official if str(rel.get("country") or "").strip().upper() == "US"]
-    selected_release = us_official[0] if us_official else (official[0] if official else release_dicts[0])
+    selected_release, release = _select_release_with_tracks(
+        mb,
+        group_id,
+        release_dicts,
+        include_tags=False,
+    )
     release_mbid = str(selected_release.get("id") or "").strip()
     if not release_mbid:
         return {
@@ -7610,19 +7677,6 @@ def music_album_tracks(
             "release_mbid": None,
             "tracks": [],
         }
-
-    try:
-        release_payload = mb._call_with_retry(  # noqa: SLF001
-            lambda: musicbrainzngs.get_release_by_id(
-                release_mbid,
-                includes=["recordings", "media", "artists"],
-            )
-        )
-    except Exception:
-        logging.exception("music_album_tracks release fetch failed release_mbid=%s", release_mbid)
-        raise HTTPException(status_code=502, detail="musicbrainz_release_fetch_failed")
-
-    release = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
     release_title = str(release.get("title") or "").strip()
     release_date = str(release.get("date") or "").strip()
     release_year = release_date[:4] if len(release_date) >= 4 and release_date[:4].isdigit() else None
