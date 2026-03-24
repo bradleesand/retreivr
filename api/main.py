@@ -2197,15 +2197,13 @@ def _build_music_track_canonical_id(
 class _IntentQueueAdapter:
     """Queue adapter that writes intent payloads into the unified download queue."""
 
-    def enqueue(self, payload: dict) -> None:
+    def enqueue(self, payload: dict) -> dict[str, object]:
         if not isinstance(payload, dict):
-            logging.warning("Intent enqueue skipped: payload is not a dict")
-            return
+            raise HTTPException(status_code=400, detail="intent_enqueue_invalid_payload")
         engine = getattr(app.state, "worker_engine", None)
         store = getattr(engine, "store", None) if engine is not None else None
         if store is None:
-            logging.warning("Intent enqueue skipped: worker engine store unavailable")
-            return
+            raise HTTPException(status_code=503, detail="intent_queue_store_unavailable")
         try:
             runtime_config = load_config(app.state.config_path)
         except Exception:
@@ -2280,7 +2278,7 @@ class _IntentQueueAdapter:
             mb_release_id: str | None = None,
             mb_release_group_id: str | None = None,
             media_mode: str | None = None,
-        ) -> None:
+        ) -> dict[str, object]:
             def _optional_pos_int(value):
                 if value is None or str(value).strip() == "":
                     return None
@@ -2318,8 +2316,7 @@ class _IntentQueueAdapter:
                 else []
             )
             if not normalized_artist or not normalized_track:
-                logging.warning("Intent enqueue skipped: music query missing artist/track")
-                return
+                raise HTTPException(status_code=400, detail="intent_enqueue_missing_artist_or_track")
             query = quote(f"{normalized_artist} {normalized_track}".strip())
             url = f"https://music.youtube.com/search?q={query}"
             normalized_media_mode = str(media_mode or "").strip().lower()
@@ -2389,15 +2386,23 @@ class _IntentQueueAdapter:
                 },
                 canonical_id=canonical_id,
             )
-            store.enqueue_job(
+            job_id, created, dedupe_reason = store.enqueue_job(
                 **enqueue_payload,
                 force_requeue=force_redownload,
             )
             logging.info(
-                "Intent payload queued playlist_id=%s spotify_track_id=%s",
+                "Intent payload queued playlist_id=%s spotify_track_id=%s job_id=%s created=%s dedupe_reason=%s",
                 payload.get("playlist_id"),
                 payload.get("spotify_track_id"),
+                job_id,
+                bool(created),
+                dedupe_reason,
             )
+            return {
+                "job_id": job_id,
+                "created": bool(created),
+                "dedupe_reason": dedupe_reason,
+            }
 
         if media_intent == "music_track":
             recording_mbid = str(
@@ -2408,7 +2413,7 @@ class _IntentQueueAdapter:
             if not recording_mbid:
                 logging.error("[MUSIC] enqueue_rejected missing_recording_mbid")
                 raise HTTPException(status_code=400, detail="recording_mbid required for music_track enqueue")
-            _enqueue_music_query_job(
+            return _enqueue_music_query_job(
                 str(payload.get("artist") or ""),
                 str(payload.get("track") or payload.get("title") or ""),
                 str(payload.get("album") or ""),
@@ -2417,7 +2422,6 @@ class _IntentQueueAdapter:
                 mb_release_group_id=str(payload.get("mb_release_group_id") or payload.get("release_group_id") or ""),
                 media_mode=str(payload.get("media_mode") or ""),
             )
-            return
 
         resolved_media = payload.get("resolved_media") if isinstance(payload.get("resolved_media"), dict) else {}
         media_url = str(resolved_media.get("media_url") or payload.get("url") or "").strip()
@@ -2429,15 +2433,14 @@ class _IntentQueueAdapter:
             fallback_track = str(payload.get("track") or payload.get("title") or "").strip()
             fallback_album = str(payload.get("album") or "").strip() or None
             if fallback_artist and fallback_track:
-                _enqueue_music_query_job(
+                return _enqueue_music_query_job(
                     fallback_artist,
                     fallback_track,
                     fallback_album,
                     media_mode=str(payload.get("media_mode") or ""),
                 )
-                return
             logging.warning("Intent enqueue skipped: no media URL or searchable artist/title available")
-            return
+            raise HTTPException(status_code=400, detail="intent_enqueue_missing_media_url")
         source = str(resolved_media.get("source_id") or payload.get("source") or resolve_source(media_url)).strip() or "unknown"
         music_metadata = _to_dict(payload.get("music_metadata"))
         external_ids = music_metadata.get("external_ids") if isinstance(music_metadata.get("external_ids"), dict) else {}
@@ -2468,15 +2471,23 @@ class _IntentQueueAdapter:
             },
             canonical_id=canonical_id,
         )
-        store.enqueue_job(
+        job_id, created, dedupe_reason = store.enqueue_job(
             **enqueue_payload,
             force_requeue=force_redownload,
         )
         logging.info(
-            "Intent payload queued playlist_id=%s spotify_track_id=%s",
+            "Intent payload queued playlist_id=%s spotify_track_id=%s job_id=%s created=%s dedupe_reason=%s",
             payload.get("playlist_id"),
             payload.get("spotify_track_id"),
+            job_id,
+            bool(created),
+            dedupe_reason,
         )
+        return {
+            "job_id": job_id,
+            "created": bool(created),
+            "dedupe_reason": dedupe_reason,
+        }
 
 
 class SafeJSONResponse(JSONResponse):
@@ -7298,6 +7309,8 @@ def download_full_album(data: dict):
     engine = getattr(app.state, "worker_engine", None)
     store = getattr(engine, "store", None) if engine is not None else None
     tracks_enqueued = 0
+    duplicate_tracks_count = 0
+    duplicate_tracks = []
     job_ids = []
     failed_tracks = []
     album_duration_delta_limit_ms = 25000
@@ -7403,12 +7416,25 @@ def download_full_album(data: dict):
                     mb_release_group_id=payload.get("mb_release_group_id") or payload.get("release_group_id"),
                     disc_number=payload.get("disc_number"),
                 )
-                queue.enqueue(payload)
-                tracks_enqueued += 1
-                if store is not None:
-                    existing = store.get_job_by_canonical_id(canonical_id)
-                    if existing is not None and existing.id:
-                        job_ids.append(existing.id)
+                queue_result = queue.enqueue(payload)
+                created = bool(queue_result.get("created")) if isinstance(queue_result, dict) else True
+                dedupe_reason = str(queue_result.get("dedupe_reason") or "").strip() if isinstance(queue_result, dict) else ""
+                queued_job_id = str(queue_result.get("job_id") or "").strip() if isinstance(queue_result, dict) else ""
+                if created:
+                    tracks_enqueued += 1
+                    if queued_job_id:
+                        job_ids.append(queued_job_id)
+                else:
+                    duplicate_tracks_count += 1
+                    duplicate_tracks.append(
+                        {
+                            "recording_mbid": payload.get("recording_mbid") or recording_mbid,
+                            "track": title,
+                            "reason": dedupe_reason or "duplicate",
+                        }
+                    )
+            except HTTPException:
+                raise
             except Exception as exc:
                 reason_text = str(exc) or "track_enqueue_failed"
                 logger.warning(
@@ -7458,6 +7484,8 @@ def download_full_album(data: dict):
         "release_group_mbid": release_group_mbid,
         "release_mbid": release_mbid,
         "tracks_enqueued": tracks_enqueued,
+        "duplicate_tracks_count": duplicate_tracks_count,
+        "duplicate_tracks": duplicate_tracks,
         "failed_tracks_count": len(failed_tracks),
         "failed_tracks": failed_tracks,
         "job_ids": job_ids,

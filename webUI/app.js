@@ -3672,13 +3672,21 @@ function renderAlbumQueueSummary(result, { albumTitle = "Album" } = {}) {
   const tracksEnqueued = Number.isFinite(Number(result?.tracks_enqueued))
     ? Number(result.tracks_enqueued)
     : 0;
+  const duplicateTracksCount = Number.isFinite(Number(result?.duplicate_tracks_count))
+    ? Number(result.duplicate_tracks_count)
+    : 0;
   const failedTracksCount = Number.isFinite(Number(result?.failed_tracks_count))
     ? Number(result.failed_tracks_count)
     : 0;
   const failedTracks = Array.isArray(result?.failed_tracks) ? result.failed_tracks : [];
-  const summary = failedTracksCount > 0
-    ? `Album queued: ${tracksEnqueued} tracks · Skipped: ${failedTracksCount}`
-    : `Album queued: ${tracksEnqueued} tracks`;
+  const summaryParts = [`Album queued: ${tracksEnqueued} tracks`];
+  if (duplicateTracksCount > 0) {
+    summaryParts.push(`Already queued/downloaded: ${duplicateTracksCount}`);
+  }
+  if (failedTracksCount > 0) {
+    summaryParts.push(`Failed: ${failedTracksCount}`);
+  }
+  const summary = summaryParts.join(" · ");
   setNotice(messageEl, summary, false);
 
   let detailsEl = document.getElementById("home-album-failed-details");
@@ -4053,6 +4061,12 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
           const count = Number.isFinite(Number(result?.tracks_enqueued))
             ? Number(result.tracks_enqueued)
             : 0;
+          if (count > 0) {
+            button.textContent = "Queued...";
+          } else {
+            button.disabled = false;
+            button.textContent = "Download";
+          }
           console.info("[MUSIC UI] album queued", { release_group_mbid: releaseGroupMbidValue, tracks_enqueued: count });
           renderAlbumQueueSummary(result, { albumTitle: albumItem?.title || "Album" });
         } catch (err) {
@@ -4634,16 +4648,21 @@ function renderHomeAlbumCandidates(candidates, query = "") {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      state.homeQueuedAlbumReleaseGroups.add(releaseGroupId);
-      container.querySelectorAll(`.album-download-btn[data-release-group-id="${CSS.escape(releaseGroupId)}"]`)
-        .forEach((dupButton) => {
-          dupButton.disabled = true;
-          dupButton.textContent = "Queued...";
-        });
-      button.textContent = "Queued...";
       const count = Number.isFinite(Number(result?.tracks_enqueued))
         ? Number(result.tracks_enqueued)
         : 0;
+      if (count > 0) {
+        state.homeQueuedAlbumReleaseGroups.add(releaseGroupId);
+        container.querySelectorAll(`.album-download-btn[data-release-group-id="${CSS.escape(releaseGroupId)}"]`)
+          .forEach((dupButton) => {
+            dupButton.disabled = true;
+            dupButton.textContent = "Queued...";
+          });
+        button.textContent = "Queued...";
+      } else {
+        button.disabled = false;
+        button.textContent = originalLabel;
+      }
       renderAlbumQueueSummary(result, { albumTitle: button.dataset.albumTitle || "Album" });
     } catch (err) {
       button.disabled = false;
