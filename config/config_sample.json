@@ -73,6 +73,10 @@
     "genius_api_token": "…"
   },
   "music_metadata_debug": false,
+  "music": {
+    "library_path": "",
+    "exports": []
+  },
   "dry_run": false,
   "upload_date_format": "MM-YYYY",
   "final_format": "mkv",

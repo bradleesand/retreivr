@@ -674,6 +674,23 @@
                 </div>
                 <div id="library-reconcile-message" class="notice" role="status"></div>
               </div>
+              <div class="group">
+                <div class="group-title">Music Library Integration</div>
+                <div class="stack">
+                  <label class="field full">
+                    <span>Canonical Library Path</span>
+                    <div class="row path-picker">
+                      <input id="cfg-music-library-path" type="text" placeholder="/Media/Music/Music Library">
+                      <button id="browse-music-library-path" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                  <div id="music-exports-list" class="stack"></div>
+                  <div class="row">
+                    <button id="add-music-export" class="button ghost small" type="button">Add Export Target</button>
+                  </div>
+                  <div class="notice">Exports run after the canonical file is finalized. Copy exports keep the canonical filename only; transcode exports emit flat `.m4a` files without touching the canonical library.</div>
+                </div>
+              </div>
               <div class="group" data-settings-level="advanced">
                 <div class="group-title">Filename Templates</div>
                 <div class="grid two runtime-extras-grid">

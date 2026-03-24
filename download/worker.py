@@ -11,6 +11,7 @@ from typing import Any, Optional, Protocol
 
 from config.settings import ENABLE_DURATION_VALIDATION, SPOTIFY_DURATION_TOLERANCE_SECONDS
 from db.downloaded_tracks import record_downloaded_track
+from engine.music_export import run_music_exports
 from media.ffprobe import get_media_duration
 from media.music_contract import coerce_canonical_music_metadata, parse_first_positive_int
 from media.path_builder import build_music_relative_layout, ensure_parent_dir, resolve_music_root_path
@@ -167,6 +168,17 @@ class DownloadWorker:
                         logger.exception("failed to move tagged file to canonical path path=%s", canonical_path)
                         self._set_job_status(job, payload, JOB_STATUS_FAILED)
                         return {"status": JOB_STATUS_FAILED, "file_path": None}
+                    try:
+                        export_results = run_music_exports(
+                            str(canonical_path),
+                            self._metadata_to_export_dict(normalized_metadata),
+                            payload.get("config") if isinstance(payload.get("config"), dict) else {},
+                        )
+                    except Exception:
+                        logger.exception("music export stage failed path=%s", canonical_path)
+                        export_results = {}
+                    if export_results:
+                        payload["export_results"] = export_results
                     # Record idempotency state only after download and tagging both succeed.
                     playlist_id = payload.get("playlist_id")
                     isrc = getattr(metadata, "isrc", None)
@@ -207,6 +219,22 @@ class DownloadWorker:
     def _resolve_music_root(payload: dict[str, Any]) -> Path:
         """Resolve music root path from existing payload/config fields."""
         return resolve_music_root_path(payload)
+
+    @staticmethod
+    def _metadata_to_export_dict(metadata: CanonicalMetadata) -> dict[str, Any]:
+        return {
+            "title": metadata.title,
+            "track": metadata.title,
+            "artist": metadata.artist,
+            "album": metadata.album,
+            "album_artist": metadata.album_artist,
+            "track_number": metadata.track_num,
+            "track_num": metadata.track_num,
+            "disc_number": metadata.disc_num,
+            "disc_num": metadata.disc_num,
+            "date": metadata.date,
+            "genre": metadata.genre,
+        }
 
 
 def safe_int(value: Any) -> Optional[int]:

@@ -514,6 +514,45 @@ def validate_config(config):
     if home_music_video_folder is not None and not isinstance(home_music_video_folder, str):
         errors.append("home_music_video_download_folder must be a string")
 
+    music_cfg = config.get("music")
+    if music_cfg is not None:
+        if not isinstance(music_cfg, dict):
+            errors.append("music must be an object")
+        else:
+            library_path = music_cfg.get("library_path")
+            if library_path is not None and not isinstance(library_path, str):
+                errors.append("music.library_path must be a string")
+            elif isinstance(library_path, str) and library_path.strip() and not os.path.exists(library_path.strip()):
+                errors.append("music.library_path must exist")
+            exports = music_cfg.get("exports")
+            if exports is not None and not isinstance(exports, list):
+                errors.append("music.exports must be a list")
+            elif isinstance(exports, list):
+                for index, export in enumerate(exports, start=1):
+                    prefix = f"music.exports[{index}]"
+                    if not isinstance(export, dict):
+                        errors.append(f"{prefix} must be an object")
+                        continue
+                    if export.get("name") is not None and not isinstance(export.get("name"), str):
+                        errors.append(f"{prefix}.name must be a string")
+                    if not isinstance(export.get("enabled"), bool):
+                        errors.append(f"{prefix}.enabled must be true/false")
+                    if export.get("type") not in {"copy", "transcode"}:
+                        errors.append(f"{prefix}.type must be 'copy' or 'transcode'")
+                    if export.get("path") is not None and not isinstance(export.get("path"), str):
+                        errors.append(f"{prefix}.path must be a string")
+                    elif (
+                        bool(export.get("enabled"))
+                        and isinstance(export.get("path"), str)
+                        and export.get("path").strip()
+                        and not os.path.exists(export.get("path").strip())
+                    ):
+                        errors.append(f"{prefix}.path must exist when enabled")
+                    if export.get("codec") is not None and not isinstance(export.get("codec"), str):
+                        errors.append(f"{prefix}.codec must be a string")
+                    if export.get("bitrate") is not None and not isinstance(export.get("bitrate"), str):
+                        errors.append(f"{prefix}.bitrate must be a string")
+
     if final_format is not None and not isinstance(final_format, str):
         errors.append("final_format must be a string")
     if music_final_format is not None and not isinstance(music_final_format, str):

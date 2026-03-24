@@ -27,6 +27,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
+from engine.music_export import run_music_exports
 from engine.music_title_normalization import has_live_intent, relaxed_search_title
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
@@ -4534,13 +4535,26 @@ class YouTubeAdapter:
                 enqueue_audio_metadata=bool(music_mode),
             )
             runtime_media_profile = meta.get("runtime_media_profile") if isinstance(meta.get("runtime_media_profile"), dict) else None
+            adapter_store = getattr(self, "store", None)
             if runtime_media_profile:
-                adapter_store = getattr(self, "store", None)
                 if adapter_store and hasattr(adapter_store, "merge_output_template_fields"):
                     adapter_store.merge_output_template_fields(
                         job.id,
                         {"runtime_media_profile": runtime_media_profile},
                     )
+            export_results = {}
+            if audio_mode and final_path and isinstance(config, dict):
+                try:
+                    export_results = run_music_exports(final_path, meta if isinstance(meta, dict) else {}, config)
+                except Exception:
+                    logger.exception("[MUSIC] export stage failed job_id=%s path=%s", getattr(job, "id", None), final_path)
+                    export_results = {}
+                if export_results and adapter_store and hasattr(adapter_store, "merge_output_template_fields"):
+                    adapter_store.merge_output_template_fields(
+                        job.id,
+                        {"export_results": export_results},
+                    )
+                    meta["export_results"] = export_results
             logger.info(f"[MUSIC] finalized file: {final_path}")
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -8084,6 +8098,43 @@ def _normalize_decision_edge(value):
     }
 
 
+def _normalize_export_results(value):
+    if not isinstance(value, dict):
+        return {}
+    normalized = {}
+    for export_name, export_result in value.items():
+        name = str(export_name or "").strip()
+        if not name or not isinstance(export_result, dict):
+            continue
+        normalized[name] = dict(export_result)
+    return normalized
+
+
+def _aggregate_export_results(rows):
+    aggregate = {}
+    for row in rows:
+        output_template = {}
+        raw_template = row["output_template"]
+        if isinstance(raw_template, str) and raw_template.strip():
+            try:
+                loaded = json.loads(raw_template)
+                if isinstance(loaded, dict):
+                    output_template = loaded
+            except Exception:
+                output_template = {}
+        export_results = _normalize_export_results(output_template.get("export_results"))
+        for export_name, result in export_results.items():
+            target = aggregate.setdefault(export_name, {"copied": 0, "transcoded": 0, "failed": 0})
+            status = str(result.get("status") or "").strip().lower()
+            if status == "copied":
+                target["copied"] += 1
+            elif status == "transcoded":
+                target["transcoded"] += 1
+            else:
+                target["failed"] += 1
+    return dict(sorted(aggregate.items(), key=lambda item: item[0]))
+
+
 def build_music_album_run_summary(db_path, album_run_id):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -8220,9 +8271,10 @@ def build_music_album_run_summary(db_path, album_run_id):
     selected_album_dir = None
     if candidate_album_dirs:
         selected_album_dir = sorted(candidate_album_dirs.items(), key=lambda item: (-int(item[1]), item[0]))[0][0]
+    export_summary = _aggregate_export_results(rows)
 
     summary = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_type": "music_album",
         "album_run_id": str(album_run_id or ""),
         "telegram_sent": False,
@@ -8244,6 +8296,7 @@ def build_music_album_run_summary(db_path, album_run_id):
         "community_publish_status_mix": dict(
             sorted(community_publish_status_mix.items(), key=lambda item: (-int(item[1]), item[0]))
         ),
+        "exports": export_summary,
         "wrong_variant_flags": wrong_variant_count,
         "rejection_mix": dict(sorted(rejection_mix.items(), key=lambda item: (-int(item[1]), item[0]))),
         "unresolved_classification": {

@@ -70,3 +70,41 @@ def test_validate_config_rejects_non_string_download_defaults() -> None:
     assert "single_download_folder must be a string" in errors
     assert "home_music_download_folder must be a string" in errors
     assert "home_music_video_download_folder must be a string" in errors
+
+
+def test_validate_config_rejects_invalid_music_export_targets() -> None:
+    core = _load_engine_core()
+
+    errors = core.validate_config(
+        {
+            "music": {
+                "library_path": 123,
+                "exports": [
+                    {"name": "bad-copy", "enabled": "yes", "type": "copy", "path": "/tmp/out"},
+                    {"name": "bad-type", "enabled": True, "type": "move", "path": "/tmp/out"},
+                ],
+            }
+        }
+    )
+
+    assert "music.library_path must be a string" in errors
+    assert "music.exports[1].enabled must be true/false" in errors
+    assert "music.exports[2].type must be 'copy' or 'transcode'" in errors
+
+
+def test_validate_config_requires_existing_music_export_paths_when_enabled(tmp_path) -> None:
+    core = _load_engine_core()
+
+    errors = core.validate_config(
+        {
+            "music": {
+                "library_path": str(tmp_path / "missing-library"),
+                "exports": [
+                    {"name": "apple_music", "enabled": True, "type": "copy", "path": str(tmp_path / "missing-export")},
+                ],
+            }
+        }
+    )
+
+    assert "music.library_path must exist" in errors
+    assert "music.exports[1].path must exist when enabled" in errors

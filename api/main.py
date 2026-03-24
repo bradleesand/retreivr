@@ -7067,6 +7067,30 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
     no_viable = max(0, len(unresolved) - source_unavailable)
     completion_percent = (tracks_resolved / tracks_total * 100.0) if tracks_total else 0.0
     per_album_id = str(release_group_mbid or "").strip() or album_run_id
+    export_summary = {}
+    for row in rows:
+        output_template = row["output_template"]
+        parsed = {}
+        if isinstance(output_template, str) and output_template.strip():
+            try:
+                loaded = json.loads(output_template)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                parsed = {}
+        export_results = parsed.get("export_results") if isinstance(parsed.get("export_results"), dict) else {}
+        for export_name, result in export_results.items():
+            name = str(export_name or "").strip()
+            if not name or not isinstance(result, dict):
+                continue
+            target = export_summary.setdefault(name, {"copied": 0, "transcoded": 0, "failed": 0})
+            status = str(result.get("status") or "").strip().lower()
+            if status == "copied":
+                target["copied"] += 1
+            elif status == "transcoded":
+                target["transcoded"] += 1
+            else:
+                target["failed"] += 1
     return {
         "schema_version": 1,
         "run_type": "music_album",
@@ -7077,6 +7101,7 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
         "tracks_total": tracks_total,
         "tracks_resolved": tracks_resolved,
         "completion_percent": completion_percent,
+        "exports": dict(sorted(export_summary.items(), key=lambda item: item[0])),
         "unresolved_classification": {
             "source_unavailable": source_unavailable,
             "no_viable_match": no_viable,

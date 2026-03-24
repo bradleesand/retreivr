@@ -96,6 +96,7 @@ const BROWSE_DEFAULTS = {
   mediaRoot: "",
   tokensDir: "",
 };
+const MUSIC_EXPORT_TYPES = ["copy", "transcode"];
 const VERSION_LATEST_URL = "/api/version/latest";
 const VERSION_REFERENCE_PAGE = "https://github.com/sudoStacks/retreivr/pkgs/container/retreivr";
 const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at_v2";
@@ -454,6 +455,101 @@ function clearConfigNotice() {
     clearTimeout(state.configNoticeTimer);
     state.configNoticeTimer = null;
   }
+}
+
+function normalizeMusicExports(cfg) {
+  const music = (cfg && typeof cfg.music === "object") ? cfg.music : {};
+  const exports = Array.isArray(music.exports) ? music.exports : [];
+  return exports
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry) => ({
+      name: entry.name ?? "",
+      enabled: !!entry.enabled,
+      type: MUSIC_EXPORT_TYPES.includes(String(entry.type || "").trim().toLowerCase())
+        ? String(entry.type || "").trim().toLowerCase()
+        : "copy",
+      path: entry.path ?? "",
+      codec: entry.codec ?? "aac",
+      bitrate: entry.bitrate ?? "256k",
+    }));
+}
+
+function syncMusicExportRow(row) {
+  if (!row) return;
+  const enabled = !!row.querySelector(".music-export-enabled")?.checked;
+  const type = String(row.querySelector(".music-export-type")?.value || "copy").trim().toLowerCase();
+  const transcodeFields = row.querySelector(".music-export-transcode-fields");
+  if (transcodeFields) {
+    transcodeFields.style.display = enabled && type === "transcode" ? "" : "none";
+  }
+}
+
+function addMusicExportRow(entry = {}) {
+  const container = $("#music-exports-list");
+  if (!container) return;
+
+  const row = document.createElement("div");
+  row.className = "group";
+  row.dataset.musicExportRow = "1";
+  row.innerHTML = `
+    <div class="row" style="justify-content: space-between; align-items: center;">
+      <div class="group-title" style="margin: 0;">Export Target</div>
+      <button type="button" class="button ghost small music-export-remove">Remove</button>
+    </div>
+    <div class="grid two">
+      <label class="field inline short">
+        <span>Enable Export</span>
+        <input class="music-export-enabled" type="checkbox">
+      </label>
+      <label class="field medium">
+        <span>Export Name</span>
+        <input class="music-export-name" type="text" placeholder="apple_music">
+      </label>
+      <label class="field medium">
+        <span>Export Type</span>
+        <select class="music-export-type">
+          <option value="copy">Copy</option>
+          <option value="transcode">Transcode</option>
+        </select>
+      </label>
+      <label class="field full">
+        <span>Export Path</span>
+        <div class="row path-picker">
+          <input class="music-export-path" type="text" placeholder="/Users/<user>/Music/Music/Media/Automatically Add to Music">
+          <button type="button" class="button ghost small music-export-browse">Browse</button>
+        </div>
+      </label>
+    </div>
+    <div class="grid two music-export-transcode-fields">
+      <label class="field short">
+        <span>Codec</span>
+        <input class="music-export-codec" type="text" placeholder="aac">
+      </label>
+      <label class="field short">
+        <span>Bitrate</span>
+        <input class="music-export-bitrate" type="text" placeholder="256k">
+      </label>
+    </div>
+  `;
+  container.appendChild(row);
+
+  row.querySelector(".music-export-enabled").checked = !!entry.enabled;
+  row.querySelector(".music-export-name").value = entry.name ?? "";
+  row.querySelector(".music-export-type").value = MUSIC_EXPORT_TYPES.includes(String(entry.type || "").trim().toLowerCase())
+    ? String(entry.type || "").trim().toLowerCase()
+    : "copy";
+  row.querySelector(".music-export-path").value = entry.path ?? "";
+  row.querySelector(".music-export-codec").value = entry.codec ?? "aac";
+  row.querySelector(".music-export-bitrate").value = entry.bitrate ?? "256k";
+
+  row.querySelector(".music-export-enabled").addEventListener("change", () => syncMusicExportRow(row));
+  row.querySelector(".music-export-type").addEventListener("change", () => syncMusicExportRow(row));
+  row.querySelector(".music-export-remove").addEventListener("click", () => row.remove());
+  row.querySelector(".music-export-browse").addEventListener("click", () => {
+    const input = row.querySelector(".music-export-path");
+    openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input?.value || ""));
+  });
+  syncMusicExportRow(row);
 }
 
 function setConfigNotice(message, isError = false, autoClear = false) {
@@ -7233,6 +7329,13 @@ function renderConfig(cfg) {
   $("#cfg-home-music-video-download-folder").value = normalizeDownloadsRelative(
     cfg.home_music_video_download_folder ?? ""
   );
+  const musicCfg = (cfg && typeof cfg.music === "object") ? cfg.music : {};
+  $("#cfg-music-library-path").value = musicCfg.library_path ?? "";
+  const musicExportsList = $("#music-exports-list");
+  if (musicExportsList) {
+    musicExportsList.textContent = "";
+    normalizeMusicExports(cfg).forEach((entry) => addMusicExportRow(entry));
+  }
   $("#cfg-community-cache-lookup-enabled").checked = !!(
     cfg.community_cache_lookup_enabled ?? cfg.community_cache_enabled
   );
@@ -7863,6 +7966,43 @@ function buildConfigFromForm() {
   } else {
     delete base.home_music_video_download_folder;
   }
+
+  const existingMusic = (base.music && typeof base.music === "object") ? base.music : {};
+  const musicLibraryPath = $("#cfg-music-library-path").value.trim();
+  const musicExports = [];
+  $$("[data-music-export-row='1']").forEach((row, idx) => {
+    const enabled = !!row.querySelector(".music-export-enabled")?.checked;
+    const name = row.querySelector(".music-export-name")?.value.trim() || "";
+    const type = String(row.querySelector(".music-export-type")?.value || "copy").trim().toLowerCase();
+    const exportPath = row.querySelector(".music-export-path")?.value.trim() || "";
+    const codec = row.querySelector(".music-export-codec")?.value.trim() || "aac";
+    const bitrate = row.querySelector(".music-export-bitrate")?.value.trim() || "256k";
+    if (!name && !exportPath && !enabled) {
+      return;
+    }
+    if (!name) {
+      errors.push(`Music export ${idx + 1} requires a name`);
+      return;
+    }
+    if (!enabled) {
+      musicExports.push({ name, enabled: false, type, path: exportPath, codec, bitrate });
+      return;
+    }
+    if (!MUSIC_EXPORT_TYPES.includes(type)) {
+      errors.push(`Music export ${idx + 1} type must be copy or transcode`);
+      return;
+    }
+    if (!exportPath) {
+      errors.push(`Music export ${idx + 1} requires an export path when enabled`);
+      return;
+    }
+    if (type === "transcode" && !bitrate) {
+      errors.push(`Music export ${idx + 1} requires a bitrate for transcode`);
+      return;
+    }
+    musicExports.push({ name, enabled: true, type, path: exportPath, codec, bitrate });
+  });
+  base.music = { ...existingMusic, library_path: musicLibraryPath, exports: musicExports };
 
   base.community_cache_lookup_enabled = !!$("#cfg-community-cache-lookup-enabled").checked;
   base.community_cache_enabled = base.community_cache_lookup_enabled;
@@ -8921,6 +9061,17 @@ function bindEvents() {
       const input = $("#cfg-home-music-video-download-folder");
       openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input?.value || ""));
     });
+  }
+  const browseMusicLibraryPath = $("#browse-music-library-path");
+  if (browseMusicLibraryPath) {
+    browseMusicLibraryPath.addEventListener("click", () => {
+      const input = $("#cfg-music-library-path");
+      openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input?.value || ""));
+    });
+  }
+  const addMusicExportButton = $("#add-music-export");
+  if (addMusicExportButton) {
+    addMusicExportButton.addEventListener("click", () => addMusicExportRow({ enabled: true, type: "copy" }));
   }
   // TODO(webUI/app.js::legacy-run): keep this marker while legacy-run removal rolls out across user docs.
   const homeBrowse = $("#home-destination-browse");
