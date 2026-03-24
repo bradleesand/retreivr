@@ -12,6 +12,7 @@ This release turns library import into a first-class operational workflow. Retre
 - Persisted import-batch and import-item records with per-track outcomes, rejection reasons, scoring details, duplicate linkage, and selected release bucket metadata.
 - New queue recovery actions in the Status page: `Cancel Active`, `Recover Stale Jobs`, `Clear Failed`, and `Clear Queue`.
 - Expanded live status payload and UI sections for active jobs, queue health, stale-job counts, import progress, and recent import-batch summaries.
+- Music library integration settings and post-finalization export targets for canonical music files, including flat-folder copy targets and optional AAC transcode targets for watched-library workflows such as Apple Music auto-import or portable-device sync.
 
 ### Changed
 - Library import processing now records batch-level progress and compact completion summaries instead of relying on noisy per-track logs.
@@ -23,6 +24,7 @@ This release turns library import into a first-class operational workflow. Retre
 - Watcher downtime no longer appears to pause import execution or queue processing in logs; watcher pause semantics are now clearer and status-driven.
 - Stale `claimed` or otherwise blocked queue rows can now be recovered so they stop wedging large import runs indefinitely.
 - Status page counters and labels now better distinguish queue activity, active work, import progress, and subsystem state.
+- Music Mode full-album download buttons now report truthful queue results instead of marking albums as queued when every expanded track was skipped as a duplicate or when queue persistence was unavailable.
 
 ## v0.9.14 — Community Cache Publisher Automation
 
