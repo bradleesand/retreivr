@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.15 — Library Import Overhaul + Queue Recovery + Live Status
+
+### High-Level
+This release turns library import into a first-class operational workflow. Retreivr now resolves fuzzy Apple Music XML imports with a dedicated import-aware profile, exposes truthful batch and queue status in the UI/API, and adds recovery controls for stale or blocked jobs so large imports are easier to trust and operate.
+
+### Added
+- Import-aware MusicBrainz resolution profile for library imports, including `album_artist` support, batch-context scoring, softer duration handling, and controlled fallback behavior for non-ideal release candidates.
+- Persisted import-batch and import-item records with per-track outcomes, rejection reasons, scoring details, duplicate linkage, and selected release bucket metadata.
+- New queue recovery actions in the Status page: `Cancel Active`, `Recover Stale Jobs`, `Clear Failed`, and `Clear Queue`.
+- Expanded live status payload and UI sections for active jobs, queue health, stale-job counts, import progress, and recent import-batch summaries.
+
+### Changed
+- Library import processing now records batch-level progress and compact completion summaries instead of relying on noisy per-track logs.
+- Duplicate handling for import-resolved canonical jobs now classifies active, completed, failed, and stale rows instead of silently skipping everything as a generic duplicate.
+- Operations Status layout in the web UI was reorganized into clearer responsive sections that better use available width and hide disabled operator subsections.
+- Watcher status logging now emits on meaningful state transitions instead of repeating redundant idle/downtime chatter.
+
+### Fixed
+- Watcher downtime no longer appears to pause import execution or queue processing in logs; watcher pause semantics are now clearer and status-driven.
+- Stale `claimed` or otherwise blocked queue rows can now be recovered so they stop wedging large import runs indefinitely.
+- Status page counters and labels now better distinguish queue activity, active work, import progress, and subsystem state.
+
 ## v0.9.14 — Community Cache Publisher Automation
 
 ### High-Level

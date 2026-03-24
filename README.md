@@ -31,11 +31,11 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Used for intentional media consumption... avoid getting sucked into the algorithms
 - Optional Telegram summaries
 
-## 0.9.14 Highlights
-- Automated Community Cache publisher worker for verified transport matches
-- Community Cache settings in the UI for lookup, publishing, repo/branch targeting, and PR behavior
-- Scheduled outbox ingestion that can write dataset updates and open/update a GitHub PR automatically
-- Runtime config changes now refresh the publish worker without a restart
+## 0.9.15 Highlights
+- Import-aware library resolution for Apple Music XML and other fuzzy library-import paths
+- Queue recovery controls for cancelling active work, recovering stale jobs, clearing failed items, and clearing the queue
+- Expanded live status visibility for active jobs, stale blockers, import progress, and recent batch outcomes
+- Lower-noise watcher/import logging with more truthful operational summaries
 
 ## Release Outputs
 - GitHub Container Registry image: `ghcr.io/sudostacks/retreivr:<tag>`
@@ -142,7 +142,7 @@ Related controls:
 ---
 
 ## Upgrade Notes
-If you are upgrading to `0.9.14`, pull the latest image and restart:
+If you are upgrading to `0.9.15`, pull the latest image and restart:
 ```bash
 docker compose -f docker/docker-compose.yml pull
 docker compose -f docker/docker-compose.yml up -d
