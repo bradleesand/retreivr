@@ -63,6 +63,8 @@ const state = {
   playlistImportJobId: null,
   playlistImportPollTimer: null,
   playlistImportInProgress: false,
+  communityPublishStatusTimer: null,
+  communityPublishStatus: null,
   settingsActiveSectionId: "settings-core",
   settingsLayoutObserver: null,
   logsStickToBottom: true,
@@ -566,6 +568,62 @@ function setConfigNotice(message, isError = false, autoClear = false) {
   state.configNoticeClearable = !!autoClear;
   if (autoClear) {
     state.configNoticeTimer = setTimeout(clearConfigNotice, 20000);
+  }
+}
+
+function renderCommunityPublishStatus(status) {
+  state.communityPublishStatus = status || null;
+  const el = $("#community-publish-status");
+  if (!el) return;
+  if (!status || typeof status !== "object") {
+    el.textContent = "Status unavailable";
+    return;
+  }
+  const queue = status.queue?.counts || {};
+  const outbox = status.outbox || {};
+  const task = status.active_task || null;
+  const lastSummary = status.last_summary || null;
+  const backfillSummary = status.backfill_last_summary || null;
+  const lines = [
+    `Mode: ${status.mode || "off"} · Enabled: ${status.enabled ? "yes" : "no"} · Worker: ${status.worker_enabled ? "yes" : "no"}`,
+    `Publisher: ${status.publisher || "-"}`,
+    `Token env: ${status.token_env || "-"} · Token present: ${status.token_present ? "yes" : "no"}`,
+    `Repo: ${status.repo || "-"} · Branch: ${status.branch || "-"} -> ${status.target_branch || "-"}`,
+    `Next scheduled run: ${status.next_run_at || "-"}`,
+    `Outbox: ${outbox.outbox_dir || "-"} · Files: ${Number(outbox.file_count || 0)} · Proposal lines: ${Number(outbox.proposal_lines || 0)}`,
+    `Queue: pending ${Number(queue.pending || 0)} · published ${Number(queue.published || 0)} · error ${Number(queue.error || 0)} · total ${Number(queue.total || 0)}`,
+  ];
+  if (task) {
+    lines.push(`Active task: ${task.kind || "unknown"} · ${task.status || "running"}${task.running ? " · running" : ""}`);
+  }
+  if (lastSummary && typeof lastSummary === "object") {
+    lines.push(`Last publish tick: ${lastSummary.status || "unknown"} · published ${Number(lastSummary.published_proposals || 0)} · errors ${Number(lastSummary.errors || 0)}`);
+  }
+  if (backfillSummary && typeof backfillSummary === "object") {
+    lines.push(`Last backfill: ${backfillSummary.status || "unknown"} · eligible ${Number(backfillSummary.eligible || 0)} · written ${Number(backfillSummary.proposals_written || 0)} · repaired ${Number(backfillSummary.repaired_tags || 0)} · errors ${Number(backfillSummary.errors || 0)}`);
+  }
+  el.innerHTML = lines.map((line) => escapeHtml(String(line))).join("<br>");
+}
+
+async function refreshCommunityPublishStatus() {
+  if (state.communityPublishStatusTimer) {
+    clearTimeout(state.communityPublishStatusTimer);
+    state.communityPublishStatusTimer = null;
+  }
+  try {
+    const status = await fetchJson("/api/community-cache/publish/status");
+    renderCommunityPublishStatus(status);
+    if (status?.active_task?.running) {
+      state.communityPublishStatusTimer = setTimeout(() => {
+        refreshCommunityPublishStatus().catch(() => {});
+      }, 5000);
+    }
+  } catch (err) {
+    renderCommunityPublishStatus(null);
+    const messageEl = $("#community-publish-message");
+    if (messageEl) {
+      setNotice(messageEl, `Publish status error: ${err.message}`, true);
+    }
   }
 }
 
@@ -7477,7 +7535,7 @@ function renderConfig(cfg) {
   $("#cfg-community-cache-publish-outbox-dir").value = cfg.community_cache_publish_outbox_dir ?? "";
   $("#cfg-community-cache-publish-repo").value = cfg.community_cache_publish_repo ?? "sudostacks/retreivr-community-cache";
   $("#cfg-community-cache-publish-target-branch").value = cfg.community_cache_publish_target_branch ?? "main";
-  $("#cfg-community-cache-publish-branch").value = cfg.community_cache_publish_branch ?? "";
+  $("#cfg-community-cache-publish-branch").value = "Auto-managed: retreivr-community-publish/<instance>";
   $("#cfg-community-cache-publish-open-pr").checked = typeof cfg.community_cache_publish_open_pr === "boolean"
     ? cfg.community_cache_publish_open_pr
     : true;
@@ -7488,6 +7546,7 @@ function renderConfig(cfg) {
     ? Number(cfg.community_cache_publish_batch_size)
     : 25;
   $("#cfg-community-cache-publish-token-env").value = cfg.community_cache_publish_token_env ?? "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN";
+  $("#cfg-community-cache-publish-publisher").value = cfg.community_cache_publish_publisher ?? "";
   $("#cfg-music-template").value = cfg.music_filename_template ?? "";
   $("#cfg-yt-dlp-cookies").value = cfg.yt_dlp_cookies ?? "";
   const musicMetaDefaults = {
@@ -7921,6 +7980,7 @@ async function loadConfig() {
     const cfg = await fetchJson("/api/config");
     state.config = cfg;
     renderConfig(cfg);
+    refreshCommunityPublishStatus().catch(() => {});
     updateSearchDestinationDisplay();
     applyHomeDefaultDestination({ force: false });
     applyHomeDefaultVideoFormat({ force: true });
@@ -8181,12 +8241,7 @@ function buildConfigFromForm() {
     delete base.community_cache_publish_target_branch;
   }
 
-  const publishBranch = $("#cfg-community-cache-publish-branch").value.trim();
-  if (publishBranch) {
-    base.community_cache_publish_branch = publishBranch;
-  } else {
-    delete base.community_cache_publish_branch;
-  }
+  delete base.community_cache_publish_branch;
 
   base.community_cache_publish_open_pr = !!$("#cfg-community-cache-publish-open-pr").checked;
 
@@ -8219,6 +8274,13 @@ function buildConfigFromForm() {
     base.community_cache_publish_token_env = publishTokenEnv;
   } else {
     delete base.community_cache_publish_token_env;
+  }
+
+  const publishPublisher = $("#cfg-community-cache-publish-publisher").value.trim();
+  if (publishPublisher) {
+    base.community_cache_publish_publisher = publishPublisher;
+  } else {
+    delete base.community_cache_publish_publisher;
   }
 
   base.schedule = buildSchedulePayloadFromForm();
@@ -9203,6 +9265,44 @@ function bindEvents() {
   const addMusicExportButton = $("#add-music-export");
   if (addMusicExportButton) {
     addMusicExportButton.addEventListener("click", () => addMusicExportRow({ enabled: true, type: "copy" }));
+  }
+  const communityPublishRunNow = $("#community-publish-run-now");
+  if (communityPublishRunNow) {
+    communityPublishRunNow.addEventListener("click", async () => {
+      const messageEl = $("#community-publish-message");
+      setNotice(messageEl, "Starting publish worker...", false);
+      try {
+        await fetchJson("/api/community-cache/publish/run", { method: "POST" });
+        setNotice(messageEl, "Publish worker started.", false);
+        refreshCommunityPublishStatus().catch(() => {});
+      } catch (err) {
+        setNotice(messageEl, `Publish run failed: ${err.message}`, true);
+      }
+    });
+  }
+  const communityPublishBackfill = $("#community-publish-backfill");
+  if (communityPublishBackfill) {
+    communityPublishBackfill.addEventListener("click", async () => {
+      const messageEl = $("#community-publish-message");
+      setNotice(messageEl, "Starting historical library backfill...", false);
+      try {
+        await fetchJson("/api/community-cache/publish/backfill", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dry_run: false }),
+        });
+        setNotice(messageEl, "Historical backfill started.", false);
+        refreshCommunityPublishStatus().catch(() => {});
+      } catch (err) {
+        setNotice(messageEl, `Backfill failed: ${err.message}`, true);
+      }
+    });
+  }
+  const communityPublishRefresh = $("#community-publish-refresh-status");
+  if (communityPublishRefresh) {
+    communityPublishRefresh.addEventListener("click", () => {
+      refreshCommunityPublishStatus().catch(() => {});
+    });
   }
   // TODO(webUI/app.js::legacy-run): keep this marker while legacy-run removal rolls out across user docs.
   const homeBrowse = $("#home-destination-browse");

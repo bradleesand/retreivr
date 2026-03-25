@@ -23,12 +23,14 @@ invalidated locally and the resolver should fall back to normal search.
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 import sqlite3
@@ -114,6 +116,52 @@ def fetch_community_record(recording_mbid: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _record_path(dataset_root: str | Path, recording_mbid: str) -> Path:
+    normalized = str(recording_mbid or "").strip().lower()
+    root = _dataset_record_root(dataset_root)
+    return root / normalized[:2] / f"{normalized}.json"
+
+
+def load_local_community_record(recording_mbid: str, *, dataset_root: str | Path | None) -> Optional[Dict[str, Any]]:
+    normalized = str(recording_mbid or "").strip().lower()
+    if not normalized or not dataset_root:
+        return None
+    path = _record_path(dataset_root, normalized)
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def persist_local_community_record(
+    recording_mbid: str,
+    record: Dict[str, Any],
+    *,
+    dataset_root: str | Path | None,
+) -> bool:
+    normalized = str(recording_mbid or "").strip().lower()
+    if not normalized or not dataset_root or not isinstance(record, dict):
+        return False
+    path = _record_path(dataset_root, normalized)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(record, indent=2, sort_keys=True) + "\n"
+    existing = None
+    try:
+        if path.exists():
+            existing = path.read_text(encoding="utf-8")
+    except Exception:
+        existing = None
+    if existing == content:
+        return False
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.replace(tmp_path, path)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Candidate Extraction
 # ---------------------------------------------------------------------------
@@ -145,6 +193,33 @@ def extract_best_candidate(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     return best
+
+
+def _candidate_score(candidate: Dict[str, Any]) -> tuple[float, str]:
+    try:
+        confidence = float(candidate.get("confidence") or 0.0)
+    except Exception:
+        confidence = 0.0
+    verified = str(candidate.get("last_verified_at") or candidate.get("updated_at") or "")
+    return confidence, verified
+
+
+def _normalize_candidate(candidate: Dict[str, Any], *, provider: str) -> Dict[str, Any]:
+    normalized = dict(candidate or {})
+    normalized["provider"] = provider
+    return normalized
+
+
+def _pick_better_candidate(left: Dict[str, Any] | None, right: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    if not isinstance(left, dict):
+        return dict(right) if isinstance(right, dict) else None
+    if not isinstance(right, dict):
+        return dict(left)
+    left_key = _candidate_score(left)
+    right_key = _candidate_score(right)
+    if right_key > left_key:
+        return dict(right)
+    return dict(left)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +259,16 @@ def lookup_recording(recording_mbid: str) -> Optional[Dict[str, Any]]:
     return candidate
 
 
+def lookup_recording_local(recording_mbid: str, *, dataset_root: str | Path | None) -> Optional[Dict[str, Any]]:
+    record = load_local_community_record(recording_mbid, dataset_root=dataset_root)
+    if not isinstance(record, dict):
+        return None
+    candidate = extract_best_candidate(record)
+    if not isinstance(candidate, dict):
+        return None
+    return _normalize_candidate(candidate, provider="local_dataset")
+
+
 # ---------------------------------------------------------------------------
 # Optional: simple in-memory TTL cache
 # ---------------------------------------------------------------------------
@@ -200,14 +285,21 @@ _REVERSE_LOOKUP_CACHE_MAX_SIZE = 4096
 _REVERSE_LOOKUP_CACHE_LOCK = threading.RLock()
 
 
-def cached_lookup(recording_mbid: str) -> Optional[Dict[str, Any]]:
+def cached_lookup(
+    recording_mbid: str,
+    *,
+    dataset_root: str | Path | None = None,
+    allow_remote: bool = True,
+) -> Optional[Dict[str, Any]]:
     """
     Lookup with simple in-memory caching to avoid repeated GitHub hits.
     """
 
-    mbid = str(recording_mbid or "").strip()
+    mbid = str(recording_mbid or "").strip().lower()
     if not mbid:
         return None
+    dataset_root_key = str(Path(dataset_root).resolve()) if dataset_root else ""
+    cache_key = f"{dataset_root_key}|{int(bool(allow_remote))}|{mbid}"
 
     fetch_event: threading.Event | None = None
     should_fetch = False
@@ -215,17 +307,17 @@ def cached_lookup(recording_mbid: str) -> Optional[Dict[str, Any]]:
     while True:
         now = time.time()
         with _CACHE_LOCK:
-            cached = _CACHE.get(mbid)
+            cached = _CACHE.get(cache_key)
             if cached:
                 if now - float(cached.get("ts") or 0.0) < float(_CACHE_TTL):
-                    _CACHE.move_to_end(mbid)
+                    _CACHE.move_to_end(cache_key)
                     return cached.get("data")
-                _CACHE.pop(mbid, None)
+                _CACHE.pop(cache_key, None)
 
-            in_flight = _IN_FLIGHT.get(mbid)
+            in_flight = _IN_FLIGHT.get(cache_key)
             if in_flight is None:
                 fetch_event = threading.Event()
-                _IN_FLIGHT[mbid] = fetch_event
+                _IN_FLIGHT[cache_key] = fetch_event
                 should_fetch = True
                 break
 
@@ -240,21 +332,60 @@ def cached_lookup(recording_mbid: str) -> Optional[Dict[str, Any]]:
 
     result: Optional[Dict[str, Any]] = None
     try:
-        result = lookup_recording(mbid)
+        local_candidate = None
+        remote_candidate = None
+        if allow_remote:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                local_future = pool.submit(lookup_recording_local, mbid, dataset_root=dataset_root)
+                remote_future = pool.submit(fetch_community_record, mbid)
+                try:
+                    local_candidate = local_future.result(timeout=REQUEST_TIMEOUT + 0.2)
+                except Exception:
+                    local_candidate = None
+                try:
+                    remote_raw = remote_future.result(timeout=REQUEST_TIMEOUT + 0.5)
+                except Exception:
+                    remote_raw = None
+            if isinstance(remote_raw, dict):
+                remote_best = extract_best_candidate(remote_raw)
+                if isinstance(remote_best, dict):
+                    remote_candidate = _normalize_candidate(remote_best, provider="remote_github")
+                try:
+                    persist_local_community_record(mbid, remote_raw, dataset_root=dataset_root)
+                except Exception:
+                    logger.debug("community_cache_local_persist_failed recording_mbid=%s", mbid, exc_info=True)
+        else:
+            local_candidate = lookup_recording_local(mbid, dataset_root=dataset_root)
+        result = _pick_better_candidate(local_candidate, remote_candidate)
     finally:
         with _CACHE_LOCK:
-            _CACHE[mbid] = {
+            _CACHE[cache_key] = {
                 "ts": time.time(),
                 "data": result,
             }
-            _CACHE.move_to_end(mbid)
+            _CACHE.move_to_end(cache_key)
             while len(_CACHE) > int(_CACHE_MAX_SIZE):
                 _CACHE.popitem(last=False)
-            done_event = _IN_FLIGHT.pop(mbid, None)
+            done_event = _IN_FLIGHT.pop(cache_key, None)
             if done_event is not None:
                 done_event.set()
 
     return result
+
+
+def sync_recording_to_local_dataset(
+    recording_mbid: str,
+    *,
+    dataset_root: str | Path | None,
+) -> dict[str, Any]:
+    normalized = str(recording_mbid or "").strip().lower()
+    if not normalized:
+        return {"status": "invalid", "recording_mbid": None, "updated": False}
+    remote = fetch_community_record(normalized)
+    if not isinstance(remote, dict):
+        return {"status": "miss", "recording_mbid": normalized, "updated": False}
+    updated = persist_local_community_record(normalized, remote, dataset_root=dataset_root)
+    return {"status": "synced", "recording_mbid": normalized, "updated": bool(updated)}
 
 
 def lookup_video_id(video_id: str, *, db_path: str | None = None) -> Optional[Dict[str, Any]]:
@@ -342,7 +473,7 @@ def _dataset_record_root(dataset_root: str | Path) -> Path:
         return root / "youtube" / "recording"
     if (root / "recording").is_dir():
         return root / "recording"
-    return root
+    return root / "youtube" / "recording"
 
 
 def rebuild_reverse_index_from_dataset(*, db_path: str, dataset_root: str | Path) -> dict[str, int]:

@@ -200,6 +200,12 @@ def _read_music_identity(path: Path) -> dict[str, Any] | None:
         "----:com.apple.iTunes:MUSICBRAINZ_RELEASEID",
         "musicbrainz_releaseid",
     )
+    release_group_mbid = _first_tag(
+        tags,
+        "TXXX:MUSICBRAINZ_RELEASEGROUPID",
+        "----:com.apple.iTunes:MUSICBRAINZ_RELEASEGROUPID",
+        "musicbrainz_releasegroupid",
+    )
     isrc = _first_tag(
         tags,
         "TSRC",
@@ -240,6 +246,7 @@ def _read_music_identity(path: Path) -> dict[str, Any] | None:
         "disc_number": disc_number,
         "recording_mbid": recording_mbid,
         "mb_release_id": release_mbid,
+        "mb_release_group_id": release_group_mbid,
         "isrc": isrc,
         "canonical_id": canonical_id,
         "media_type": "music",

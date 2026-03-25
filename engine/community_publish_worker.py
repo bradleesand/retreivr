@@ -16,6 +16,7 @@ import requests
 
 
 logger = logging.getLogger(__name__)
+_PUBLISH_IDENTITY_CACHE: dict[str, tuple[float, str]] = {}
 
 DEFAULT_COMMUNITY_CACHE_PUBLISH_REPO = "sudostacks/retreivr-community-cache"
 DEFAULT_COMMUNITY_CACHE_PUBLISH_TARGET_BRANCH = "main"
@@ -24,6 +25,7 @@ DEFAULT_COMMUNITY_CACHE_PUBLISH_OPEN_PR = True
 DEFAULT_COMMUNITY_CACHE_PUBLISH_TOKEN_ENV = "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN"
 DEFAULT_COMMUNITY_CACHE_PUBLISH_BATCH_SIZE = 25
 DEFAULT_COMMUNITY_CACHE_PUBLISH_BRANCH_PREFIX = "retreivr-community-publish"
+DEFAULT_COMMUNITY_CACHE_PUBLISH_PUBLISHER = ""
 GITHUB_API_BASE = "https://api.github.com"
 COMMUNITY_PUBLISH_STATUS_PENDING = "pending"
 COMMUNITY_PUBLISH_STATUS_PUBLISHED = "published"
@@ -44,7 +46,47 @@ def apply_community_publish_defaults(config: dict[str, Any] | None) -> dict[str,
     cfg.setdefault("community_cache_publish_poll_minutes", DEFAULT_COMMUNITY_CACHE_PUBLISH_POLL_MINUTES)
     cfg.setdefault("community_cache_publish_token_env", DEFAULT_COMMUNITY_CACHE_PUBLISH_TOKEN_ENV)
     cfg.setdefault("community_cache_publish_batch_size", DEFAULT_COMMUNITY_CACHE_PUBLISH_BATCH_SIZE)
+    cfg.setdefault("community_cache_publish_publisher", DEFAULT_COMMUNITY_CACHE_PUBLISH_PUBLISHER)
     return cfg
+
+
+def _sanitize_publish_identity(value: Any) -> str:
+    text = re.sub(r"[^a-z0-9._-]+", "-", str(value or "").strip().lower()).strip("./-")
+    return text or ""
+
+
+def resolve_publish_identity(config: dict[str, Any] | None) -> str:
+    cfg = apply_community_publish_defaults(config)
+    explicit = _sanitize_publish_identity(cfg.get("community_cache_publish_publisher"))
+    if explicit:
+        return explicit
+    token = resolve_publish_token(cfg)
+    if token:
+        cached = _PUBLISH_IDENTITY_CACHE.get(token)
+        now_ts = datetime.now(timezone.utc).timestamp()
+        if cached and (now_ts - float(cached[0])) < 300:
+            return cached[1]
+        try:
+            response = requests.get(
+                f"{GITHUB_API_BASE}/user",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {token}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "User-Agent": "retreivr-community-publisher",
+                },
+                timeout=4,
+            )
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+            login = _sanitize_publish_identity((payload or {}).get("login"))
+            if login:
+                _PUBLISH_IDENTITY_CACHE[token] = (now_ts, login)
+                return login
+        except Exception:
+            logger.debug("community_publish_identity_lookup_failed", exc_info=True)
+    host = _sanitize_publish_identity(socket.gethostname())
+    return host or "instance"
 
 
 def normalize_publish_branch_name(config: dict[str, Any] | None) -> str:
@@ -53,8 +95,7 @@ def normalize_publish_branch_name(config: dict[str, Any] | None) -> str:
     if configured:
         base = configured
     else:
-        host = re.sub(r"[^a-z0-9._-]+", "-", socket.gethostname().strip().lower()) or "instance"
-        base = f"{DEFAULT_COMMUNITY_CACHE_PUBLISH_BRANCH_PREFIX}/{host}"
+        base = f"{DEFAULT_COMMUNITY_CACHE_PUBLISH_BRANCH_PREFIX}/{resolve_publish_identity(cfg)}"
     base = re.sub(r"[^A-Za-z0-9._/-]+", "-", base).strip("./-")
     return base or f"{DEFAULT_COMMUNITY_CACHE_PUBLISH_BRANCH_PREFIX}/instance"
 
@@ -149,6 +190,135 @@ def _validate_publish_proposal(payload: dict[str, Any]) -> tuple[bool, str | Non
     return True, None
 
 
+def append_publish_proposal_to_outbox(
+    *,
+    config: dict[str, Any] | None,
+    db_path: str,
+    proposal: dict[str, Any],
+) -> dict[str, Any]:
+    valid, reason = _validate_publish_proposal(proposal if isinstance(proposal, dict) else {})
+    if not valid:
+        return {
+            "status": "validation_failed",
+            "reason": str(reason or "invalid_proposal"),
+            "outbox_path": None,
+        }
+    outbox_dir = resolve_publish_outbox_dir(config, db_path=db_path)
+    os.makedirs(outbox_dir, exist_ok=True)
+    filename = f"community_publish_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
+    outbox_path = os.path.join(outbox_dir, filename)
+    with open(outbox_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(proposal, sort_keys=True))
+        handle.write("\n")
+    return {
+        "status": "written",
+        "reason": "outbox_append_ok",
+        "outbox_path": outbox_path,
+    }
+
+
+def summarize_publish_outbox(*, config: dict[str, Any] | None, db_path: str) -> dict[str, Any]:
+    outbox_dir = resolve_publish_outbox_dir(config, db_path=db_path)
+    root = Path(outbox_dir)
+    files = sorted(root.glob("*.jsonl")) if root.exists() else []
+    total_lines = 0
+    recent_files: list[dict[str, Any]] = []
+    for path in files:
+        line_count = 0
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    if raw_line.strip():
+                        line_count += 1
+        except Exception:
+            line_count = 0
+        total_lines += line_count
+        recent_files.append(
+            {
+                "name": path.name,
+                "path": str(path),
+                "lines": line_count,
+                "size_bytes": path.stat().st_size if path.exists() else 0,
+            }
+        )
+    return {
+        "outbox_dir": outbox_dir,
+        "exists": root.exists(),
+        "file_count": len(files),
+        "proposal_lines": total_lines,
+        "recent_files": recent_files[-5:],
+    }
+
+
+def summarize_publish_queue(*, db_path: str) -> dict[str, Any]:
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    try:
+        _ensure_publish_queue_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM community_publish_queue
+            GROUP BY status
+            """
+        )
+        counts = {str(row["status"] or ""): int(row["count"] or 0) for row in cur.fetchall()}
+        cur.execute(
+            """
+            SELECT proposal_id, recording_mbid, video_id, status, ingested_at, published_at,
+                   branch_name, pr_number, commit_sha, last_error, attempts
+            FROM community_publish_queue
+            ORDER BY COALESCE(ingested_at, '') DESC, proposal_id DESC
+            LIMIT 20
+            """
+        )
+        recent = [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+    return {
+        "counts": {
+            "pending": int(counts.get(COMMUNITY_PUBLISH_STATUS_PENDING, 0)),
+            "published": int(counts.get(COMMUNITY_PUBLISH_STATUS_PUBLISHED, 0)),
+            "skipped": int(counts.get(COMMUNITY_PUBLISH_STATUS_SKIPPED, 0)),
+            "error": int(counts.get(COMMUNITY_PUBLISH_STATUS_ERROR, 0)),
+            "total": sum(int(value or 0) for value in counts.values()),
+        },
+        "recent": recent,
+    }
+
+
+def summarize_publish_runtime(
+    *,
+    config: dict[str, Any] | None,
+    db_path: str,
+    last_summary: dict[str, Any] | None = None,
+    active_task: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cfg = apply_community_publish_defaults(config)
+    token_env = str(cfg.get("community_cache_publish_token_env") or DEFAULT_COMMUNITY_CACHE_PUBLISH_TOKEN_ENV).strip()
+    token_present = bool(resolve_publish_token(cfg))
+    outbox = summarize_publish_outbox(config=cfg, db_path=db_path)
+    queue = summarize_publish_queue(db_path=db_path)
+    return {
+        "enabled": bool(cfg.get("community_cache_publish_enabled", False)),
+        "mode": str(cfg.get("community_cache_publish_mode") or "off").strip().lower(),
+        "worker_enabled": community_publish_worker_enabled(cfg),
+        "repo": str(cfg.get("community_cache_publish_repo") or DEFAULT_COMMUNITY_CACHE_PUBLISH_REPO).strip(),
+        "target_branch": str(cfg.get("community_cache_publish_target_branch") or DEFAULT_COMMUNITY_CACHE_PUBLISH_TARGET_BRANCH).strip(),
+        "branch": normalize_publish_branch_name(cfg),
+        "poll_minutes": int(cfg.get("community_cache_publish_poll_minutes") or DEFAULT_COMMUNITY_CACHE_PUBLISH_POLL_MINUTES),
+        "batch_size": int(cfg.get("community_cache_publish_batch_size") or DEFAULT_COMMUNITY_CACHE_PUBLISH_BATCH_SIZE),
+        "publisher": resolve_publish_identity(cfg),
+        "token_env": token_env,
+        "token_present": token_present,
+        "outbox": outbox,
+        "queue": queue,
+        "last_summary": dict(last_summary or {}) if isinstance(last_summary, dict) else None,
+        "active_task": dict(active_task or {}) if isinstance(active_task, dict) else None,
+    }
+
+
 def _proposal_file_path(recording_mbid: str) -> str:
     normalized = str(recording_mbid or "").strip().lower()
     prefix = normalized[:2] if len(normalized) >= 2 else "xx"
@@ -190,7 +360,7 @@ def merge_proposals_into_record(
             "duration_delta_ms": proposal.get("duration_delta_ms"),
             "retreivr_version": str(proposal.get("retreivr_version") or "").strip() or None,
             "last_verified_at": str(proposal.get("emitted_at") or "").strip() or utc_now(),
-            "verified_by": "retreivr",
+            "verified_by": str(proposal.get("verified_by") or "").strip() or "retreivr",
         }
         existing_idx = None
         for idx, current in enumerate(normalized_sources):

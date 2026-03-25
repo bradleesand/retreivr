@@ -43,6 +43,7 @@ _SPOTIFY_PLAYLIST_RE = re.compile(
     r"^(?:https?://open\.spotify\.com/playlist/|spotify:playlist:)([A-Za-z0-9]+)"
 )
 _COMMUNITY_PUBLISH_MODES = {"off", "dry_run", "write_outbox"}
+_COMMUNITY_PUBLISH_BRANCH_PREFIX = "retreivr-community-publish/"
 _DEFAULT_CONFIG_TEMPLATE = None
 
 
@@ -358,6 +359,7 @@ def apply_config_defaults(config):
     normalized.setdefault("community_cache_publish_poll_minutes", 15)
     normalized.setdefault("community_cache_publish_token_env", "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN")
     normalized.setdefault("community_cache_publish_batch_size", 25)
+    normalized.setdefault("community_cache_publish_publisher", "")
     normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
     normalized.setdefault("music_skip_metadata_probe", True)
     normalized.setdefault("music_candidate_cooldown_enabled", True)
@@ -628,6 +630,12 @@ def validate_config(config):
     community_cache_publish_branch = config.get("community_cache_publish_branch")
     if community_cache_publish_branch is not None and not isinstance(community_cache_publish_branch, str):
         errors.append("community_cache_publish_branch must be a string")
+    elif isinstance(community_cache_publish_branch, str):
+        branch_value = community_cache_publish_branch.strip()
+        if branch_value and not branch_value.startswith(_COMMUNITY_PUBLISH_BRANCH_PREFIX):
+            errors.append(
+                f"community_cache_publish_branch must start with {_COMMUNITY_PUBLISH_BRANCH_PREFIX}"
+            )
 
     community_cache_publish_open_pr = config.get("community_cache_publish_open_pr")
     if community_cache_publish_open_pr is not None and not isinstance(community_cache_publish_open_pr, bool):
@@ -646,6 +654,10 @@ def validate_config(config):
     community_cache_publish_token_env = config.get("community_cache_publish_token_env")
     if community_cache_publish_token_env is not None and not isinstance(community_cache_publish_token_env, str):
         errors.append("community_cache_publish_token_env must be a string")
+
+    community_cache_publish_publisher = config.get("community_cache_publish_publisher")
+    if community_cache_publish_publisher is not None and not isinstance(community_cache_publish_publisher, str):
+        errors.append("community_cache_publish_publisher must be a string")
 
     community_cache_publish_batch_size = config.get("community_cache_publish_batch_size")
     if community_cache_publish_batch_size is not None:

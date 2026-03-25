@@ -27,6 +27,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
+from engine.community_publish_worker import append_publish_proposal_to_outbox
 from engine.music_export import run_music_exports
 from engine.music_title_normalization import has_live_intent, relaxed_search_title
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
@@ -2434,16 +2435,15 @@ class DownloadWorkerEngine:
                         )
                     elif mode == "write_outbox":
                         try:
-                            outbox_dir = self._community_publish_outbox_dir()
-                            os.makedirs(outbox_dir, exist_ok=True)
-                            filename = f"community_publish_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
-                            outbox_path = os.path.join(outbox_dir, filename)
-                            with open(outbox_path, "a", encoding="utf-8") as handle:
-                                handle.write(safe_json_dumps(proposal, sort_keys=True))
-                                handle.write("\n")
-                            status = "written"
-                            reason = "outbox_append_ok"
-                            emitted = True
+                            outbox_result = append_publish_proposal_to_outbox(
+                                config=self.config,
+                                db_path=self.db_path,
+                                proposal=proposal,
+                            )
+                            status = str(outbox_result.get("status") or "error")
+                            reason = str(outbox_result.get("reason") or "outbox_append_failed")
+                            outbox_path = str(outbox_result.get("outbox_path") or "")
+                            emitted = status == "written"
                             _log_event(
                                 logging.INFO,
                                 "community_publish_proposal_written",

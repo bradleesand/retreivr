@@ -1377,7 +1377,11 @@ class SearchResolutionService:
             return [], {"community_seeded_failed_no_recording_mbid": 1}
 
         try:
-            record = community_cache.cached_lookup(normalized_mbid)
+            record = community_cache.cached_lookup(
+                normalized_mbid,
+                dataset_root=self._community_dataset_root(),
+                allow_remote=True,
+            )
         except Exception as exc:
             _log_event(
                 logging.WARNING,

@@ -161,8 +161,10 @@ from library.review_queue import (
 from engine.community_publish_worker import (
     CommunityPublishWorker,
     apply_community_publish_defaults,
+    summarize_publish_runtime,
     community_publish_worker_enabled,
 )
+from engine.community_publish_backfill import run_publish_backfill
 from api.media_stream import build_media_file_response, guess_browser_media_type
 
 APP_NAME = "Retreivr API"
@@ -2656,6 +2658,9 @@ async def startup():
     app.state.playlist_import_active_count = 0
     app.state.music_cover_art_cache = {}
     app.state.community_publish_last_summary = None
+    app.state.community_publish_backfill_last_summary = None
+    app.state.community_publish_task_lock = threading.Lock()
+    app.state.community_publish_active_task = None
     app.state.community_publish_worker = CommunityPublishWorker(
         db_path=app.state.paths.db_path,
         config_getter=get_loaded_config,
@@ -4587,6 +4592,85 @@ def _community_publish_schedule_tick() -> None:
         app.state.community_publish_last_summary = summary
     except Exception:
         logger.exception("Community publish worker tick failed")
+
+
+def _get_next_community_publish_run_iso() -> str | None:
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return None
+    job = scheduler.get_job(COMMUNITY_PUBLISH_JOB_ID)
+    if not job or not job.next_run_time:
+        return None
+    next_run = job.next_run_time
+    if next_run.tzinfo is None:
+        next_run = next_run.replace(tzinfo=timezone.utc)
+    return next_run.astimezone(timezone.utc).isoformat()
+
+
+def _community_publish_task_snapshot() -> dict[str, Any] | None:
+    lock = getattr(app.state, "community_publish_task_lock", None)
+    task = getattr(app.state, "community_publish_active_task", None)
+    if lock is None:
+        return dict(task) if isinstance(task, dict) else None
+    with lock:
+        task = getattr(app.state, "community_publish_active_task", None)
+        return dict(task) if isinstance(task, dict) else None
+
+
+def _set_community_publish_task(task: dict[str, Any] | None) -> None:
+    lock = getattr(app.state, "community_publish_task_lock", None)
+    if lock is None:
+        app.state.community_publish_active_task = task
+        return
+    with lock:
+        app.state.community_publish_active_task = dict(task) if isinstance(task, dict) else None
+
+
+def _start_community_publish_background_task(*, kind: str, runner) -> dict[str, Any]:
+    active = _community_publish_task_snapshot()
+    if isinstance(active, dict) and active.get("running"):
+        raise HTTPException(status_code=409, detail="community_publish_task_already_running")
+
+    task_state = {
+        "kind": kind,
+        "running": True,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "finished_at": None,
+        "summary": None,
+        "error": None,
+    }
+    _set_community_publish_task(task_state)
+
+    def _runner():
+        try:
+            summary = runner()
+            updated = _community_publish_task_snapshot() or {}
+            updated.update(
+                {
+                    "running": False,
+                    "status": "completed",
+                    "finished_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "summary": summary if isinstance(summary, dict) else None,
+                    "error": None,
+                }
+            )
+            _set_community_publish_task(updated)
+        except Exception as exc:
+            logger.exception("community_publish_background_task_failed kind=%s", kind)
+            updated = _community_publish_task_snapshot() or {}
+            updated.update(
+                {
+                    "running": False,
+                    "status": "failed",
+                    "finished_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "error": str(exc) or f"{kind}_failed",
+                }
+            )
+            _set_community_publish_task(updated)
+
+    threading.Thread(target=_runner, name=f"community-publish-{kind}", daemon=True).start()
+    return task_state
 
 
 def _apply_community_publish_schedule(config: dict):
@@ -7834,7 +7918,11 @@ def music_video_availability(data: dict = Body(...)):
             try:
                 community_record = _bounded_call(
                     1.6,
-                    lambda: community_cache.cached_lookup(recording_mbid),
+                    lambda: community_cache.cached_lookup(
+                        recording_mbid,
+                        dataset_root=str(DATA_DIR / "community_cache_dataset"),
+                        allow_remote=True,
+                    ),
                 )
                 if isinstance(community_record, dict) and str(community_record.get("video_id") or "").strip():
                     signals["community_seeded"] = True
@@ -9108,6 +9196,65 @@ async def api_put_config(payload: dict = Body(...)):
         await _disable_watcher_runtime("config updated (enable_watcher=false)")
 
     return {"status": "updated"}
+
+
+@app.get("/api/community-cache/publish/status")
+async def api_community_cache_publish_status():
+    config = get_loaded_config() or _read_config_or_404()
+    status = summarize_publish_runtime(
+        config=config if isinstance(config, dict) else {},
+        db_path=app.state.paths.db_path,
+        last_summary=getattr(app.state, "community_publish_last_summary", None),
+        active_task=_community_publish_task_snapshot(),
+    )
+    backfill_last_summary = getattr(app.state, "community_publish_backfill_last_summary", None)
+    if isinstance(backfill_last_summary, dict):
+        status["backfill_last_summary"] = backfill_last_summary
+    status["next_run_at"] = _get_next_community_publish_run_iso()
+    return safe_json(status)
+
+
+@app.post("/api/community-cache/publish/run", status_code=202)
+async def api_community_cache_publish_run():
+    worker = getattr(app.state, "community_publish_worker", None)
+    if worker is None:
+        raise HTTPException(status_code=503, detail="community_publish_worker_unavailable")
+
+    def _run_once():
+        summary = worker.run_once()
+        app.state.community_publish_last_summary = summary
+        return summary
+
+    task_state = _start_community_publish_background_task(kind="publish", runner=_run_once)
+    return {"status": "started", "task": safe_json(task_state)}
+
+
+@app.post("/api/community-cache/publish/backfill", status_code=202)
+async def api_community_cache_publish_backfill(payload: dict | None = Body(default=None)):
+    options = payload if isinstance(payload, dict) else {}
+    dry_run = bool(options.get("dry_run", False))
+    limit = options.get("limit")
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="limit must be an integer") from exc
+        if limit <= 0:
+            limit = None
+    config = get_loaded_config() or _read_config_or_404()
+
+    def _run_backfill():
+        summary = run_publish_backfill(
+            db_path=app.state.paths.db_path,
+            config=config if isinstance(config, dict) else {},
+            dry_run=dry_run,
+            limit=limit,
+        )
+        app.state.community_publish_backfill_last_summary = summary
+        return summary
+
+    task_state = _start_community_publish_background_task(kind="backfill", runner=_run_backfill)
+    return {"status": "started", "task": safe_json(task_state)}
 
 
 @app.post("/api/library/reconcile")
