@@ -65,6 +65,7 @@ if "musicbrainzngs" not in sys.modules:
 
 from engine.community_publish_worker import (
     append_publish_proposal_to_outbox,
+    normalize_community_publish_source,
     summarize_publish_runtime,
 )
 
@@ -137,3 +138,8 @@ def test_append_publish_proposal_rejects_invalid_payload(tmp_path: Path) -> None
 
     assert result["status"] == "validation_failed"
     assert result["outbox_path"] is None
+
+
+def test_normalize_community_publish_source_maps_youtube_music_to_youtube() -> None:
+    assert normalize_community_publish_source("youtube_music") == "youtube"
+    assert normalize_community_publish_source("youtube") == "youtube"

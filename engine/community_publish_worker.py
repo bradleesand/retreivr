@@ -33,6 +33,13 @@ COMMUNITY_PUBLISH_STATUS_SKIPPED = "skipped"
 COMMUNITY_PUBLISH_STATUS_ERROR = "error"
 
 
+def normalize_community_publish_source(value: Any) -> str:
+    source = str(value or "").strip().lower()
+    if source == "youtube_music":
+        return "youtube"
+    return source
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -187,6 +194,10 @@ def _validate_publish_proposal(payload: dict[str, Any]) -> tuple[bool, str | Non
         return False, "invalid_selected_score"
     if score < 0 or score > 1:
         return False, "invalid_selected_score"
+    normalized_source = normalize_community_publish_source(payload.get("source"))
+    if not normalized_source:
+        return False, "missing_source"
+    payload["source"] = normalized_source
     return True, None
 
 

@@ -27,7 +27,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
-from engine.community_publish_worker import append_publish_proposal_to_outbox
+from engine.community_publish_worker import append_publish_proposal_to_outbox, normalize_community_publish_source
 from engine.music_export import run_music_exports
 from engine.resolution_api import upsert_local_acquired_mapping
 from engine.music_title_normalization import has_live_intent, relaxed_search_title
@@ -2413,7 +2413,7 @@ class DownloadWorkerEngine:
                             or ""
                         ).strip() or None,
                         "video_id": video_id,
-                        "source": source or resolve_source(candidate_url),
+                        "source": normalize_community_publish_source(source or resolve_source(candidate_url)),
                         "candidate_url": candidate_url,
                         "candidate_id": candidate_id,
                         "duration_ms": int(duration_ms) if duration_ms is not None else None,
