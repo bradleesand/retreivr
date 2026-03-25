@@ -209,6 +209,13 @@ def _repair_identity(identity: dict[str, Any], *, threshold: float) -> tuple[dic
     return identity, repaired
 
 
+def _classify_backfill_error(exc: Exception) -> str:
+    text = str(exc or "").strip().lower()
+    if text in {"no_valid_release_for_recording", "mb_pair_not_resolved"}:
+        return "skip_unresolved_release_enrichment"
+    return "backfill_failed"
+
+
 def _retag_identity_file(path: Path, identity: dict[str, Any]) -> None:
     tags = {
         "artist": identity.get("artist"),
@@ -348,13 +355,18 @@ def run_publish_backfill(
                         }
                     )
             except Exception as exc:
-                logger.exception("community_publish_backfill_failed path=%s", path)
-                summary["errors"] += 1
+                classification = _classify_backfill_error(exc)
+                if classification == "skip_unresolved_release_enrichment":
+                    logger.warning("community_publish_backfill_skipped path=%s reason=%s", path, exc)
+                else:
+                    logger.exception("community_publish_backfill_failed path=%s", path)
+                    summary["errors"] += 1
                 if len(summary["recent"]) < 20:
                     summary["recent"].append(
                         {
                             "path": str(path),
-                            "error": str(exc) or "backfill_failed",
+                            "error": str(exc) or classification,
+                            "status": classification,
                         }
                     )
     finally:
