@@ -59,6 +59,35 @@ def test_merge_proposals_into_record_updates_existing_source_and_keeps_schema() 
     assert float(merged["sources"][0]["confidence"]) == 0.95
 
 
+def test_merge_proposals_into_record_normalizes_youtube_music_sources() -> None:
+    existing = {
+        "schema_version": 1,
+        "recording_mbid": "aa11",
+        "sources": [
+            {"video_id": "vid-1", "source": "youtube_music", "confidence": 0.80},
+        ],
+    }
+    proposals = [
+        {
+            "recording_mbid": "aa11",
+            "video_id": "vid-1",
+            "source": "youtube_music",
+            "selected_score": 0.95,
+            "candidate_url": "https://www.youtube.com/watch?v=vid-1",
+            "candidate_id": "cand-1",
+            "duration_ms": 200000,
+            "duration_delta_ms": 0,
+            "retreivr_version": "0.9.16",
+            "emitted_at": "2026-03-25T00:00:00+00:00",
+        }
+    ]
+
+    merged, changed = community_publish_worker.merge_proposals_into_record(existing, proposals)
+
+    assert changed is True
+    assert merged["sources"][0]["source"] == "youtube"
+
+
 def test_community_publish_worker_ingests_outbox_and_marks_rows_published(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "db.sqlite"
     outbox_dir = tmp_path / "outbox"

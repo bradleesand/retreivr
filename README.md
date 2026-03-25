@@ -36,11 +36,11 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 0.9.16 Highlights
-- Resolution API foundations for single resolve, bulk resolve, submit, verify, stats, health, and snapshot/diff sync
-- Local-first community cache lookup, publish controls, and historical backfill for previously acquired music libraries
-- Music export targets for post-finalization library integration workflows such as Apple Music auto-import
-- First Jellyfin plugin bootstrap path built around the Resolution API and Retreivr Core backend
+## 0.9.17 Highlights
+- Community cache publish hardening so live and stale queued proposals normalize cleanly into the public `youtube` dataset contract
+- Tagged music exports now inherit finalized canonical metadata deterministically before copy/transcode targets are written
+- Community cache backfill/runtime handling is quieter and more resilient around unresolved release-enrichment edge cases
+- Release/runtime docs and Docker examples are aligned for the `0.9.17` deployment cycle
 
 ## Product Tour
 
@@ -213,7 +213,7 @@ Related controls:
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `0.9.16`, pull the latest image and restart:
+If you are upgrading to `0.9.17`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull

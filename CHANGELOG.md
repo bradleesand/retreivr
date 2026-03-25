@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.17 — Community Cache Contract Hardening + Export Tag Ordering
+
+### High-Level
+This release is a hardening pass on the new resolution-network and library-integration foundations from `v0.9.16`. It tightens community-cache publishing against the public dataset contract, makes export copies inherit finalized music tags deterministically, and prepares the runtime/docs/examples for a cleaner release and deployment cycle.
+
+### Added
+- Regression coverage for community-cache publish source normalization so `youtube_music` inputs are emitted as cache-safe `youtube` transport records.
+- Regression coverage for synchronous final music metadata application before post-finalization export copies are written.
+
+### Changed
+- Community-cache publish merge logic now normalizes legacy queued proposals and existing branch records so stale `youtube_music` source values are rewritten into the canonical dataset contract during publish.
+- Community-cache backfill now treats unresolved release-enrichment edge cases as structured skips instead of noisy hard failures.
+- Release-facing docs, highlights, Docker examples, and starter defaults now point to `v0.9.17`.
+
+### Fixed
+- Post-finalization `copy` exports no longer race ahead of music metadata tagging; export targets now inherit the finalized tagged canonical file state.
+- Live publish proposals and merged cache records now conform to the cache repo’s `youtube`-only source policy even when the originating runtime source was `youtube_music`.
+- Community-cache default repo/docs wiring remains aligned to the canonical `retreivr-community-cache` repository naming.
+
 ## v0.9.16 — Resolution Network Foundations + Jellyfin Plugin Bootstrap
 
 ### High-Level

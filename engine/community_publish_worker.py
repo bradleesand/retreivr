@@ -355,7 +355,16 @@ def merge_proposals_into_record(
     sources = record.get("sources")
     if not isinstance(sources, list):
         sources = []
-    normalized_sources: list[dict[str, Any]] = [dict(item) for item in sources if isinstance(item, dict)]
+    normalized_sources: list[dict[str, Any]] = []
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        current = dict(item)
+        normalized_source = normalize_community_publish_source(current.get("source"))
+        if normalized_source and current.get("source") != normalized_source:
+            current["source"] = normalized_source
+            changed = True
+        normalized_sources.append(current)
 
     changed = False
     recording_mbid = None
@@ -363,7 +372,7 @@ def merge_proposals_into_record(
         recording_mbid = str(proposal.get("recording_mbid") or recording_mbid or "").strip().lower()
         entry = {
             "video_id": str(proposal.get("video_id") or "").strip(),
-            "source": str(proposal.get("source") or "youtube").strip() or "youtube",
+            "source": normalize_community_publish_source(proposal.get("source") or "youtube") or "youtube",
             "confidence": float(proposal.get("selected_score")),
             "duration_ms": proposal.get("duration_ms"),
             "candidate_url": str(proposal.get("candidate_url") or "").strip() or None,
