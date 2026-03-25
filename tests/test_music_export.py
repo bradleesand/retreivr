@@ -60,6 +60,7 @@ if "musicbrainzngs" not in sys.modules:
     sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
 
 from engine.music_export import run_music_exports
+from engine.job_queue import apply_media_metadata_now
 
 
 def test_run_music_exports_copy_and_transcode(monkeypatch, tmp_path: Path) -> None:
@@ -136,3 +137,21 @@ def test_run_music_exports_is_non_fatal_per_target(monkeypatch, tmp_path: Path) 
 
     assert results["copy_ok"]["status"] == "copied"
     assert results["transcode_bad"]["status"] == "failed"
+
+
+def test_apply_media_metadata_now_prefers_synchronous_processor(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr(
+        "engine.job_queue.process_metadata_now",
+        lambda file_path, meta, config: calls.append(("sync", file_path, meta.get("title"))) or True,
+    )
+    monkeypatch.setattr(
+        "engine.job_queue.enqueue_metadata",
+        lambda *_args, **_kwargs: calls.append(("enqueue", None, None)),
+    )
+
+    result = apply_media_metadata_now("/tmp/test.m4a", {"title": "Tagged Track"}, {"music_metadata": {"enabled": True}})
+
+    assert result is True
+    assert calls == [("sync", "/tmp/test.m4a", "Tagged Track")]

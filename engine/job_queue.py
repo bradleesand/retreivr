@@ -37,6 +37,10 @@ from media.music_contract import format_zero_padded_track_number, parse_first_po
 from media.path_builder import build_music_relative_layout
 from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
+try:
+    from metadata.queue import process_metadata_now
+except Exception:  # pragma: no cover - optional in tests with stubbed metadata.queue
+    process_metadata_now = None
 from metadata.services.musicbrainz_service import get_musicbrainz_service
 from library.provenance import build_file_provenance, get_retreivr_version
 from library.review_queue import record_completed_review_item
@@ -7752,7 +7756,7 @@ def finalize_download_artifact(
 
     if audio_mode and enqueue_audio_metadata and isinstance(config, dict):
         try:
-            enqueue_media_metadata(final_path, meta, config)
+            apply_media_metadata_now(final_path, meta, config)
         except Exception:
             pass
 
@@ -8040,6 +8044,17 @@ def enqueue_media_metadata(file_path, meta, config):
         enqueue_metadata(file_path, meta, config)
     except Exception:
         logging.exception("Metadata enqueue failed for %s", file_path)
+
+
+def apply_media_metadata_now(file_path, meta, config):
+    try:
+        if callable(process_metadata_now):
+            return bool(process_metadata_now(file_path, meta, config))
+        enqueue_metadata(file_path, meta, config)
+        return True
+    except Exception:
+        logging.exception("Synchronous metadata apply failed for %s", file_path)
+        return False
 
 
 def _album_output_dir_from_track_path(file_path):
