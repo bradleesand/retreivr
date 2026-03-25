@@ -880,6 +880,37 @@
                   <div class="group-title">Publish Status</div>
                   <div id="community-publish-status" class="meta">Status unavailable</div>
                 </div>
+                <div class="group">
+                  <div class="group-title">Local Cache Sync</div>
+                  <div class="grid two">
+                    <label class="field full">
+                      <span>Resolution API Upstream URL</span>
+                      <input id="cfg-resolution-api-upstream-base-url" type="text" placeholder="https://resolution.example.com">
+                    </label>
+                    <label class="field inline short">
+                      <span>Enable local cache sync</span>
+                      <input id="cfg-resolution-api-sync-enabled" type="checkbox">
+                    </label>
+                    <label class="field short">
+                      <span>Sync interval (minutes)</span>
+                      <input id="cfg-resolution-api-sync-poll-minutes" type="number" min="1" step="1" placeholder="1440">
+                    </label>
+                    <label class="field short">
+                      <span>Sync batch size</span>
+                      <input id="cfg-resolution-api-sync-batch-size" type="number" min="1" step="1" placeholder="500">
+                    </label>
+                    <label class="field medium">
+                      <span>Local node identity</span>
+                      <input id="cfg-resolution-api-local-node-id" type="text" placeholder="local_node">
+                    </label>
+                  </div>
+                  <div class="row">
+                    <button id="community-cache-sync-run-now" class="button ghost small" type="button">Run Cache Sync Now</button>
+                    <button id="community-cache-sync-refresh-status" class="button ghost small" type="button">Refresh Sync Status</button>
+                  </div>
+                  <div id="community-cache-sync-message" class="notice" role="status"></div>
+                  <div id="community-cache-sync-status" class="meta">Status unavailable</div>
+                </div>
               </div>
             </section>
 

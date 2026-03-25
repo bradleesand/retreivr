@@ -605,6 +605,34 @@ function renderCommunityPublishStatus(status) {
   el.innerHTML = lines.map((line) => escapeHtml(String(line))).join("<br>");
 }
 
+function renderCommunityCacheSyncStatus(status) {
+  state.communityCacheSyncStatus = status || null;
+  const el = $("#community-cache-sync-status");
+  if (!el) return;
+  if (!status || typeof status !== "object") {
+    el.textContent = "Status unavailable";
+    return;
+  }
+  const lastSummary = status.last_summary || null;
+  const stored = status.stored_status || null;
+  const task = status.active_task || null;
+  const lines = [
+    `Enabled: ${status.enabled ? "yes" : "no"} · Upstream: ${status.api_base_url || "-"}`,
+    `Sync interval: ${Number(status.poll_minutes || 0)} min · Batch size: ${Number(status.batch_size || 0)}`,
+    `Next scheduled run: ${status.next_run_at || "-"}`,
+  ];
+  if (lastSummary && typeof lastSummary === "object") {
+    lines.push(`Last sync: ${lastSummary.status || "unknown"} · mode ${lastSummary.mode || "-"} · records ${Number(lastSummary.results_count || 0)} · files ${Number(lastSummary.files_written || 0)}`);
+  }
+  if (stored && typeof stored === "object") {
+    lines.push(`Stored cursor: ${stored.cursor || "-"} · Updated: ${stored.updated_at || "-"}`);
+  }
+  if (task) {
+    lines.push(`Active task: ${task.kind || "unknown"} · ${task.status || "running"}${task.running ? " · running" : ""}`);
+  }
+  el.innerHTML = lines.map((line) => escapeHtml(String(line))).join("<br>");
+}
+
 async function refreshCommunityPublishStatus() {
   if (state.communityPublishStatusTimer) {
     clearTimeout(state.communityPublishStatusTimer);
@@ -623,6 +651,28 @@ async function refreshCommunityPublishStatus() {
     const messageEl = $("#community-publish-message");
     if (messageEl) {
       setNotice(messageEl, `Publish status error: ${err.message}`, true);
+    }
+  }
+}
+
+async function refreshCommunityCacheSyncStatus() {
+  if (state.communityCacheSyncStatusTimer) {
+    clearTimeout(state.communityCacheSyncStatusTimer);
+    state.communityCacheSyncStatusTimer = null;
+  }
+  try {
+    const status = await fetchJson("/api/community-cache/sync/status");
+    renderCommunityCacheSyncStatus(status);
+    if (status?.active_task?.running) {
+      state.communityCacheSyncStatusTimer = setTimeout(() => {
+        refreshCommunityCacheSyncStatus().catch(() => {});
+      }, 5000);
+    }
+  } catch (err) {
+    renderCommunityCacheSyncStatus(null);
+    const messageEl = $("#community-cache-sync-message");
+    if (messageEl) {
+      setNotice(messageEl, `Cache sync status error: ${err.message}`, true);
     }
   }
 }
@@ -692,6 +742,8 @@ function setPage(page) {
           await refreshSpotifyConfig();
           setConfigNotice("Spotify connected successfully.", false, true);
         }
+        refreshCommunityPublishStatus().catch(() => {});
+        refreshCommunityCacheSyncStatus().catch(() => {});
       });
     }
     refreshSchedule();
@@ -7547,6 +7599,16 @@ function renderConfig(cfg) {
     : 25;
   $("#cfg-community-cache-publish-token-env").value = cfg.community_cache_publish_token_env ?? "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN";
   $("#cfg-community-cache-publish-publisher").value = cfg.community_cache_publish_publisher ?? "";
+  const resolutionApi = (cfg && typeof cfg.resolution_api === "object") ? cfg.resolution_api : {};
+  $("#cfg-resolution-api-upstream-base-url").value = resolutionApi.upstream_base_url ?? "";
+  $("#cfg-resolution-api-sync-enabled").checked = !!resolutionApi.sync_enabled;
+  $("#cfg-resolution-api-sync-poll-minutes").value = Number.isFinite(resolutionApi.sync_poll_minutes)
+    ? Number(resolutionApi.sync_poll_minutes)
+    : 1440;
+  $("#cfg-resolution-api-sync-batch-size").value = Number.isFinite(resolutionApi.sync_batch_size)
+    ? Number(resolutionApi.sync_batch_size)
+    : 500;
+  $("#cfg-resolution-api-local-node-id").value = resolutionApi.local_node_id ?? "local_node";
   $("#cfg-music-template").value = cfg.music_filename_template ?? "";
   $("#cfg-yt-dlp-cookies").value = cfg.yt_dlp_cookies ?? "";
   const musicMetaDefaults = {
@@ -8282,6 +8344,37 @@ function buildConfigFromForm() {
   } else {
     delete base.community_cache_publish_publisher;
   }
+
+  const resolutionApi = (base.resolution_api && typeof base.resolution_api === "object")
+    ? { ...base.resolution_api }
+    : {};
+  resolutionApi.upstream_base_url = $("#cfg-resolution-api-upstream-base-url").value.trim();
+  resolutionApi.sync_enabled = !!$("#cfg-resolution-api-sync-enabled").checked;
+  const resolutionSyncPollRaw = $("#cfg-resolution-api-sync-poll-minutes").value.trim();
+  if (resolutionSyncPollRaw) {
+    const parsed = Number.parseInt(resolutionSyncPollRaw, 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      errors.push("Resolution API sync interval must be an integer >= 1");
+    } else {
+      resolutionApi.sync_poll_minutes = parsed;
+    }
+  }
+  const resolutionSyncBatchRaw = $("#cfg-resolution-api-sync-batch-size").value.trim();
+  if (resolutionSyncBatchRaw) {
+    const parsed = Number.parseInt(resolutionSyncBatchRaw, 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      errors.push("Resolution API sync batch size must be an integer >= 1");
+    } else {
+      resolutionApi.sync_batch_size = parsed;
+    }
+  }
+  const resolutionLocalNodeId = $("#cfg-resolution-api-local-node-id").value.trim();
+  if (!resolutionLocalNodeId) {
+    errors.push("Resolution API local node identity is required");
+  } else {
+    resolutionApi.local_node_id = resolutionLocalNodeId;
+  }
+  base.resolution_api = resolutionApi;
 
   base.schedule = buildSchedulePayloadFromForm();
 
@@ -9302,6 +9395,26 @@ function bindEvents() {
   if (communityPublishRefresh) {
     communityPublishRefresh.addEventListener("click", () => {
       refreshCommunityPublishStatus().catch(() => {});
+    });
+  }
+  const communityCacheSyncRunNow = $("#community-cache-sync-run-now");
+  if (communityCacheSyncRunNow) {
+    communityCacheSyncRunNow.addEventListener("click", async () => {
+      const messageEl = $("#community-cache-sync-message");
+      setNotice(messageEl, "Starting local cache sync...", false);
+      try {
+        await fetchJson("/api/community-cache/sync/run", { method: "POST" });
+        setNotice(messageEl, "Local cache sync started.", false);
+        refreshCommunityCacheSyncStatus().catch(() => {});
+      } catch (err) {
+        setNotice(messageEl, `Cache sync failed: ${err.message}`, true);
+      }
+    });
+  }
+  const communityCacheSyncRefresh = $("#community-cache-sync-refresh-status");
+  if (communityCacheSyncRefresh) {
+    communityCacheSyncRefresh.addEventListener("click", () => {
+      refreshCommunityCacheSyncStatus().catch(() => {});
     });
   }
   // TODO(webUI/app.js::legacy-run): keep this marker while legacy-run removal rolls out across user docs.

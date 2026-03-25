@@ -105,5 +105,14 @@
   "community_cache_publish_token_env": "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN",
   "community_cache_publish_batch_size": 25,
   "community_cache_publish_publisher": "",
+  "resolution_api": {
+    "require_api_key": false,
+    "nodes": [],
+    "upstream_base_url": "",
+    "sync_enabled": false,
+    "sync_poll_minutes": 1440,
+    "sync_batch_size": 500,
+    "local_node_id": "local_node"
+  },
   "custom_search_adapters_file": "config/custom_search_adapters.yaml"
 }

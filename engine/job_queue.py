@@ -29,6 +29,7 @@ from yt_dlp.utils import DownloadError, ExtractorError
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
 from engine.community_publish_worker import append_publish_proposal_to_outbox
 from engine.music_export import run_music_exports
+from engine.resolution_api import upsert_local_acquired_mapping
 from engine.music_title_normalization import has_live_intent, relaxed_search_title
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
@@ -2500,6 +2501,70 @@ class DownloadWorkerEngine:
             "proposal": proposal,
         }
 
+    def _auto_verify_resolution_mapping(self, job, *, final_path=None, meta=None):
+        payload = job.output_template if isinstance(job.output_template, dict) else {}
+        canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
+        runtime_meta = payload.get("runtime_search_meta") if isinstance(payload.get("runtime_search_meta"), dict) else {}
+        recording_mbid = str(
+            payload.get("recording_mbid")
+            or payload.get("mb_recording_id")
+            or canonical.get("recording_mbid")
+            or canonical.get("mb_recording_id")
+            or ""
+        ).strip()
+        source_url = str(runtime_meta.get("selected_candidate_url") or getattr(job, "url", None) or "").strip()
+        source = str(
+            runtime_meta.get("selected_candidate_source")
+            or getattr(job, "source", None)
+            or resolve_source(source_url)
+            or ""
+        ).strip().lower()
+        if not recording_mbid or not source_url or not source:
+            return {"status": "skipped", "reason": "missing_mapping_fields"}
+        duration_seconds = None
+        if isinstance(meta, dict) and meta.get("duration_sec") is not None:
+            try:
+                duration_seconds = int(meta.get("duration_sec"))
+            except Exception:
+                duration_seconds = None
+        bitrate_kbps = None
+        if isinstance(meta, dict) and meta.get("abr") is not None:
+            try:
+                bitrate_kbps = int(float(meta.get("abr")))
+            except Exception:
+                bitrate_kbps = None
+        source_id = str(runtime_meta.get("selected_candidate_id") or extract_video_id(source_url) or "").strip() or None
+        resolution_cfg = self.config.get("resolution_api") if isinstance(self.config.get("resolution_api"), dict) else {}
+        node_id = str(resolution_cfg.get("local_node_id") or "local_node").strip() or "local_node"
+        result = upsert_local_acquired_mapping(
+            self.db_path,
+            mbid=recording_mbid,
+            source_url=source_url,
+            source=source,
+            node_id=node_id,
+            duration_seconds=duration_seconds,
+            media_format=str(getattr(job, "final_format", None) or payload.get("final_format") or "").strip() or None,
+            bitrate_kbps=bitrate_kbps,
+            file_hash=None,
+            resolution_method=f"retreivr_{get_retreivr_version()}",
+            source_id=source_id,
+            raw_payload={
+                "selected_score": runtime_meta.get("selected_score"),
+                "selected_candidate_id": runtime_meta.get("selected_candidate_id"),
+                "selected_candidate_source": runtime_meta.get("selected_candidate_source"),
+                "selected_duration_delta_ms": runtime_meta.get("selected_duration_delta_ms"),
+                "final_path": str(final_path or "").strip() or None,
+            },
+        )
+        try:
+            self.store.merge_output_template_fields(
+                job.id,
+                {"runtime_search_meta": {"resolution_auto_verify_status": str(result.get("action") or result.get("status") or "updated")}},
+            )
+        except Exception:
+            logger.exception("[MUSIC] failed to persist resolution auto-verify metadata job_id=%s", getattr(job, "id", None))
+        return result
+
     def _music_tokens(self, value):
         return _WORD_TOKEN_RE.findall(str(value or "").lower())
 
@@ -4147,6 +4212,10 @@ class DownloadWorkerEngine:
                 return
             self._clear_music_candidate_cooldown(job)
             if str(getattr(job, "media_intent", "") or "").strip().lower() == "music_track":
+                try:
+                    self._auto_verify_resolution_mapping(job, final_path=final_path, meta=meta)
+                except Exception:
+                    logger.exception("[MUSIC] resolution auto-verify failed job_id=%s", getattr(job, "id", None))
                 try:
                     self._emit_community_publish_proposal(job, final_path=final_path, meta=meta)
                 except Exception:

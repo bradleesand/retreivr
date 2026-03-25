@@ -40,7 +40,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 from urllib.parse import parse_qs, quote, urlparse
-from typing import Optional
+from typing import Any, Optional
 
 import anyio
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -165,6 +165,22 @@ from engine.community_publish_worker import (
     community_publish_worker_enabled,
 )
 from engine.community_publish_backfill import run_publish_backfill
+from engine.resolution_auth import resolve_node_auth
+from engine.resolution_api import (
+    RESOLUTION_VERIFY_THRESHOLD,
+    build_diff as build_resolution_diff,
+    build_health as build_resolution_health,
+    build_snapshot as build_resolution_snapshot,
+    build_stats as build_resolution_stats,
+    enqueue_unresolved_mbid as enqueue_resolution_unresolved_mbid,
+    get_local_sync_status as get_resolution_local_sync_status,
+    rebuild_resolution_index_from_dataset,
+    resolve_bulk as resolve_resolution_bulk,
+    resolve_recording as resolve_resolution_recording,
+    submit_mapping as submit_resolution_mapping,
+    sync_local_cache_from_api as sync_resolution_local_cache_from_api,
+    verify_mapping as verify_resolution_mapping,
+)
 from api.media_stream import build_media_file_response, guess_browser_media_type
 
 APP_NAME = "Retreivr API"
@@ -182,6 +198,7 @@ SAVED_ALBUMS_JOB_ID = "spotify_saved_albums_watch"
 USER_PLAYLISTS_JOB_ID = "spotify_user_playlists_watch"
 SPOTIFY_PLAYLISTS_WATCH_JOB_ID = "spotify_playlists_watch"
 COMMUNITY_PUBLISH_JOB_ID = "community_cache_publish"
+RESOLUTION_CACHE_SYNC_JOB_ID = "resolution_cache_sync"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
 WATCHER_BATCH_MAX_WAIT_SECONDS = 300
@@ -217,6 +234,47 @@ MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024
 SUPPORTED_IMPORT_EXTENSIONS = {".m3u", ".m3u8", ".csv", ".xml", ".plist", ".json"}
 IMPORT_JOB_TTL_SECONDS = 6 * 60 * 60
 _LAST_TRANSITION_EVENT: str | None = None
+
+
+class ResolutionBulkRequest(BaseModel):
+    mbids: list[str]
+
+
+class ResolutionSubmitRequest(BaseModel):
+    mbid: str
+    source_url: str
+    source: str
+    node_id: str
+    duration_seconds: int | None = None
+    media_format: str | None = None
+    bitrate_kbps: int | None = None
+    file_hash: str | None = None
+    resolution_method: str | None = None
+    source_id: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class ResolutionVerifyRequest(BaseModel):
+    mbid: str
+    source_url: str
+    verifier_id: str
+    duration_seconds: int | None = None
+    media_format: str | None = None
+    bitrate_kbps: int | None = None
+    file_hash: str | None = None
+
+
+def _resolution_api_key_from_request(request: Request) -> str:
+    auth_header = str(request.headers.get("authorization") or "").strip()
+    if auth_header.lower().startswith("bearer "):
+        return auth_header.split(" ", 1)[1].strip()
+    return str(request.headers.get("x-api-key") or "").strip()
+
+
+def _resolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    cfg = config if isinstance(config, dict) else {}
+    value = cfg.get("resolution_api")
+    return value if isinstance(value, dict) else {}
 
 
 def _log_transition(event: str, **fields) -> None:
@@ -2618,6 +2676,7 @@ async def startup():
     _apply_schedule_config(schedule_config)
     _apply_spotify_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
     _apply_community_publish_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
+    _apply_resolution_cache_sync_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
     if schedule_config.get("enabled") and schedule_config.get("run_on_startup"):
         asyncio.create_task(_handle_scheduled_run())
     if schedule_config.get("enabled"):
@@ -2629,6 +2688,15 @@ async def startup():
     _ensure_watch_tables(app.state.paths.db_path)
     app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, startup_cfg)
     logging.info("Search DB path: %s", app.state.search_db_path)
+    community_cache.configure_resolution_index_db_path(app.state.search_db_path)
+    try:
+        resolution_stats = rebuild_resolution_index_from_dataset(
+            db_path=app.state.search_db_path,
+            dataset_root=str(DATA_DIR / "community_cache_dataset"),
+        )
+        logging.info("Resolution index ready: %s", safe_json_dump(resolution_stats))
+    except Exception:
+        logging.exception("Resolution index rebuild failed")
     app.state.search_service = SearchResolutionService(
         search_db_path=app.state.search_db_path,
         queue_db_path=app.state.paths.db_path,
@@ -2661,6 +2729,9 @@ async def startup():
     app.state.community_publish_backfill_last_summary = None
     app.state.community_publish_task_lock = threading.Lock()
     app.state.community_publish_active_task = None
+    app.state.resolution_sync_last_summary = None
+    app.state.resolution_sync_task_lock = threading.Lock()
+    app.state.resolution_sync_active_task = None
     app.state.community_publish_worker = CommunityPublishWorker(
         db_path=app.state.paths.db_path,
         config_getter=get_loaded_config,
@@ -2691,6 +2762,14 @@ async def startup():
             _community_publish_schedule_tick,
             trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=20)),
             id=f"{COMMUNITY_PUBLISH_JOB_ID}_startup",
+            replace_existing=True,
+        )
+    resolution_cfg = _resolution_config(startup_cfg if isinstance(startup_cfg, dict) else {})
+    if bool(resolution_cfg.get("sync_enabled", False)) and str(resolution_cfg.get("upstream_base_url") or "").strip():
+        app.state.scheduler.add_job(
+            _resolution_cache_sync_tick,
+            trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=25)),
+            id=f"{RESOLUTION_CACHE_SYNC_JOB_ID}_startup",
             replace_existing=True,
         )
 
@@ -4607,6 +4686,117 @@ def _get_next_community_publish_run_iso() -> str | None:
     return next_run.astimezone(timezone.utc).isoformat()
 
 
+def _resolution_sync_task_snapshot() -> dict[str, Any] | None:
+    lock = getattr(app.state, "resolution_sync_task_lock", None)
+    task = getattr(app.state, "resolution_sync_active_task", None)
+    if lock is None:
+        return dict(task) if isinstance(task, dict) else None
+    with lock:
+        task = getattr(app.state, "resolution_sync_active_task", None)
+        return dict(task) if isinstance(task, dict) else None
+
+
+def _set_resolution_sync_task(task: dict[str, Any] | None) -> None:
+    lock = getattr(app.state, "resolution_sync_task_lock", None)
+    if lock is None:
+        app.state.resolution_sync_active_task = task
+        return
+    with lock:
+        app.state.resolution_sync_active_task = dict(task) if isinstance(task, dict) else None
+
+
+def _start_resolution_sync_background_task(*, kind: str, runner) -> dict[str, Any]:
+    active = _resolution_sync_task_snapshot()
+    if isinstance(active, dict) and active.get("running"):
+        raise HTTPException(status_code=409, detail="resolution_sync_task_already_running")
+    task_state = {
+        "kind": kind,
+        "running": True,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "finished_at": None,
+        "summary": None,
+        "error": None,
+    }
+    _set_resolution_sync_task(task_state)
+
+    def _runner():
+        try:
+            summary = runner()
+            updated = _resolution_sync_task_snapshot() or {}
+            updated.update(
+                {
+                    "running": False,
+                    "status": "completed",
+                    "finished_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "summary": summary if isinstance(summary, dict) else None,
+                    "error": None,
+                }
+            )
+            _set_resolution_sync_task(updated)
+        except Exception as exc:
+            logger.exception("resolution_sync_background_task_failed kind=%s", kind)
+            updated = _resolution_sync_task_snapshot() or {}
+            updated.update(
+                {
+                    "running": False,
+                    "status": "failed",
+                    "finished_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "error": str(exc) or f"{kind}_failed",
+                }
+            )
+            _set_resolution_sync_task(updated)
+
+    threading.Thread(target=_runner, name=f"resolution-sync-{kind}", daemon=True).start()
+    return task_state
+
+
+def _run_resolution_sync_once(config: dict[str, Any]) -> dict[str, Any]:
+    resolution_cfg = _resolution_config(config)
+    api_base_url = str(resolution_cfg.get("upstream_base_url") or "").strip()
+    batch_size = int(resolution_cfg.get("sync_batch_size") or 500)
+    summary = sync_resolution_local_cache_from_api(
+        db_path=app.state.search_db_path,
+        dataset_root=str(DATA_DIR / "community_cache_dataset"),
+        api_base_url=api_base_url,
+        limit=batch_size,
+    )
+    app.state.resolution_sync_last_summary = summary
+    return summary
+
+
+def _resolution_cache_sync_tick() -> None:
+    config = get_loaded_config() or {}
+    resolution_cfg = _resolution_config(config)
+    if not bool(resolution_cfg.get("sync_enabled", False)):
+        return
+    try:
+        summary = _run_resolution_sync_once(config if isinstance(config, dict) else {})
+        logger.info(
+            "Resolution cache sync tick status=%s mode=%s records=%s files=%s cursor=%s",
+            summary.get("status"),
+            summary.get("mode"),
+            summary.get("results_count"),
+            summary.get("files_written"),
+            summary.get("cursor"),
+        )
+    except Exception:
+        logger.exception("Resolution cache sync tick failed")
+
+
+def _get_next_resolution_cache_sync_run_iso() -> str | None:
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return None
+    job = scheduler.get_job(RESOLUTION_CACHE_SYNC_JOB_ID)
+    if not job or not job.next_run_time:
+        return None
+    next_run = job.next_run_time
+    if next_run.tzinfo is None:
+        next_run = next_run.replace(tzinfo=timezone.utc)
+    return next_run.astimezone(timezone.utc).isoformat()
+
+
 def _community_publish_task_snapshot() -> dict[str, Any] | None:
     lock = getattr(app.state, "community_publish_task_lock", None)
     task = getattr(app.state, "community_publish_active_task", None)
@@ -4703,6 +4893,42 @@ def _apply_community_publish_schedule(config: dict):
         misfire_grace_time=60,
     )
     logger.info("Community publish worker enabled (interval=%s min)", interval)
+
+
+def _apply_resolution_cache_sync_schedule(config: dict):
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return
+    try:
+        scheduler.remove_job(RESOLUTION_CACHE_SYNC_JOB_ID)
+    except Exception:
+        pass
+
+    resolution_cfg = _resolution_config(config if isinstance(config, dict) else {})
+    if not bool(resolution_cfg.get("sync_enabled", False)):
+        logger.info("Resolution cache sync disabled by config")
+        return
+    api_base_url = str(resolution_cfg.get("upstream_base_url") or "").strip()
+    if not api_base_url:
+        logger.info("Resolution cache sync disabled: upstream_base_url missing")
+        return
+    interval = resolution_cfg.get("sync_poll_minutes", 1440)
+    try:
+        interval = int(interval)
+    except (TypeError, ValueError):
+        interval = 1440
+    interval = max(1, interval)
+    start_date = datetime.now(timezone.utc) + timedelta(minutes=1)
+    scheduler.add_job(
+        _resolution_cache_sync_tick,
+        trigger=IntervalTrigger(minutes=interval, start_date=start_date),
+        id=RESOLUTION_CACHE_SYNC_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
+    )
+    logger.info("Resolution cache sync enabled (interval=%s min, upstream=%s)", interval, api_base_url)
 
 
 def _apply_schedule_config(schedule):
@@ -6279,6 +6505,131 @@ async def api_version_latest():
         "source": source,
         "update_available": bool(update_available),
     }
+
+
+@app.get("/resolve/recording/{mbid}")
+async def resolution_api_resolve_recording(mbid: str):
+    payload = resolve_resolution_recording(app.state.search_db_path, mbid)
+    if str(((payload.get("availability") or {}).get("status") or "")).strip() == "not_found":
+        try:
+            enqueue_resolution_unresolved_mbid(
+                app.state.search_db_path,
+                mbid=mbid,
+                reason="resolution_api_not_found",
+                source="resolve_recording",
+            )
+        except Exception:
+            logger.debug("resolution_api_unresolved_enqueue_failed mbid=%s", mbid, exc_info=True)
+    return safe_json(payload)
+
+
+@app.post("/resolve/bulk")
+async def resolution_api_resolve_bulk(payload: ResolutionBulkRequest):
+    result = resolve_resolution_bulk(app.state.search_db_path, list(payload.mbids or []))
+    for item in result.get("results") if isinstance(result.get("results"), list) else []:
+        if str((((item.get("availability") or {}).get("status")) or "")).strip() != "not_found":
+            continue
+        try:
+            enqueue_resolution_unresolved_mbid(
+                app.state.search_db_path,
+                mbid=str(item.get("mbid") or ""),
+                reason="resolution_api_bulk_not_found",
+                source="resolve_bulk",
+            )
+        except Exception:
+            logger.debug("resolution_api_bulk_unresolved_enqueue_failed", exc_info=True)
+    return safe_json(result)
+
+
+@app.get("/resolve/snapshot")
+async def resolution_api_snapshot(limit: int = Query(500, ge=1, le=5000)):
+    payload = build_resolution_snapshot(app.state.search_db_path, limit=limit)
+    return safe_json(payload)
+
+
+@app.get("/resolve/diff")
+async def resolution_api_diff(since: str = Query(...), limit: int = Query(500, ge=1, le=5000)):
+    payload = build_resolution_diff(app.state.search_db_path, since=since, limit=limit)
+    return safe_json(payload)
+
+
+@app.post("/submit", status_code=202)
+async def resolution_api_submit(payload: ResolutionSubmitRequest, request: Request):
+    cfg = get_loaded_config() or {}
+    try:
+        auth = resolve_node_auth(
+            cfg if isinstance(cfg, dict) else {},
+            provided_key=_resolution_api_key_from_request(request),
+            provided_node_id=payload.node_id,
+            allow_anonymous=False,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 401 if detail in {"api_key_required", "invalid_api_key", "node_id_mismatch"} else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    try:
+        result = submit_resolution_mapping(
+            app.state.search_db_path,
+            mbid=payload.mbid,
+            source_url=payload.source_url,
+            source=payload.source,
+            node_id=str(auth.get("node_id") or payload.node_id),
+            duration_seconds=payload.duration_seconds,
+            media_format=payload.media_format,
+            bitrate_kbps=payload.bitrate_kbps,
+            file_hash=payload.file_hash,
+            resolution_method=payload.resolution_method,
+            source_id=payload.source_id,
+            raw_payload=payload.metadata or {},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return safe_json({"schema_version": 1, "status": "accepted", "mapping": result})
+
+
+@app.post("/verify")
+async def resolution_api_verify(payload: ResolutionVerifyRequest, request: Request):
+    cfg = get_loaded_config() or {}
+    try:
+        auth = resolve_node_auth(
+            cfg if isinstance(cfg, dict) else {},
+            provided_key=_resolution_api_key_from_request(request),
+            provided_node_id=payload.verifier_id,
+            allow_anonymous=False,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 401 if detail in {"api_key_required", "invalid_api_key", "node_id_mismatch"} else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    try:
+        result = verify_resolution_mapping(
+            app.state.search_db_path,
+            mbid=payload.mbid,
+            source_url=payload.source_url,
+            verifier_id=str(auth.get("node_id") or payload.verifier_id),
+            duration_seconds=payload.duration_seconds,
+            media_format=payload.media_format,
+            bitrate_kbps=payload.bitrate_kbps,
+            file_hash=payload.file_hash,
+            threshold=RESOLUTION_VERIFY_THRESHOLD,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return safe_json({"schema_version": 1, "status": "ok", "verification": result})
+
+
+@app.get("/stats")
+async def resolution_api_stats():
+    payload = build_resolution_stats(app.state.search_db_path)
+    return safe_json(payload)
+
+
+@app.get("/health")
+async def resolution_api_health():
+    payload = build_resolution_health(app.state.search_db_path)
+    return safe_json(payload)
 
 
 @app.post("/api/yt-dlp/update")
@@ -9184,6 +9535,7 @@ async def api_put_config(payload: dict = Body(...)):
         _apply_schedule_config(schedule)
     _apply_spotify_schedule(payload or {})
     _apply_community_publish_schedule(payload or {})
+    _apply_resolution_cache_sync_schedule(payload or {})
     policy = normalize_watch_policy(payload)
     if getattr(normalize_watch_policy, "valid", True):
         app.state.watch_policy = policy
@@ -9214,6 +9566,23 @@ async def api_community_cache_publish_status():
     return safe_json(status)
 
 
+@app.get("/api/community-cache/sync/status")
+async def api_community_cache_sync_status():
+    config = get_loaded_config() or _read_config_or_404()
+    resolution_cfg = _resolution_config(config if isinstance(config, dict) else {})
+    status = {
+        "enabled": bool(resolution_cfg.get("sync_enabled", False)),
+        "api_base_url": str(resolution_cfg.get("upstream_base_url") or "").strip() or None,
+        "poll_minutes": int(resolution_cfg.get("sync_poll_minutes") or 1440),
+        "batch_size": int(resolution_cfg.get("sync_batch_size") or 500),
+        "last_summary": getattr(app.state, "resolution_sync_last_summary", None),
+        "stored_status": get_resolution_local_sync_status(app.state.search_db_path),
+        "active_task": _resolution_sync_task_snapshot(),
+        "next_run_at": _get_next_resolution_cache_sync_run_iso(),
+    }
+    return safe_json(status)
+
+
 @app.post("/api/community-cache/publish/run", status_code=202)
 async def api_community_cache_publish_run():
     worker = getattr(app.state, "community_publish_worker", None)
@@ -9226,6 +9595,20 @@ async def api_community_cache_publish_run():
         return summary
 
     task_state = _start_community_publish_background_task(kind="publish", runner=_run_once)
+    return {"status": "started", "task": safe_json(task_state)}
+
+
+@app.post("/api/community-cache/sync/run", status_code=202)
+async def api_community_cache_sync_run():
+    config = get_loaded_config() or _read_config_or_404()
+    resolution_cfg = _resolution_config(config if isinstance(config, dict) else {})
+    if not str(resolution_cfg.get("upstream_base_url") or "").strip():
+        raise HTTPException(status_code=400, detail="resolution_api.upstream_base_url is required")
+
+    def _run_sync():
+        return _run_resolution_sync_once(config if isinstance(config, dict) else {})
+
+    task_state = _start_resolution_sync_background_task(kind="sync", runner=_run_sync)
     return {"status": "started", "task": safe_json(task_state)}
 
 

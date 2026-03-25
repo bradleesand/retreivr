@@ -37,6 +37,7 @@ import sqlite3
 
 
 logger = logging.getLogger(__name__)
+_RESOLUTION_INDEX_DB_PATH: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +123,11 @@ def _record_path(dataset_root: str | Path, recording_mbid: str) -> Path:
     return root / normalized[:2] / f"{normalized}.json"
 
 
+def configure_resolution_index_db_path(db_path: str | None) -> None:
+    global _RESOLUTION_INDEX_DB_PATH
+    _RESOLUTION_INDEX_DB_PATH = str(db_path or "").strip() or None
+
+
 def load_local_community_record(recording_mbid: str, *, dataset_root: str | Path | None) -> Optional[Dict[str, Any]]:
     normalized = str(recording_mbid or "").strip().lower()
     if not normalized or not dataset_root:
@@ -159,6 +165,22 @@ def persist_local_community_record(
     tmp_path = path.with_suffix(f"{path.suffix}.tmp")
     tmp_path.write_text(content, encoding="utf-8")
     os.replace(tmp_path, path)
+    if _RESOLUTION_INDEX_DB_PATH:
+        try:
+            from engine.resolution_api import _connect, upsert_resolution_record_from_dataset_record
+
+            conn = _connect(_RESOLUTION_INDEX_DB_PATH)
+            try:
+                upsert_resolution_record_from_dataset_record(
+                    conn,
+                    recording_mbid=normalized,
+                    record=record,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            logger.debug("community_cache_resolution_index_update_failed recording_mbid=%s", normalized, exc_info=True)
     return True
 
 

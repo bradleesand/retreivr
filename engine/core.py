@@ -360,6 +360,18 @@ def apply_config_defaults(config):
     normalized.setdefault("community_cache_publish_token_env", "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN")
     normalized.setdefault("community_cache_publish_batch_size", 25)
     normalized.setdefault("community_cache_publish_publisher", "")
+    normalized.setdefault(
+        "resolution_api",
+        {
+            "require_api_key": False,
+            "nodes": [],
+            "upstream_base_url": "",
+            "sync_enabled": False,
+            "sync_poll_minutes": 1440,
+            "sync_batch_size": 500,
+            "local_node_id": "local_node",
+        },
+    )
     normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
     normalized.setdefault("music_skip_metadata_probe", True)
     normalized.setdefault("music_candidate_cooldown_enabled", True)
@@ -668,6 +680,57 @@ def validate_config(config):
         else:
             if batch_size < 1:
                 errors.append("community_cache_publish_batch_size must be >= 1")
+
+    resolution_api = config.get("resolution_api")
+    if resolution_api is not None:
+        if not isinstance(resolution_api, dict):
+            errors.append("resolution_api must be an object")
+        else:
+            require_api_key = resolution_api.get("require_api_key")
+            if require_api_key is not None and not isinstance(require_api_key, bool):
+                errors.append("resolution_api.require_api_key must be true/false")
+            upstream_base_url = resolution_api.get("upstream_base_url")
+            if upstream_base_url is not None and not isinstance(upstream_base_url, str):
+                errors.append("resolution_api.upstream_base_url must be a string")
+            sync_enabled = resolution_api.get("sync_enabled")
+            if sync_enabled is not None and not isinstance(sync_enabled, bool):
+                errors.append("resolution_api.sync_enabled must be true/false")
+            sync_poll_minutes = resolution_api.get("sync_poll_minutes")
+            if sync_poll_minutes is not None:
+                try:
+                    parsed = int(sync_poll_minutes)
+                except Exception:
+                    errors.append("resolution_api.sync_poll_minutes must be an integer")
+                else:
+                    if parsed < 1:
+                        errors.append("resolution_api.sync_poll_minutes must be >= 1")
+            sync_batch_size = resolution_api.get("sync_batch_size")
+            if sync_batch_size is not None:
+                try:
+                    parsed = int(sync_batch_size)
+                except Exception:
+                    errors.append("resolution_api.sync_batch_size must be an integer")
+                else:
+                    if parsed < 1:
+                        errors.append("resolution_api.sync_batch_size must be >= 1")
+            local_node_id = resolution_api.get("local_node_id")
+            if local_node_id is not None and (not isinstance(local_node_id, str) or not local_node_id.strip()):
+                errors.append("resolution_api.local_node_id must be a non-empty string")
+            nodes = resolution_api.get("nodes")
+            if nodes is not None:
+                if not isinstance(nodes, list):
+                    errors.append("resolution_api.nodes must be a list")
+                else:
+                    for index, item in enumerate(nodes):
+                        if not isinstance(item, dict):
+                            errors.append(f"resolution_api.nodes[{index}] must be an object")
+                            continue
+                        node_id = item.get("node_id")
+                        api_key = item.get("api_key")
+                        if not isinstance(node_id, str) or not node_id.strip():
+                            errors.append(f"resolution_api.nodes[{index}].node_id must be a non-empty string")
+                        if not isinstance(api_key, str) or not api_key.strip():
+                            errors.append(f"resolution_api.nodes[{index}].api_key must be a non-empty string")
 
     custom_adapter_file = config.get("custom_search_adapters_file")
     if custom_adapter_file is not None:
