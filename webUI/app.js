@@ -92,6 +92,8 @@ const previewState = {
   source: "",
   title: "",
   embedUrl: "",
+  mediaType: "",
+  streamUrl: "",
 };
 const BROWSE_DEFAULTS = {
   configDir: "",
@@ -970,24 +972,40 @@ function buildHomePreviewDescriptorFromRow(row) {
   if (!row) return null;
   const previewButton = row.querySelector('button[data-action="home-preview"]');
   if (!previewButton) return null;
+  const mediaType = String(previewButton.dataset.previewMediaType || "").trim().toLowerCase();
+  const title = String(previewButton.dataset.previewTitle || "").trim() || "Preview";
+  const source = String(previewButton.dataset.previewSource || "").trim();
+  if (mediaType === "audio") {
+    const streamUrl = String(previewButton.dataset.previewStreamUrl || "").trim();
+    if (!streamUrl || !isValidHttpUrl(streamUrl)) return null;
+    return {
+      mediaType: "audio",
+      streamUrl,
+      source,
+      title,
+    };
+  }
   const embedUrl = String(previewButton.dataset.previewEmbedUrl || "").trim();
   if (!embedUrl || !isValidHttpUrl(embedUrl)) return null;
   return {
+    mediaType: "video",
     embedUrl,
-    source: String(previewButton.dataset.previewSource || "").trim(),
-    title: String(previewButton.dataset.previewTitle || "").trim() || "Preview",
+    source,
+    title,
   };
 }
 
 function openHomePreviewModal(descriptor) {
-  if (!descriptor || !descriptor.embedUrl) {
+  if (!descriptor || (!descriptor.embedUrl && !descriptor.streamUrl)) {
     return;
   }
   const modal = $("#home-preview-modal");
   const frame = $("#home-preview-frame");
+  const audioWrap = $("#home-preview-audio-wrap");
+  const audioEl = $("#home-preview-audio");
   const titleEl = $("#home-preview-title");
   const sourceEl = $("#home-preview-source");
-  if (!modal || !frame || !titleEl || !sourceEl) {
+  if (!modal || !frame || !audioWrap || !audioEl || !titleEl || !sourceEl) {
     return;
   }
   const sourceLabels = {
@@ -999,10 +1017,22 @@ function openHomePreviewModal(descriptor) {
   previewState.open = true;
   previewState.source = descriptor.source || "";
   previewState.title = descriptor.title || "Preview";
-  previewState.embedUrl = descriptor.embedUrl;
+  previewState.embedUrl = descriptor.embedUrl || "";
+  previewState.mediaType = descriptor.mediaType || "video";
+  previewState.streamUrl = descriptor.streamUrl || "";
   titleEl.textContent = descriptor.title || "Preview";
   sourceEl.textContent = `Source: ${sourceLabels[descriptor.source] || descriptor.source || "Unknown"}`;
-  frame.src = descriptor.embedUrl;
+  if (previewState.mediaType === "audio") {
+    frame.src = "about:blank";
+    frame.closest(".home-preview-frame-wrap")?.classList.add("hidden");
+    audioWrap.classList.remove("hidden");
+    audioEl.src = descriptor.streamUrl || "";
+  } else {
+    audioEl.removeAttribute("src");
+    audioWrap.classList.add("hidden");
+    frame.closest(".home-preview-frame-wrap")?.classList.remove("hidden");
+    frame.src = descriptor.embedUrl || "about:blank";
+  }
   modal.classList.remove("hidden");
   updatePollingState();
 }
@@ -1010,9 +1040,24 @@ function openHomePreviewModal(descriptor) {
 function closeHomePreviewModal() {
   const modal = $("#home-preview-modal");
   const frame = $("#home-preview-frame");
+  const audioWrap = $("#home-preview-audio-wrap");
+  const audioEl = $("#home-preview-audio");
   if (frame) {
     frame.src = "about:blank";
   }
+  if (audioEl) {
+    try {
+      audioEl.pause();
+    } catch (_err) {
+      // ignore
+    }
+    audioEl.removeAttribute("src");
+    audioEl.load();
+  }
+  if (audioWrap) {
+    audioWrap.classList.add("hidden");
+  }
+  frame?.closest(".home-preview-frame-wrap")?.classList.remove("hidden");
   if (modal) {
     modal.classList.add("hidden");
   }
@@ -1020,6 +1065,8 @@ function closeHomePreviewModal() {
   previewState.source = "";
   previewState.title = "";
   previewState.embedUrl = "";
+  previewState.mediaType = "";
+  previewState.streamUrl = "";
   updatePollingState();
 }
 
@@ -3984,6 +4031,30 @@ function buildMusicTrackEnqueuePayload({ button, result }) {
   return payload;
 }
 
+async function fetchMusicTrackPreview(payload = {}) {
+  return fetchJson("/api/music/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      recording_mbid: String(payload.recording_mbid || "").trim(),
+      release_mbid: String(payload.release_mbid || payload.mb_release_id || "").trim() || null,
+      release_group_mbid: String(payload.release_group_mbid || payload.mb_release_group_id || "").trim() || null,
+      artist: String(payload.artist || "").trim() || null,
+      track: String(payload.track || "").trim() || null,
+      album: String(payload.album || "").trim() || null,
+      media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
+    }),
+  });
+}
+
+function buildPreviewStreamUrl(sourceUrl) {
+  const raw = String(sourceUrl || "").trim();
+  if (!raw || !isValidHttpUrl(raw)) {
+    return null;
+  }
+  return `/api/music/preview/stream?url=${encodeURIComponent(raw)}`;
+}
+
 function renderMusicModeResults(response, query = "", { pushHistory = false } = {}) {
   if (pushHistory && state.homeMusicCurrentView) {
     state.homeMusicViewStack.push(state.homeMusicCurrentView);
@@ -4341,11 +4412,17 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       const key = `${result.recording_mbid}::${result.mb_release_id}`;
       state.homeMusicResultMap[key] = result;
       const card = document.createElement("article");
-      card.className = "home-result-card";
+      card.className = "home-result-card music-meta-card";
       card.dataset.recordingMbid = String(result.recording_mbid || "").trim();
       card.dataset.releaseMbid = String(result.mb_release_id || "").trim();
       card.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
+      const trackThumb = createMusicCardThumb(
+        result?.album ? `${result.album} cover` : "Album cover"
+      );
+      card.appendChild(trackThumb.shell);
 
+      const content = document.createElement("div");
+      content.className = "music-meta-main";
       const header = document.createElement("div");
       header.className = "home-result-header";
       const title = document.createElement("div");
@@ -4362,13 +4439,13 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       badge.className = "home-result-badge matched";
       badge.textContent = "MusicBrainz";
       header.appendChild(badge);
-      card.appendChild(header);
+      content.appendChild(header);
 
       const meta = document.createElement("div");
       meta.className = "home-candidate-meta";
       const durationText = Number.isFinite(result.duration_ms) ? formatDuration(result.duration_ms / 1000) : "-";
       meta.textContent = `${result.artist} • ${durationText}`;
-      card.appendChild(meta);
+      content.appendChild(meta);
       const albumLine = document.createElement("div");
       albumLine.className = "home-candidate-meta";
       const yearText = result.release_year || "";
@@ -4379,7 +4456,7 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       } else {
         albumLine.textContent = "Album: (unknown)";
       }
-      card.appendChild(albumLine);
+      content.appendChild(albumLine);
 
       const entityRef = document.createElement("div");
       entityRef.className = "home-mb-entity-ref";
@@ -4394,10 +4471,15 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       } else {
         entityRef.textContent = "MB: (unknown)";
       }
-      card.appendChild(entityRef);
+      content.appendChild(entityRef);
+      card.appendChild(content);
 
       const action = document.createElement("div");
       action.className = "home-candidate-action";
+      const previewButton = document.createElement("button");
+      previewButton.className = "button ghost small music-preview-btn";
+      previewButton.dataset.musicResultKey = key;
+      previewButton.textContent = "Preview";
       const button = document.createElement("button");
       button.className = "button primary small music-download-btn";
       button.dataset.musicResultKey = key;
@@ -4405,9 +4487,37 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       button.dataset.releaseMbid = String(result.mb_release_id || "").trim();
       button.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
       button.textContent = "Download";
+      action.appendChild(previewButton);
       action.appendChild(button);
       card.appendChild(action);
       container.appendChild(card);
+
+      const releaseGroupMbid = String(result?.mb_release_group_id || "").trim();
+      if (releaseGroupMbid) {
+        if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid)) {
+          const cachedCover = state.homeAlbumCoverCache[releaseGroupMbid];
+          if (cachedCover) {
+            trackThumb.setImage(cachedCover);
+          } else {
+            trackThumb.setNoArt();
+          }
+        } else {
+          thumbnailJobs.push(async (activeToken) => {
+            const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
+            if (!coverUrl || state.homeMusicRenderToken !== activeToken) {
+              if (!coverUrl && state.homeMusicRenderToken === activeToken) {
+                trackThumb.setNoArt();
+              }
+              return;
+            }
+            trackThumb.setImage(coverUrl);
+          });
+        }
+      } else if (result.artwork_url) {
+        trackThumb.setImage(result.artwork_url);
+      } else {
+        trackThumb.setNoArt();
+      }
     });
   }
 }
@@ -9234,6 +9344,61 @@ function bindEvents() {
       }
     });
   }
+  document.addEventListener("click", async (event) => {
+    const previewBtn = event.target.closest(".music-preview-btn");
+    if (previewBtn) {
+      if (previewBtn.disabled) return;
+      const resultKey = String(previewBtn.dataset.musicResultKey || "").trim();
+      const selectedResult = resultKey ? state.homeMusicResultMap[resultKey] : null;
+      if (!selectedResult) {
+        setNotice($("#home-search-message"), "Preview metadata is unavailable for this track.", true);
+        return;
+      }
+      const originalText = previewBtn.textContent;
+      previewBtn.disabled = true;
+      previewBtn.textContent = "Resolving...";
+      try {
+        const response = await fetchMusicTrackPreview(selectedResult);
+        const previewType = String(response?.preview_type || "").trim().toLowerCase();
+        const source = String(response?.source || "").trim();
+        const title = String(response?.title || selectedResult.track || "Preview").trim() || "Preview";
+        const sourceUrl = String(response?.source_url || "").trim();
+        if (previewType === "audio") {
+          const streamUrl = String(response?.stream_url || buildPreviewStreamUrl(sourceUrl) || "").trim();
+          if (!streamUrl) {
+            throw new Error("Audio preview unavailable");
+          }
+          openHomePreviewModal({
+            mediaType: "audio",
+            streamUrl,
+            source,
+            title,
+          });
+        } else {
+          const descriptor = buildHomePreviewDescriptor({
+            source,
+            url: sourceUrl,
+            title,
+          });
+          if (!descriptor) {
+            throw new Error("Video preview unavailable");
+          }
+          openHomePreviewModal({
+            mediaType: "video",
+            embedUrl: descriptor.embedUrl,
+            source: descriptor.source,
+            title: descriptor.title,
+          });
+        }
+      } catch (err) {
+        setNotice($("#home-search-message"), `Preview failed: ${toUserErrorMessage(err)}`, true);
+      } finally {
+        previewBtn.disabled = false;
+        previewBtn.textContent = originalText;
+      }
+      return;
+    }
+  });
   document.addEventListener("click", async (event) => {
     const btn = event.target.closest(".music-download-btn");
     if (!btn) return;
