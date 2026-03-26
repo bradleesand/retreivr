@@ -2231,6 +2231,31 @@ class IntentExecutePayload(BaseModel):
     identifier: str
 
 
+class IntakeDeliveryPayload(BaseModel):
+    destination: str | None = None
+    final_format: str | None = None
+    media_mode: str | None = None
+
+
+class IntakeProvenancePayload(BaseModel):
+    origin: str | None = None
+    origin_id: str | None = None
+    source: str | None = None
+    external_id: str | None = None
+    submitted_by: str | None = None
+
+
+class IntakeRequestPayload(BaseModel):
+    source_url: str | None = None
+    url: str | None = None
+    media_class: str | None = None
+    media_intent: str | None = None
+    metadata: dict[str, Any] | None = None
+    delivery: IntakeDeliveryPayload | None = None
+    provenance: IntakeProvenancePayload | None = None
+    force_redownload: bool = False
+
+
 def _build_music_track_canonical_id(
     artist,
     album,
@@ -2512,11 +2537,20 @@ class _IntentQueueAdapter:
             external_ids,
             fallback_spotify_id=payload.get("spotify_track_id"),
         )
+        requested_media_type = str(payload.get("media_type") or "").strip().lower()
+        if requested_media_type in {"music", "audio"}:
+            target_media_type = "music"
+        elif requested_media_type == "video":
+            target_media_type = "video"
+        elif music_metadata or is_music_mode_origin:
+            target_media_type = "music"
+        else:
+            target_media_type = resolve_media_type(runtime_config, url=media_url)
         enqueue_payload = build_download_job_payload(
             config=runtime_config,
             origin=origin,
             origin_id=origin_id,
-            media_type="music",
+            media_type=target_media_type,
             media_intent=media_intent,
             source=source,
             url=media_url,
@@ -2526,10 +2560,12 @@ class _IntentQueueAdapter:
             final_format_override=final_format,
             resolved_metadata=music_metadata,
             output_template_overrides={
-                "audio_mode": True,
+                "audio_mode": target_media_type == "music",
                 "duration_ms": resolved_media.get("duration_ms"),
+                "kind": payload.get("kind"),
             },
             canonical_id=canonical_id,
+            external_id=str(payload.get("external_id") or "").strip() or None,
         )
         job_id, created, dedupe_reason = store.enqueue_job(
             **enqueue_payload,
@@ -2565,6 +2601,85 @@ app = FastAPI(
     description="Retreivr API for self-hosted playlist archiving, scheduling, and metrics.",
     default_response_class=SafeJSONResponse,
 )
+
+
+def _normalize_intake_media_class(value: str | None) -> tuple[str, str]:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "auto"}:
+        return "video", "download"
+    if normalized in {"music", "track", "song", "audio"}:
+        return "music", "track"
+    if normalized in {"audiobook", "podcast"}:
+        return "music", normalized
+    if normalized in {"music_video", "video", "movie", "episode"}:
+        return "video", normalized if normalized != "music_video" else "music_video"
+    if normalized in {"book", "pdf", "ebook", "document"}:
+        return "video", "book"
+    raise HTTPException(status_code=400, detail="unsupported media_class")
+
+
+def _normalize_intake_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    source = metadata if isinstance(metadata, dict) else {}
+    normalized = dict(source)
+    title = str(source.get("title") or source.get("track") or "").strip()
+    if title:
+        normalized.setdefault("title", title)
+        normalized.setdefault("track", title)
+    artist = str(source.get("artist") or source.get("album_artist") or source.get("author") or "").strip()
+    if artist:
+        normalized.setdefault("artist", artist)
+        normalized.setdefault("album_artist", artist)
+    album = str(source.get("album") or source.get("series") or "").strip()
+    if album:
+        normalized.setdefault("album", album)
+    if "track_num" not in normalized and source.get("track_number") is not None:
+        normalized["track_num"] = source.get("track_number")
+    if "disc_num" not in normalized and source.get("disc_number") is not None:
+        normalized["disc_num"] = source.get("disc_number")
+    if "date" not in normalized and source.get("release_date") is not None:
+        normalized["date"] = source.get("release_date")
+    if "mbid" not in normalized:
+        normalized["mbid"] = (
+            source.get("mbid")
+            or source.get("recording_mbid")
+            or source.get("mb_recording_id")
+        )
+    return normalized
+
+
+def _normalize_intake_payload(payload: IntakeRequestPayload) -> tuple[dict[str, Any], str]:
+    source_url = str(payload.source_url or payload.url or "").strip()
+    if not source_url:
+        raise HTTPException(status_code=400, detail="source_url is required")
+
+    metadata = _normalize_intake_metadata(payload.metadata)
+    delivery = payload.delivery.dict(exclude_none=True) if payload.delivery is not None else {}
+    provenance = payload.provenance.dict(exclude_none=True) if payload.provenance is not None else {}
+
+    media_type, default_intent = _normalize_intake_media_class(payload.media_class)
+    media_intent = str(payload.media_intent or "").strip().lower() or default_intent
+    raw_media_class = str(payload.media_class or "").strip().lower() or "auto"
+
+    adapter_payload: dict[str, Any] = {
+        "url": source_url,
+        "resolved_media": {"media_url": source_url},
+        "media_type": media_type,
+        "media_intent": media_intent,
+        "destination": str(delivery.get("destination") or "").strip() or None,
+        "final_format": str(delivery.get("final_format") or "").strip() or None,
+        "media_mode": str(delivery.get("media_mode") or "").strip() or None,
+        "origin": str(provenance.get("origin") or "api_intake").strip() or "api_intake",
+        "origin_id": str(provenance.get("origin_id") or provenance.get("external_id") or source_url).strip() or source_url,
+        "source": str(provenance.get("source") or "").strip() or None,
+        "external_id": str(provenance.get("external_id") or "").strip() or None,
+        "force_redownload": bool(payload.force_redownload),
+        "kind": media_intent if raw_media_class == "auto" else raw_media_class,
+    }
+    if metadata:
+        adapter_payload["music_metadata"] = metadata
+    if metadata.get("duration_ms") is not None:
+        adapter_payload["resolved_media"]["duration_ms"] = metadata.get("duration_ms")
+    return adapter_payload, media_type
 
 if _TRUST_PROXY:
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
@@ -7146,6 +7261,23 @@ async def execute_intent(payload: dict = Body(...)):
         queue=queue,
         spotify_client=spotify_client,
     )
+
+
+@app.post("/api/intake", status_code=202)
+async def intake_external_package(payload: IntakeRequestPayload):
+    """Accept a normalized acquisition package from external integrations."""
+    adapter_payload, effective_media_type = _normalize_intake_payload(payload)
+    result = _IntentQueueAdapter().enqueue(adapter_payload)
+    return {
+        "status": "accepted",
+        "job_id": result.get("job_id"),
+        "created": bool(result.get("created")),
+        "dedupe_reason": result.get("dedupe_reason"),
+        "effective_media_type": effective_media_type,
+        "effective_media_intent": str(adapter_payload.get("media_intent") or ""),
+        "origin": str(adapter_payload.get("origin") or ""),
+        "source_url": str(adapter_payload.get("url") or ""),
+    }
 
 
 @app.post("/api/intent/preview")
