@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.20 — Community Cache Publish Reset Endpoint Fix
+
+### High-Level
+This release is a focused community-cache publish stability patch. It fixes the GitHub branch-reset path used during manual and automated publish runs so Retreivr can recover cleanly after branch cleanup, rejected PRs, and stale publish-branch reuse without tripping over the wrong GitHub refs endpoint.
+
+### Added
+- Regression coverage for resetting an existing publish branch through GitHub’s `git/refs` update endpoint.
+
+### Changed
+- Release-facing docs, highlights, Docker examples, and starter defaults now point to `v0.9.20`.
+
+### Fixed
+- Community-cache publish branch resets now call the correct GitHub API path when force-updating an existing publish branch.
+- Manual publish runs no longer fail with a `404` during the branch-reset step after the remote publish branch has been recreated or needs to be repointed at `main`.
+
 ## v0.9.19 — Search UX Hardening + Plugin Setup Fixes
 
 ### High-Level

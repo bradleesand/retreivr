@@ -36,11 +36,10 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 0.9.19 Highlights
-- Video search results now use the newer grid-style layout instead of a long vertical stack
-- Supported video cards can start a muted hover preview directly from the result grid
-- Music Mode now respects its configured default output format again after config reloads
-- Jellyfin plugin setup is being hardened so external testing can continue from a more stable base
+## 0.9.20 Highlights
+- Community-cache publish branch resets now use the correct GitHub ref-update endpoint
+- Manual publish runs recover more reliably after branch cleanup or rejected PRs
+- The cache publish/validate/merge loop is closer to the final `v1.0.0` stability bar
 
 ## Product Tour
 
@@ -250,7 +249,7 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `0.9.19`, pull the latest image and restart:
+If you are upgrading to `0.9.20`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
