@@ -110,6 +110,8 @@ const RELEASE_CACHE_KEY = "yt_archiver_release_cache_v2";
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version_v2";
 const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
 const HOME_MUSIC_DEBUG_KEY = "retreivr.debug.music";
+const HOME_ALBUM_COVER_CACHE_KEY = "retreivr.home.album_cover_cache.v1";
+const HOME_ARTIST_COVER_CACHE_KEY = "retreivr.home.artist_cover_cache.v1";
 const HOME_SOURCE_PRIORITY_MAP = {
   auto: null,
   youtube: ["youtube"],
@@ -326,8 +328,8 @@ function runPrioritizedThumbnailJobs(jobs, renderToken, maxConcurrent = 2) {
       } catch (_err) {
         // Thumbnail hydration is best-effort only.
       }
-      // Small spacing helps avoid burst throttling on cover-art endpoints.
-      await new Promise((resolve) => window.setTimeout(resolve, 120));
+      // Keep a little spacing to avoid burst throttling without making grids feel sluggish.
+      await new Promise((resolve) => window.setTimeout(resolve, 40));
     }
   };
   for (let i = 0; i < concurrency; i += 1) {
@@ -409,6 +411,77 @@ function normalizeArtworkUrl(value) {
   } catch (_err) {
     return raw;
   }
+}
+
+function readSessionObject(key) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_err) {
+    return {};
+  }
+}
+
+function writeSessionObject(key, value) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(value));
+  } catch (_err) {
+    // ignore storage quota/privacy failures
+  }
+}
+
+function getCachedAlbumCoverUrl(key) {
+  const normalizedKey = String(key || "").trim();
+  if (!normalizedKey) return null;
+  const memory = state.homeAlbumCoverCache[normalizedKey];
+  if (typeof memory === "string" && memory) {
+    return memory;
+  }
+  const sessionCache = readSessionObject(HOME_ALBUM_COVER_CACHE_KEY);
+  const cached = normalizeArtworkUrl(sessionCache[normalizedKey]);
+  if (cached) {
+    state.homeAlbumCoverCache[normalizedKey] = cached;
+    return cached;
+  }
+  return null;
+}
+
+function setCachedAlbumCoverUrl(key, url) {
+  const normalizedKey = String(key || "").trim();
+  const normalizedUrl = normalizeArtworkUrl(url);
+  if (!normalizedKey || !normalizedUrl) return;
+  state.homeAlbumCoverCache[normalizedKey] = normalizedUrl;
+  const sessionCache = readSessionObject(HOME_ALBUM_COVER_CACHE_KEY);
+  sessionCache[normalizedKey] = normalizedUrl;
+  writeSessionObject(HOME_ALBUM_COVER_CACHE_KEY, sessionCache);
+}
+
+function getCachedArtistCoverUrl(key) {
+  const normalizedKey = String(key || "").trim();
+  if (!normalizedKey) return null;
+  const memory = state.homeArtistCoverCache[normalizedKey];
+  if (typeof memory === "string" && memory) {
+    return memory;
+  }
+  const sessionCache = readSessionObject(HOME_ARTIST_COVER_CACHE_KEY);
+  const cached = normalizeArtworkUrl(sessionCache[normalizedKey]);
+  if (cached) {
+    state.homeArtistCoverCache[normalizedKey] = cached;
+    return cached;
+  }
+  return null;
+}
+
+function setCachedArtistCoverUrl(key, url) {
+  const normalizedKey = String(key || "").trim();
+  const normalizedUrl = normalizeArtworkUrl(url);
+  if (!normalizedKey || !normalizedUrl) return;
+  state.homeArtistCoverCache[normalizedKey] = normalizedUrl;
+  const sessionCache = readSessionObject(HOME_ARTIST_COVER_CACHE_KEY);
+  sessionCache[normalizedKey] = normalizedUrl;
+  writeSessionObject(HOME_ARTIST_COVER_CACHE_KEY, sessionCache);
 }
 
 function triggerClientDeliveryDownload(downloadUrl, filename = "") {
@@ -4112,18 +4185,25 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
     container.appendChild(nav);
   }
 
-  function appendSection(titleText) {
+  function appendSection(titleText, layout = "stack") {
+    const section = document.createElement("section");
+    section.className = `music-mode-section music-mode-section-${layout}`;
     const sectionHeader = document.createElement("div");
     sectionHeader.className = "group-title";
     sectionHeader.textContent = titleText;
-    container.appendChild(sectionHeader);
+    section.appendChild(sectionHeader);
+    const body = document.createElement("div");
+    body.className = layout === "grid" ? "music-meta-grid" : "music-meta-stack";
+    section.appendChild(body);
+    container.appendChild(section);
+    return body;
   }
 
   if (artists.length) {
-    appendSection("Artists");
+    const artistGrid = appendSection("Artists", "grid");
     artists.forEach((artistItem) => {
       const card = document.createElement("article");
-      card.className = "home-result-card music-meta-card";
+      card.className = "home-result-card music-meta-card music-grid-card music-artist-grid-card";
       const artistThumb = createMusicCardThumb(
         artistItem?.name ? `${artistItem.name} artwork` : "Artist artwork"
       );
@@ -4195,17 +4275,15 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       });
       action.appendChild(button);
       card.appendChild(action);
-      container.appendChild(card);
+      artistGrid.appendChild(card);
 
       const artistMbidValue = String(artistItem?.artist_mbid || "").trim();
       if (artistMbidValue) {
-        if (Object.prototype.hasOwnProperty.call(state.homeArtistCoverCache, artistMbidValue)) {
-          const cachedCover = state.homeArtistCoverCache[artistMbidValue];
-          if (cachedCover) {
-            artistThumb.setImage(cachedCover);
-          } else {
-            artistThumb.setNoArt();
-          }
+        const cachedCover = getCachedArtistCoverUrl(artistMbidValue);
+        if (cachedCover) {
+          artistThumb.setImage(cachedCover);
+        } else if (Object.prototype.hasOwnProperty.call(state.homeArtistCoverCache, artistMbidValue) && state.homeArtistCoverCache[artistMbidValue] === null) {
+          artistThumb.setNoArt();
         } else {
           thumbnailJobs.push(async (activeToken) => {
             if (state.homeMusicRenderToken !== activeToken) {
@@ -4230,7 +4308,7 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
                 }
                 return;
               }
-              state.homeArtistCoverCache[artistMbidValue] = coverUrl;
+              setCachedArtistCoverUrl(artistMbidValue, coverUrl);
               if (state.homeMusicRenderToken !== activeToken) {
                 return;
               }
@@ -4250,11 +4328,11 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
   }
 
   if (albums.length) {
-    appendSection("Albums");
+    const albumGrid = appendSection("Albums", "grid");
     albums.forEach((albumItem) => {
       const releaseGroupMbid = String(albumItem?.release_group_mbid || "").trim();
       const card = document.createElement("article");
-      card.className = "home-result-card album-card music-meta-card";
+      card.className = "home-result-card album-card music-meta-card music-grid-card music-album-grid-card";
       card.dataset.releaseGroupMbid = releaseGroupMbid;
       const albumThumb = createMusicCardThumb(
         albumItem?.title ? `${albumItem.title} cover` : "Album cover"
@@ -4368,16 +4446,14 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       action.appendChild(viewTracksButton);
       action.appendChild(button);
       card.appendChild(action);
-      container.appendChild(card);
+      albumGrid.appendChild(card);
 
       if (releaseGroupMbid) {
-        if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid)) {
-          const cachedCover = state.homeAlbumCoverCache[releaseGroupMbid];
-          if (cachedCover) {
-            albumThumb.setImage(cachedCover);
-          } else {
-            albumThumb.setNoArt();
-          }
+        const cachedCover = getCachedAlbumCoverUrl(releaseGroupMbid);
+        if (cachedCover) {
+          albumThumb.setImage(cachedCover);
+        } else if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid) && state.homeAlbumCoverCache[releaseGroupMbid] === null) {
+          albumThumb.setNoArt();
         } else {
           thumbnailJobs.push(async (activeToken) => {
             const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
@@ -4395,10 +4471,11 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       }
     });
   }
-  runPrioritizedThumbnailJobs(thumbnailJobs, renderToken, 2);
+  const artworkConcurrency = tracks.length ? 3 : 6;
+  runPrioritizedThumbnailJobs(thumbnailJobs, renderToken, artworkConcurrency);
 
   if (tracks.length) {
-    appendSection("Tracks");
+    const trackStack = appendSection("Tracks", "stack");
     const orderedTracks = [...tracks].sort((a, b) => {
       const discA = Number.isFinite(Number(a?.disc_number)) ? Number(a.disc_number) : Number.MAX_SAFE_INTEGER;
       const discB = Number.isFinite(Number(b?.disc_number)) ? Number(b.disc_number) : Number.MAX_SAFE_INTEGER;
@@ -4490,17 +4567,15 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       action.appendChild(previewButton);
       action.appendChild(button);
       card.appendChild(action);
-      container.appendChild(card);
+      trackStack.appendChild(card);
 
       const releaseGroupMbid = String(result?.mb_release_group_id || "").trim();
       if (releaseGroupMbid) {
-        if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid)) {
-          const cachedCover = state.homeAlbumCoverCache[releaseGroupMbid];
-          if (cachedCover) {
-            trackThumb.setImage(cachedCover);
-          } else {
-            trackThumb.setNoArt();
-          }
+        const cachedCover = getCachedAlbumCoverUrl(releaseGroupMbid);
+        if (cachedCover) {
+          trackThumb.setImage(cachedCover);
+        } else if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid) && state.homeAlbumCoverCache[releaseGroupMbid] === null) {
+          trackThumb.setNoArt();
         } else {
           thumbnailJobs.push(async (activeToken) => {
             const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
@@ -5048,8 +5123,8 @@ async function fetchHomeAlbumCoverUrl(albumId) {
     return null;
   }
   const directCoverUrl = `https://coverartarchive.org/release-group/${encodeURIComponent(key)}/front-250`;
-  const cached = state.homeAlbumCoverCache[key];
-  if (typeof cached === "string" && cached) {
+  const cached = getCachedAlbumCoverUrl(key);
+  if (cached) {
     return cached;
   }
   try {
@@ -5057,13 +5132,15 @@ async function fetchHomeAlbumCoverUrl(albumId) {
     const url = normalizeArtworkUrl(data?.cover_url);
     // Cache positive hits only; avoid pinning transient misses/rate limits as permanent null.
     if (url) {
-      state.homeAlbumCoverCache[key] = url;
+      setCachedAlbumCoverUrl(key, url);
       return url;
     }
     // Backend returned no result; allow browser to attempt direct cover-art endpoint.
+    setCachedAlbumCoverUrl(key, directCoverUrl);
     return directCoverUrl;
   } catch (_err) {
     // Backend lookup failed; still attempt direct cover-art endpoint from browser.
+    setCachedAlbumCoverUrl(key, directCoverUrl);
     return directCoverUrl;
   }
 }

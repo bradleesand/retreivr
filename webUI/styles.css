@@ -1220,6 +1220,25 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
   visibility: hidden;
 }
 
+.music-mode-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.music-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 240px));
+  justify-content: start;
+  gap: 18px;
+}
+
+.music-meta-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .music-meta-card {
   display: flex;
   flex-direction: row;
@@ -1240,6 +1259,56 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
 
 .music-meta-card .home-candidate-action {
   margin-left: auto;
+}
+
+.music-grid-card {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 14px;
+  padding: 14px;
+  min-height: 100%;
+}
+
+.music-grid-card .music-card-thumb-shell {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1.18;
+  border-radius: 14px;
+}
+
+.music-grid-card .music-meta-main {
+  gap: 8px;
+  width: 100%;
+}
+
+.music-grid-card .home-result-header {
+  align-items: flex-start;
+}
+
+.music-grid-card .home-result-badge {
+  flex-shrink: 0;
+}
+
+.music-grid-card .home-mb-entity-ref {
+  margin-top: 2px;
+}
+
+.music-grid-card .home-candidate-action {
+  margin-left: 0;
+  margin-top: auto;
+  width: 100%;
+  align-items: stretch;
+}
+
+.music-grid-card .home-candidate-action .button {
+  width: 100%;
+  justify-content: center;
+}
+
+.music-album-grid-card .home-candidate-action,
+.music-artist-grid-card .home-candidate-action {
+  gap: 10px;
 }
 
 body.home-page .home-candidate-source-tag {
@@ -1265,6 +1334,31 @@ body.home-page .home-candidate-source-tag {
   gap: 8px;
   justify-content: center;
   flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .music-meta-grid {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 220px));
+    gap: 14px;
+  }
+}
+
+@media (max-width: 640px) {
+  .music-meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+  }
+
+  .music-grid-card .home-result-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 520px) {
+  .music-meta-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .home-candidate-state {
