@@ -1370,8 +1370,11 @@ body.home-page .home-candidate-source-tag {
 }
 
 .home-candidate-grid .home-candidate-action .button {
+  display: inline-flex;
+  align-items: center;
   width: 100%;
   justify-content: center;
+  text-align: center;
 }
 
 .home-candidate-grid .home-candidate-posted {

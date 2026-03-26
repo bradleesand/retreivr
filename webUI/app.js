@@ -204,6 +204,11 @@ function formatSourceLabel(source) {
     .join(" ");
 }
 
+function formatOpenSourceLabel(source) {
+  const sourceLabel = formatSourceLabel(source) || "Source";
+  return `Open in ${sourceLabel}`;
+}
+
 async function refreshHomeSourceOptions() {
   const panel = $("#home-source-panel");
   if (!panel) return;
@@ -5789,14 +5794,6 @@ function renderHomeCandidateRow(candidate, item) {
     action.appendChild(label);
   }
   if (candidate.url) {
-    const openLink = document.createElement("a");
-    openLink.className = "button ghost small home-candidate-open";
-    openLink.textContent = "Open source";
-    openLink.href = candidate.url;
-    openLink.target = "_blank";
-    openLink.rel = "noopener noreferrer";
-    action.appendChild(openLink);
-
     const previewDescriptor = buildHomePreviewDescriptor(candidate);
     if (previewDescriptor) {
       const previewButton = document.createElement("button");
@@ -5811,6 +5808,14 @@ function renderHomeCandidateRow(candidate, item) {
       titleEl.dataset.previewEnabled = "true";
       artwork.dataset.previewEnabled = "true";
     }
+
+    const openLink = document.createElement("a");
+    openLink.className = "button ghost small home-candidate-open";
+    openLink.textContent = formatOpenSourceLabel(sourceKey);
+    openLink.href = candidate.url;
+    openLink.target = "_blank";
+    openLink.rel = "noopener noreferrer";
+    action.appendChild(openLink);
   }
   row.appendChild(action);
 
