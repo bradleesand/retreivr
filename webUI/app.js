@@ -1502,6 +1502,14 @@ function applyHomeDefaultVideoFormat({ force = false } = {}) {
   state.homeLastDefaultVideoFormat = nextDefault;
 }
 
+function applyHomeDefaultActiveFormat({ force = false } = {}) {
+  if (state.homeMusicMode) {
+    updateMusicModeFormatControl();
+    return;
+  }
+  applyHomeDefaultVideoFormat({ force });
+}
+
 function updateMusicModeFormatControl() {
   const field = $("#music-video-format-field");
   const selector = $("#music-video-final-format");
@@ -8324,8 +8332,7 @@ async function loadConfig() {
     refreshCommunityPublishStatus().catch(() => {});
     updateSearchDestinationDisplay();
     applyHomeDefaultDestination({ force: false });
-    applyHomeDefaultVideoFormat({ force: true });
-    updateMusicModeFormatControl();
+    applyHomeDefaultActiveFormat({ force: true });
     state.configDirty = false;
     updatePollingState();
     setConfigNotice("Config loaded", false);
@@ -8852,8 +8859,7 @@ async function saveConfig() {
     state.config = result.config;
     renderConfig(state.config);
     applyHomeDefaultDestination({ force: false });
-    applyHomeDefaultVideoFormat({ force: true });
-    updateMusicModeFormatControl();
+    applyHomeDefaultActiveFormat({ force: true });
     updateSearchDestinationDisplay();
     await refreshSchedule();
     state.configDirty = false;
