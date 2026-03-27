@@ -1562,6 +1562,88 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
   width: 100%;
 }
 
+.movies-tv-genres-shell {
+  width: min(100%, 1480px);
+  margin: 0 auto 18px;
+}
+
+.movies-tv-genre-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 16px;
+  width: 100%;
+}
+
+.movies-tv-genre-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 100%;
+  cursor: pointer;
+}
+
+.movies-tv-genre-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.movies-tv-genre-tile {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1.18 / 1;
+  border-radius: 22px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 18% 18%, rgba(255, 74, 74, 0.28), transparent 50%),
+    radial-gradient(circle at 82% 22%, rgba(96, 165, 250, 0.22), transparent 48%),
+    linear-gradient(180deg, rgba(22, 28, 40, 0.94), rgba(8, 11, 18, 0.98));
+  border: 1px solid rgba(110, 132, 165, 0.18);
+}
+
+.movies-tv-genre-collage {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  padding: 5px;
+}
+
+.movies-tv-genre-collage-cell {
+  position: relative;
+  overflow: hidden;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.movies-tv-genre-collage-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.movies-tv-genre-tile-label {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 2;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.7);
+}
+
+.movies-tv-genre-tile::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(7, 10, 18, 0.04), rgba(7, 10, 18, 0.75) 78%);
+  pointer-events: none;
+}
+
 .movies-tv-size-control,
 .movies-tv-sort-control {
   display: inline-flex;
@@ -2140,6 +2222,10 @@ body.home-page .home-candidate-source-tag {
     gap: 14px;
   }
 
+  .movies-tv-genre-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .movies-tv-size-control {
     display: none;
   }
@@ -2203,6 +2289,10 @@ body.home-page .home-candidate-source-tag {
   .movies-tv-results-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 10px;
+  }
+
+  .movies-tv-genre-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .movies-tv-card {
