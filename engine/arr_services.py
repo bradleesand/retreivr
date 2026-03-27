@@ -2,6 +2,7 @@ import os
 from typing import Any
 from urllib.parse import quote
 import concurrent.futures
+from datetime import datetime
 
 import requests
 
@@ -11,6 +12,7 @@ TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w342"
 DEFAULT_TIMEOUT = 15
 ALLOWED_MOVIE_CERTIFICATIONS = {"", "G", "PG", "PG-13", "R", "NR", "NOT RATED"}
 ALLOWED_TV_CERTIFICATIONS = {"", "TV-Y", "TV-Y7", "TV-G", "TV-PG", "TV-14", "TV-MA"}
+CURRENT_YEAR = datetime.utcnow().year
 
 
 class ArrServiceError(RuntimeError):
@@ -228,66 +230,295 @@ def _tv_year(item: dict) -> str:
     return date_value[:4] if len(date_value) >= 4 else ""
 
 
-def search_tmdb_movies(config: dict | None, query: str, *, limit: int = 20) -> list[dict]:
-    payload = _tmdb_request(config, "/search/movie", params={"query": query, "include_adult": "false"})
-    results = []
-    seed = (payload.get("results") or [])[: max(1, int(limit) * 2)]
-    for raw in seed:
-        tmdb_id = raw.get("id")
-        if not tmdb_id:
+def _movie_result_row(raw: dict, *, person_boost: bool = False, person_name: str = "") -> dict | None:
+    tmdb_id = raw.get("id")
+    if not tmdb_id:
+        return None
+    return {
+        "kind": "movie",
+        "tmdb_id": int(tmdb_id),
+        "adult": bool(raw.get("adult")),
+        "title": _trimmed(raw.get("title")) or "Unknown title",
+        "original_title": _trimmed(raw.get("original_title")),
+        "year": _movie_year(raw),
+        "overview": _trimmed(raw.get("overview")),
+        "language": _trimmed(raw.get("original_language")),
+        "popularity": raw.get("popularity"),
+        "rating": raw.get("vote_average"),
+        "vote_count": raw.get("vote_count"),
+        "us_certification": "",
+        "tmdb_url": f"https://www.themoviedb.org/movie/{int(tmdb_id)}",
+        "poster_url": _poster_url(raw.get("poster_path")),
+        "backdrop_url": _poster_url(raw.get("backdrop_path")),
+        "_person_match": bool(person_boost),
+        "_person_name": _trimmed(person_name),
+    }
+
+
+def _tv_result_row(raw: dict, *, person_boost: bool = False, person_name: str = "") -> dict | None:
+    tmdb_id = raw.get("id")
+    if not tmdb_id:
+        return None
+    return {
+        "kind": "tv",
+        "tmdb_id": int(tmdb_id),
+        "adult": bool(raw.get("adult")),
+        "title": _trimmed(raw.get("name")) or "Unknown title",
+        "original_title": _trimmed(raw.get("original_name")),
+        "year": _tv_year(raw),
+        "overview": _trimmed(raw.get("overview")),
+        "language": _trimmed(raw.get("original_language")),
+        "popularity": raw.get("popularity"),
+        "rating": raw.get("vote_average"),
+        "vote_count": raw.get("vote_count"),
+        "us_certification": "",
+        "tmdb_url": f"https://www.themoviedb.org/tv/{int(tmdb_id)}",
+        "poster_url": _poster_url(raw.get("poster_path")),
+        "backdrop_url": _poster_url(raw.get("backdrop_path")),
+        "_person_match": bool(person_boost),
+        "_person_name": _trimmed(person_name),
+    }
+
+
+def _normalize_search_year(value: Any) -> int | None:
+    text = _trimmed(value)
+    if not text or not text.isdigit():
+        return None
+    year = int(text)
+    if year < 1888 or year > CURRENT_YEAR + 2:
+        return None
+    return year
+
+
+def _query_tokens(query: str) -> list[str]:
+    return [part for part in _trimmed(query).lower().replace("-", " ").split() if part]
+
+
+def _looks_like_person_query(query: str) -> bool:
+    tokens = _query_tokens(query)
+    if len(tokens) < 2 or len(tokens) > 4:
+        return False
+    if any(any(char.isdigit() for char in token) for token in tokens):
+        return False
+    generic = {"movie", "movies", "show", "shows", "series", "season", "episode", "film", "tv"}
+    if any(token in generic for token in tokens):
+        return False
+    return True
+
+
+def _title_match_strength(query: str, title: Any, original_title: Any = None) -> float:
+    query_text = _trimmed(query).lower()
+    if not query_text:
+        return 0.0
+    title_text = _trimmed(title).lower()
+    original_text = _trimmed(original_title).lower()
+    if title_text == query_text or original_text == query_text:
+        return 1.0
+    if title_text.startswith(query_text) or original_text.startswith(query_text):
+        return 0.8
+    query_parts = set(_query_tokens(query_text))
+    if not query_parts:
+        return 0.0
+    best = 0.0
+    for candidate in (title_text, original_text):
+        if not candidate:
             continue
-        results.append(
-            {
-                "kind": "movie",
-                "tmdb_id": int(tmdb_id),
-                "adult": bool(raw.get("adult")),
-                "title": _trimmed(raw.get("title")) or "Unknown title",
-                "original_title": _trimmed(raw.get("original_title")),
-                "year": _movie_year(raw),
-                "overview": _trimmed(raw.get("overview")),
-                "language": _trimmed(raw.get("original_language")),
-                "popularity": raw.get("popularity"),
-                "rating": raw.get("vote_average"),
-                "us_certification": "",
-                "tmdb_url": f"https://www.themoviedb.org/movie/{int(tmdb_id)}",
-                "poster_url": _poster_url(raw.get("poster_path")),
-                "backdrop_url": _poster_url(raw.get("backdrop_path")),
-            }
-        )
+        parts = set(_query_tokens(candidate))
+        if not parts:
+            continue
+        overlap = len(query_parts & parts) / max(1, len(query_parts))
+        best = max(best, overlap)
+    return best
+
+
+def _recency_score(year_text: Any) -> float:
+    year = _normalize_search_year(year_text)
+    if not year:
+        return 0.0
+    age = max(0, CURRENT_YEAR - year)
+    if age <= 1:
+        return 1.0
+    if age <= 3:
+        return 0.8
+    if age <= 5:
+        return 0.6
+    if age <= 10:
+        return 0.35
+    if age <= 20:
+        return 0.15
+    return 0.0
+
+
+def _movie_mainstream_score(item: dict, *, query: str, requested_year: int | None = None, person_boost: bool = False) -> float:
+    title_strength = _title_match_strength(query, item.get("title"), item.get("original_title"))
+    popularity = float(item.get("popularity") or 0.0)
+    rating = float(item.get("rating") or 0.0)
+    vote_count = int(item.get("vote_count") or 0)
+    year_text = item.get("year")
+    poster_bonus = 5.0 if _trimmed(item.get("poster_url")) else -18.0
+    language_bonus = 16.0 if _trimmed(item.get("language")).lower() in {"en", ""} else -12.0
+    year_bonus = 0.0
+    year_value = _normalize_search_year(year_text)
+    if requested_year is not None:
+        if year_value == requested_year:
+            year_bonus = 30.0
+        elif year_value is not None:
+            year_bonus = max(-10.0, 10.0 - abs(year_value - requested_year) * 2.0)
+    score = 0.0
+    score += title_strength * 90.0
+    score += min(popularity, 200.0) * 0.7
+    score += min(vote_count, 5000) * 0.02
+    score += rating * 4.0
+    score += _recency_score(year_text) * 18.0
+    score += poster_bonus + language_bonus + year_bonus
+    if vote_count < 10:
+        score -= 40.0
+    elif vote_count < 50:
+        score -= 20.0
+    if popularity < 4.0:
+        score -= 12.0
+    if person_boost:
+        score += 22.0
+    return score
+
+
+def _tv_mainstream_score(item: dict, *, query: str, requested_year: int | None = None, person_boost: bool = False) -> float:
+    title_strength = _title_match_strength(query, item.get("title"), item.get("original_title"))
+    popularity = float(item.get("popularity") or 0.0)
+    rating = float(item.get("rating") or 0.0)
+    vote_count = int(item.get("vote_count") or 0)
+    year_text = item.get("year")
+    poster_bonus = 5.0 if _trimmed(item.get("poster_url")) else -18.0
+    language_bonus = 14.0 if _trimmed(item.get("language")).lower() in {"en", ""} else -10.0
+    year_bonus = 0.0
+    year_value = _normalize_search_year(year_text)
+    if requested_year is not None:
+        if year_value == requested_year:
+            year_bonus = 24.0
+        elif year_value is not None:
+            year_bonus = max(-8.0, 8.0 - abs(year_value - requested_year) * 1.5)
+    score = 0.0
+    score += title_strength * 88.0
+    score += min(popularity, 200.0) * 0.75
+    score += min(vote_count, 5000) * 0.02
+    score += rating * 4.5
+    score += _recency_score(year_text) * 16.0
+    score += poster_bonus + language_bonus + year_bonus
+    if vote_count < 10:
+        score -= 35.0
+    elif vote_count < 50:
+        score -= 18.0
+    if popularity < 4.0:
+        score -= 10.0
+    if person_boost:
+        score += 20.0
+    return score
+
+
+def _title_result_is_strong(item: dict | None, *, query: str) -> bool:
+    if not isinstance(item, dict):
+        return False
+    title_strength = _title_match_strength(query, item.get("title"), item.get("original_title"))
+    vote_count = int(item.get("vote_count") or 0)
+    popularity = float(item.get("popularity") or 0.0)
+    return title_strength >= 0.8 and (vote_count >= 80 or popularity >= 20.0)
+
+
+def _fetch_person_known_for(config: dict | None, query: str, *, kind: str, requested_year: int | None = None) -> list[dict]:
+    if not _looks_like_person_query(query):
+        return []
+    payload = _tmdb_request(config, "/search/person", params={"query": query, "include_adult": "false"})
+    people = payload.get("results") or []
+    if not isinstance(people, list):
+        return []
+    boosted: list[dict] = []
+    for person in people[:3]:
+        known_for = person.get("known_for") or []
+        if not isinstance(known_for, list):
+            continue
+        for raw in known_for:
+            if not isinstance(raw, dict):
+                continue
+            media_type = _trimmed(raw.get("media_type")).lower()
+            if media_type != kind:
+                continue
+            if kind == "movie":
+                row = _movie_result_row(raw, person_boost=True, person_name=_trimmed(person.get("name")))
+                if row:
+                    boosted.append(row)
+            elif kind == "tv":
+                row = _tv_result_row(raw, person_boost=True, person_name=_trimmed(person.get("name")))
+                if row:
+                    boosted.append(row)
+    if kind == "movie":
+        _enrich_movie_certifications(config, boosted)
+        boosted = [row for row in boosted if _movie_allowed(row)]
+        boosted.sort(key=lambda item: _movie_mainstream_score(item, query=query, requested_year=requested_year, person_boost=True), reverse=True)
+    else:
+        _enrich_tv_certifications(config, boosted)
+        boosted = [row for row in boosted if _tv_allowed(row)]
+        boosted.sort(key=lambda item: _tv_mainstream_score(item, query=query, requested_year=requested_year, person_boost=True), reverse=True)
+    return boosted
+
+
+def search_tmdb_movies(config: dict | None, query: str, *, limit: int = 20, year: int | None = None) -> list[dict]:
+    params = {"query": query, "include_adult": "false"}
+    normalized_year = _normalize_search_year(year)
+    if normalized_year is not None:
+        params["primary_release_year"] = str(normalized_year)
+    payload = _tmdb_request(config, "/search/movie", params=params)
+    results = []
+    seed = (payload.get("results") or [])[: max(1, int(limit) * 5)]
+    for raw in seed:
+        row = _movie_result_row(raw)
+        if row:
+            results.append(row)
     _enrich_movie_certifications(config, results)
     filtered = [row for row in results if _movie_allowed(row)]
-    return filtered[: max(1, int(limit))]
+    for row in filtered:
+        row["_mainstream_score"] = _movie_mainstream_score(row, query=query, requested_year=normalized_year)
+    boosted = []
+    top_title = filtered[0] if filtered else None
+    if not _title_result_is_strong(top_title, query=query):
+        boosted = _fetch_person_known_for(config, query, kind="movie", requested_year=normalized_year)
+    merged: dict[int, dict] = {}
+    for row in filtered + boosted:
+        tmdb_id = int(row["tmdb_id"])
+        existing = merged.get(tmdb_id)
+        if existing is None or float(row.get("_mainstream_score") or 0.0) > float(existing.get("_mainstream_score") or 0.0):
+            merged[tmdb_id] = row
+    ranked = sorted(merged.values(), key=lambda item: float(item.get("_mainstream_score") or 0.0), reverse=True)
+    return ranked[: max(1, int(limit))]
 
 
-def search_tmdb_tv(config: dict | None, query: str, *, limit: int = 20) -> list[dict]:
-    payload = _tmdb_request(config, "/search/tv", params={"query": query, "include_adult": "false"})
+def search_tmdb_tv(config: dict | None, query: str, *, limit: int = 20, year: int | None = None) -> list[dict]:
+    params = {"query": query, "include_adult": "false"}
+    normalized_year = _normalize_search_year(year)
+    if normalized_year is not None:
+        params["first_air_date_year"] = str(normalized_year)
+    payload = _tmdb_request(config, "/search/tv", params=params)
     results = []
-    seed = (payload.get("results") or [])[: max(1, int(limit) * 2)]
+    seed = (payload.get("results") or [])[: max(1, int(limit) * 5)]
     for raw in seed:
-        tmdb_id = raw.get("id")
-        if not tmdb_id:
-            continue
-        results.append(
-            {
-                "kind": "tv",
-                "tmdb_id": int(tmdb_id),
-                "adult": bool(raw.get("adult")),
-                "title": _trimmed(raw.get("name")) or "Unknown title",
-                "original_title": _trimmed(raw.get("original_name")),
-                "year": _tv_year(raw),
-                "overview": _trimmed(raw.get("overview")),
-                "language": _trimmed(raw.get("original_language")),
-                "popularity": raw.get("popularity"),
-                "rating": raw.get("vote_average"),
-                "us_certification": "",
-                "tmdb_url": f"https://www.themoviedb.org/tv/{int(tmdb_id)}",
-                "poster_url": _poster_url(raw.get("poster_path")),
-                "backdrop_url": _poster_url(raw.get("backdrop_path")),
-            }
-        )
+        row = _tv_result_row(raw)
+        if row:
+            results.append(row)
     _enrich_tv_certifications(config, results)
     filtered = [row for row in results if _tv_allowed(row)]
-    return filtered[: max(1, int(limit))]
+    for row in filtered:
+        row["_mainstream_score"] = _tv_mainstream_score(row, query=query, requested_year=normalized_year)
+    boosted = []
+    top_title = filtered[0] if filtered else None
+    if not _title_result_is_strong(top_title, query=query):
+        boosted = _fetch_person_known_for(config, query, kind="tv", requested_year=normalized_year)
+    merged: dict[int, dict] = {}
+    for row in filtered + boosted:
+        tmdb_id = int(row["tmdb_id"])
+        existing = merged.get(tmdb_id)
+        if existing is None or float(row.get("_mainstream_score") or 0.0) > float(existing.get("_mainstream_score") or 0.0):
+            merged[tmdb_id] = row
+    ranked = sorted(merged.values(), key=lambda item: float(item.get("_mainstream_score") or 0.0), reverse=True)
+    return ranked[: max(1, int(limit))]
 
 
 def test_radarr_connection(config: dict | None) -> dict:
@@ -479,8 +710,8 @@ def add_series_to_sonarr(config: dict | None, tmdb_id: int | str) -> dict:
     return _series_status_from_entry(created)
 
 
-def build_movie_search_response(config: dict | None, query: str, *, limit: int = 20) -> dict:
-    results = search_tmdb_movies(config, query, limit=limit)
+def build_movie_search_response(config: dict | None, query: str, *, limit: int = 20, year: int | None = None) -> dict:
+    results = search_tmdb_movies(config, query, limit=limit, year=year)
     tmdb_ids = [item["tmdb_id"] for item in results]
     statuses = get_movie_status_map(config, tmdb_ids)
     radarr = test_radarr_connection(config)
@@ -489,8 +720,8 @@ def build_movie_search_response(config: dict | None, query: str, *, limit: int =
     return {"results": results, "connection": radarr}
 
 
-def build_tv_search_response(config: dict | None, query: str, *, limit: int = 20) -> dict:
-    results = search_tmdb_tv(config, query, limit=limit)
+def build_tv_search_response(config: dict | None, query: str, *, limit: int = 20, year: int | None = None) -> dict:
+    results = search_tmdb_tv(config, query, limit=limit, year=year)
     tmdb_ids = [item["tmdb_id"] for item in results]
     statuses = get_series_status_map(config, tmdb_ids)
     sonarr = test_sonarr_connection(config)
@@ -527,4 +758,81 @@ def get_tmdb_trailer(config: dict | None, kind: str, tmdb_id: int | str) -> dict
         "watch_url": f"https://www.youtube.com/watch?v={quote(key)}",
         "embed_url": f"https://www.youtube.com/embed/{quote(key)}?autoplay=1&rel=0&modestbranding=1",
         "hover_embed_url": f"https://www.youtube.com/embed/{quote(key)}?autoplay=1&mute=1&controls=0&rel=0&modestbranding=1&playsinline=1",
+    }
+
+
+def get_tmdb_cast(config: dict | None, kind: str, tmdb_id: int | str, *, limit: int = 8) -> dict:
+    normalized = str(kind or "").strip().lower()
+    if normalized not in {"movie", "tv"}:
+        raise ArrServiceError("Unsupported ARR cast kind")
+    payload = _tmdb_request(config, f"/{normalized}/{int(tmdb_id)}/credits")
+    cast = payload.get("cast") or []
+    if not isinstance(cast, list):
+        cast = []
+    people = []
+    for person in cast:
+        if not isinstance(person, dict):
+            continue
+        person_id = person.get("id")
+        if person_id is None:
+            continue
+        people.append(
+            {
+                "person_id": int(person_id),
+                "name": _trimmed(person.get("name")) or "Unknown",
+                "character": _trimmed(person.get("character")),
+                "known_for_department": _trimmed(person.get("known_for_department")),
+                "profile_url": _poster_url(person.get("profile_path")),
+                "order": int(person.get("order") or 9999),
+            }
+        )
+    people.sort(key=lambda item: (item.get("order", 9999), item.get("name", "")))
+    return {"cast": people[: max(1, int(limit))]}
+
+
+def get_tmdb_person_titles(config: dict | None, person_id: int | str, *, kind: str, limit: int = 20) -> dict:
+    normalized = str(kind or "").strip().lower()
+    if normalized not in {"movie", "tv"}:
+        raise ArrServiceError("Unsupported ARR person kind")
+    payload = _tmdb_request(config, f"/person/{int(person_id)}/combined_credits")
+    cast = payload.get("cast") or []
+    if not isinstance(cast, list):
+        cast = []
+    person_name = ""
+    results = []
+    for raw in cast:
+        if not isinstance(raw, dict):
+            continue
+        media_type = _trimmed(raw.get("media_type")).lower()
+        if media_type != normalized:
+            continue
+        if normalized == "movie":
+            row = _movie_result_row(raw, person_boost=True)
+        else:
+            row = _tv_result_row(raw, person_boost=True)
+        if not row:
+            continue
+        person_name = person_name or _trimmed(raw.get("credit_name")) or ""
+        results.append(row)
+    if normalized == "movie":
+        _enrich_movie_certifications(config, results)
+        results = [row for row in results if _movie_allowed(row)]
+        for row in results:
+            row["_mainstream_score"] = _movie_mainstream_score(row, query="", person_boost=True)
+    else:
+        _enrich_tv_certifications(config, results)
+        results = [row for row in results if _tv_allowed(row)]
+        for row in results:
+            row["_mainstream_score"] = _tv_mainstream_score(row, query="", person_boost=True)
+    deduped: dict[int, dict] = {}
+    for row in results:
+        tmdb_id = int(row["tmdb_id"])
+        existing = deduped.get(tmdb_id)
+        if existing is None or float(row.get("_mainstream_score") or 0.0) > float(existing.get("_mainstream_score") or 0.0):
+            deduped[tmdb_id] = row
+    ranked = sorted(deduped.values(), key=lambda item: float(item.get("_mainstream_score") or 0.0), reverse=True)
+    return {
+        "person_id": int(person_id),
+        "person_name": person_name,
+        "results": ranked[: max(1, int(limit))],
     }

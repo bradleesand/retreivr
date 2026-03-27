@@ -24,7 +24,7 @@
     </button>
     <nav class="top-nav" id="primary-nav" aria-label="Primary">
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
-      <button class="button ghost small nav-button nav-button-advanced hidden" data-page="movies-tv" type="button">Movies &amp; TV</button>
+      <button class="button ghost small nav-button" data-page="movies-tv" type="button">Movies &amp; TV</button>
       <button class="button ghost small nav-button nav-button-with-count hidden" data-page="review" type="button">
         <span>Review</span>
         <span id="review-nav-badge" class="nav-count-badge hidden">0</span>
@@ -278,8 +278,18 @@
             id="movies-tv-search-input"
             class="home-search-input"
             type="text"
-            placeholder="Search movies or TV shows via TMDb…"
+            placeholder="Search titles, actors, or directors via TMDb…"
             autocomplete="off"
+          />
+          <input
+            id="movies-tv-year-input"
+            class="movies-tv-year-input"
+            type="number"
+            inputmode="numeric"
+            min="1888"
+            max="2100"
+            placeholder="Year"
+            aria-label="Release year"
           />
           <button id="movies-tv-search-button" class="button primary" type="button">Search</button>
         </div>
@@ -311,6 +321,17 @@
         <div id="movies-tv-results-detail" class="meta home-results-detail hidden"></div>
         <div id="movies-tv-results-list" class="music-meta-grid movies-tv-results-grid"></div>
       </div>
+      <footer class="home-footer-links info-footer-links" aria-label="Project links">
+        <a href="https://github.com/sudoStacks/retreivr" target="_blank" rel="noopener">Retreivr Repository</a>
+        <a href="https://github.com/sudoStacks/" target="_blank" rel="noopener">SudoStacks GitHub</a>
+        <a href="https://x.com/sudoStacks" target="_blank" rel="noopener">
+          <span class="x-logo" aria-hidden="true">X</span>
+          <span>Follow us on X</span>
+        </a>
+        <span class="home-footer-brand">
+          <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
+        </span>
+      </footer>
     </section>
     <section class="panel full" id="review-panel" data-page="review">
       <div class="panel-header-row">
@@ -1028,6 +1049,31 @@
               </div>
             </section>
 
+            <section id="settings-long-term-retry" class="settings-section" data-settings-section="long-term-retry" data-settings-level="advanced">
+              <div class="settings-section-heading">Long-Term Retry</div>
+              <div class="group">
+                <div class="group-title">Failed Music Track Recovery</div>
+                <div class="grid two">
+                  <label class="field checkbox">
+                    <input id="cfg-long-term-retry-enabled" type="checkbox">
+                    <span>Enable long-term retry for failed music tracks</span>
+                  </label>
+                  <label class="field short">
+                    <span>Retry every (hours)</span>
+                    <input id="cfg-long-term-retry-interval-hours" type="number" min="1" step="1" placeholder="24">
+                  </label>
+                  <label class="field short">
+                    <span>Max deferred attempts</span>
+                    <input id="cfg-long-term-retry-max-attempts" type="number" min="0" step="1" placeholder="0">
+                  </label>
+                </div>
+                <div class="notice">
+                  Exhausted music-track jobs move into a slower retry lane and re-enter the normal Retreivr resolution path on each retry.
+                  Set max deferred attempts to <strong>0</strong> for unlimited retries.
+                </div>
+              </div>
+            </section>
+
             <section id="settings-youtube" class="settings-section" data-settings-section="youtube">
               <div class="settings-section-heading">YouTube</div>
               <div class="group">
@@ -1577,6 +1623,10 @@
               <button id="arr-details-trailer" class="button ghost" type="button">Watch Trailer</button>
               <a id="arr-details-tmdb-link" class="button ghost" href="#" target="_blank" rel="noopener">Visit TMDb Page</a>
             </div>
+          </div>
+          <div class="arr-details-cast-section">
+            <div class="arr-details-cast-heading">Main Cast</div>
+            <div id="arr-details-cast" class="arr-details-cast-list"></div>
           </div>
           <div id="arr-details-overview" class="arr-details-overview"></div>
         </div>

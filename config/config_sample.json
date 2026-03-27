@@ -49,6 +49,11 @@
   "music_candidate_cooldown_enabled": true,
   "music_candidate_cooldown_seconds": 21600,
   "music_candidate_cooldown_min_failures": 1,
+  "long_term_retry_enabled": true,
+  "long_term_retry_interval_hours": 24,
+  "long_term_retry_batch_size": 10,
+  "long_term_retry_max_attempts": 0,
+  "long_term_retry_poll_minutes": 60,
   "yt_dlp_opts": {},
   "youtube": {
     "cookies": {
@@ -76,6 +81,10 @@
   "music": {
     "library_path": "",
     "exports": []
+  },
+  "music_preferences": {
+    "favorite_genres": [],
+    "favorite_artists": []
   },
   "settings_advanced_mode": false,
   "dry_run": false,

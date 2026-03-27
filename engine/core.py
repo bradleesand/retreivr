@@ -27,6 +27,7 @@ from engine.job_queue import (
     build_download_job_payload,
     build_output_template,
     ensure_download_jobs_table,
+    ensure_long_term_retry_table,
     preview_direct_url,
     resolve_cookie_file as _resolve_cookie_file_canonical,
     resolve_media_intent,
@@ -391,6 +392,18 @@ def apply_config_defaults(config):
     normalized.setdefault("music_candidate_cooldown_enabled", True)
     normalized.setdefault("music_candidate_cooldown_seconds", 21600)
     normalized.setdefault("music_candidate_cooldown_min_failures", 1)
+    normalized.setdefault("long_term_retry_enabled", True)
+    normalized.setdefault("long_term_retry_interval_hours", 24)
+    normalized.setdefault("long_term_retry_batch_size", 10)
+    normalized.setdefault("long_term_retry_max_attempts", 0)
+    normalized.setdefault("long_term_retry_poll_minutes", 60)
+    normalized.setdefault(
+        "music_preferences",
+        {
+            "favorite_genres": [],
+            "favorite_artists": [],
+        },
+    )
 
     return normalized
 
@@ -500,6 +513,33 @@ def validate_config(config):
     music_candidate_cooldown_min_failures = config.get("music_candidate_cooldown_min_failures")
     if music_candidate_cooldown_min_failures is not None and not isinstance(music_candidate_cooldown_min_failures, int):
         errors.append("music_candidate_cooldown_min_failures must be an integer")
+    long_term_retry_enabled = config.get("long_term_retry_enabled")
+    if long_term_retry_enabled is not None and not isinstance(long_term_retry_enabled, bool):
+        errors.append("long_term_retry_enabled must be true/false")
+    long_term_retry_interval_hours = config.get("long_term_retry_interval_hours")
+    if long_term_retry_interval_hours is not None:
+        if not isinstance(long_term_retry_interval_hours, int):
+            errors.append("long_term_retry_interval_hours must be an integer")
+        elif long_term_retry_interval_hours < 1:
+            errors.append("long_term_retry_interval_hours must be >= 1")
+    long_term_retry_batch_size = config.get("long_term_retry_batch_size")
+    if long_term_retry_batch_size is not None:
+        if not isinstance(long_term_retry_batch_size, int):
+            errors.append("long_term_retry_batch_size must be an integer")
+        elif long_term_retry_batch_size < 1:
+            errors.append("long_term_retry_batch_size must be >= 1")
+    long_term_retry_max_attempts = config.get("long_term_retry_max_attempts")
+    if long_term_retry_max_attempts is not None:
+        if not isinstance(long_term_retry_max_attempts, int):
+            errors.append("long_term_retry_max_attempts must be an integer")
+        elif long_term_retry_max_attempts < 0:
+            errors.append("long_term_retry_max_attempts must be >= 0")
+    long_term_retry_poll_minutes = config.get("long_term_retry_poll_minutes")
+    if long_term_retry_poll_minutes is not None:
+        if not isinstance(long_term_retry_poll_minutes, int):
+            errors.append("long_term_retry_poll_minutes must be an integer")
+        elif long_term_retry_poll_minutes < 1:
+            errors.append("long_term_retry_poll_minutes must be >= 1")
 
     youtube_cfg = config.get("youtube")
     if youtube_cfg is not None:
@@ -580,6 +620,35 @@ def validate_config(config):
                         errors.append(f"{prefix}.codec must be a string")
                     if export.get("bitrate") is not None and not isinstance(export.get("bitrate"), str):
                         errors.append(f"{prefix}.bitrate must be a string")
+
+    music_preferences = config.get("music_preferences")
+    if music_preferences is not None:
+        if not isinstance(music_preferences, dict):
+            errors.append("music_preferences must be an object")
+        else:
+            favorite_genres = music_preferences.get("favorite_genres")
+            if favorite_genres is not None:
+                if not isinstance(favorite_genres, list):
+                    errors.append("music_preferences.favorite_genres must be a list")
+                else:
+                    for index, genre in enumerate(favorite_genres):
+                        if not isinstance(genre, str) or not str(genre).strip():
+                            errors.append(f"music_preferences.favorite_genres[{index}] must be a non-empty string")
+            favorite_artists = music_preferences.get("favorite_artists")
+            if favorite_artists is not None:
+                if not isinstance(favorite_artists, list):
+                    errors.append("music_preferences.favorite_artists must be a list")
+                else:
+                    for index, artist in enumerate(favorite_artists):
+                        if not isinstance(artist, dict):
+                            errors.append(f"music_preferences.favorite_artists[{index}] must be an object")
+                            continue
+                        name = artist.get("name")
+                        artist_mbid = artist.get("artist_mbid")
+                        if not isinstance(name, str) or not str(name).strip():
+                            errors.append(f"music_preferences.favorite_artists[{index}].name must be a non-empty string")
+                        if artist_mbid is not None and (not isinstance(artist_mbid, str) or not str(artist_mbid).strip()):
+                            errors.append(f"music_preferences.favorite_artists[{index}].artist_mbid must be a non-empty string when present")
 
     if final_format is not None and not isinstance(final_format, str):
         errors.append("final_format must be a string")
@@ -961,6 +1030,7 @@ def init_db(db_path):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_videos_playlist ON playlist_videos (playlist_id)")
     ensure_download_jobs_table(conn)
+    ensure_long_term_retry_table(conn)
     try:
         from engine.import_pipeline import ensure_import_batch_tables
 

@@ -81,7 +81,7 @@ from engine.job_queue import (
 )
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
-from engine.musicbrainz_binding import resolve_best_mb_pair, search_music_metadata
+from engine.musicbrainz_binding import resolve_best_mb_pair, search_artists_by_genre, search_music_metadata
 from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
 from engine.search_adapters import YouTubeAdapter
 import engine.community_cache as community_cache
@@ -137,6 +137,8 @@ from engine.arr_services import (
     build_movie_search_response,
     build_tv_search_response,
     get_bulk_status,
+    get_tmdb_cast,
+    get_tmdb_person_titles,
     get_tmdb_trailer,
     test_radarr_connection,
     test_sonarr_connection,
@@ -211,6 +213,7 @@ USER_PLAYLISTS_JOB_ID = "spotify_user_playlists_watch"
 SPOTIFY_PLAYLISTS_WATCH_JOB_ID = "spotify_playlists_watch"
 COMMUNITY_PUBLISH_JOB_ID = "community_cache_publish"
 RESOLUTION_CACHE_SYNC_JOB_ID = "resolution_cache_sync"
+LONG_TERM_RETRY_JOB_ID = "music_long_term_retry"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
 WATCHER_BATCH_MAX_WAIT_SECONDS = 300
@@ -3009,6 +3012,7 @@ async def startup():
     app.state.community_publish_backfill_last_summary = None
     app.state.community_publish_task_lock = threading.Lock()
     app.state.community_publish_active_task = None
+    app.state.long_term_retry_last_summary = None
     app.state.resolution_sync_last_summary = None
     app.state.resolution_sync_task_lock = threading.Lock()
     app.state.resolution_sync_active_task = None
@@ -3024,6 +3028,7 @@ async def startup():
         app.state.paths,
         search_service=app.state.search_service,
     )
+    _apply_long_term_retry_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
 
     def _worker_runner():
         logging.info("Download worker started")
@@ -3042,6 +3047,13 @@ async def startup():
             _community_publish_schedule_tick,
             trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=20)),
             id=f"{COMMUNITY_PUBLISH_JOB_ID}_startup",
+            replace_existing=True,
+        )
+    if bool((startup_cfg if isinstance(startup_cfg, dict) else {}).get("long_term_retry_enabled", True)):
+        app.state.scheduler.add_job(
+            _long_term_retry_schedule_tick,
+            trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=35)),
+            id=f"{LONG_TERM_RETRY_JOB_ID}_startup",
             replace_existing=True,
         )
     resolution_cfg = _resolution_config(startup_cfg if isinstance(startup_cfg, dict) else {})
@@ -4953,6 +4965,41 @@ def _community_publish_schedule_tick() -> None:
         logger.exception("Community publish worker tick failed")
 
 
+def _long_term_retry_schedule_tick() -> None:
+    worker_engine = getattr(app.state, "worker_engine", None)
+    if worker_engine is None:
+        return
+    config = get_loaded_config() or {}
+    if not bool((config if isinstance(config, dict) else {}).get("long_term_retry_enabled", True)):
+        return
+    try:
+        summary = worker_engine.process_long_term_retry_once()
+        logger.info(
+            "Long-term retry tick status=%s claimed=%s requeued=%s abandoned=%s errors=%s",
+            summary.get("status"),
+            summary.get("claimed"),
+            summary.get("requeued"),
+            summary.get("abandoned"),
+            summary.get("errors"),
+        )
+        app.state.long_term_retry_last_summary = summary
+    except Exception:
+        logger.exception("Long-term retry tick failed")
+
+
+def _get_next_long_term_retry_run_iso() -> str | None:
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return None
+    job = scheduler.get_job(LONG_TERM_RETRY_JOB_ID)
+    if not job or not job.next_run_time:
+        return None
+    next_run = job.next_run_time
+    if next_run.tzinfo is None:
+        next_run = next_run.replace(tzinfo=timezone.utc)
+    return next_run.astimezone(timezone.utc).isoformat()
+
+
 def _get_next_community_publish_run_iso() -> str | None:
     scheduler = app.state.scheduler
     if not scheduler:
@@ -5173,6 +5220,38 @@ def _apply_community_publish_schedule(config: dict):
         misfire_grace_time=60,
     )
     logger.info("Community publish worker enabled (interval=%s min)", interval)
+
+
+def _apply_long_term_retry_schedule(config: dict):
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return
+    try:
+        scheduler.remove_job(LONG_TERM_RETRY_JOB_ID)
+    except Exception:
+        pass
+
+    normalized = config if isinstance(config, dict) else {}
+    if not bool(normalized.get("long_term_retry_enabled", True)):
+        logger.info("Long-term retry disabled by config")
+        return
+    interval = normalized.get("long_term_retry_poll_minutes", 60)
+    try:
+        interval = int(interval)
+    except (TypeError, ValueError):
+        interval = 60
+    interval = max(1, interval)
+    start_date = datetime.now(timezone.utc) + timedelta(minutes=1)
+    scheduler.add_job(
+        _long_term_retry_schedule_tick,
+        trigger=IntervalTrigger(minutes=interval, start_date=start_date),
+        id=LONG_TERM_RETRY_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=60,
+    )
+    logger.info("Long-term retry enabled (interval=%s min)", interval)
 
 
 def _apply_resolution_cache_sync_schedule(config: dict):
@@ -8524,6 +8603,25 @@ def music_search(
     )
 
 
+@app.get("/api/music/genres/{genre}/artists")
+def music_genre_artists(
+    genre: str,
+    limit: int = Query(24, ge=1, le=60),
+    offset: int = Query(0, ge=0),
+):
+    genre_value = str(genre or "").strip()
+    if not genre_value:
+        raise HTTPException(status_code=400, detail="genre required")
+    try:
+        return {
+            "genre": genre_value,
+            "artists": search_artists_by_genre(genre=genre_value, limit=int(limit), offset=int(offset)),
+        }
+    except Exception:
+        logging.exception("music_genre_artists failed genre=%s", genre_value)
+        raise HTTPException(status_code=502, detail="musicbrainz_genre_artist_search_failed")
+
+
 @app.post("/api/music/video/availability")
 def music_video_availability(data: dict = Body(...)):
     payload = data if isinstance(data, dict) else {}
@@ -9848,6 +9946,30 @@ async def api_put_config(payload: dict = Body(...)):
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
+    _persist_config_payload(payload)
+
+    if "schedule" in payload:
+        schedule = _merge_schedule_config(payload.get("schedule"))
+        app.state.schedule_config = schedule
+        _apply_schedule_config(schedule)
+    _apply_spotify_schedule(payload or {})
+    _apply_community_publish_schedule(payload or {})
+    _apply_resolution_cache_sync_schedule(payload or {})
+    _apply_long_term_retry_schedule(payload or {})
+    policy = normalize_watch_policy(payload)
+    if getattr(normalize_watch_policy, "valid", True):
+        app.state.watch_policy = policy
+        _apply_watch_policy(policy)
+        app.state.watch_config_cache = payload
+    enable_watcher = _config_watcher_enabled(payload)
+    if enable_watcher:
+        _enable_watcher_runtime()
+    else:
+        await _disable_watcher_runtime("config updated (enable_watcher=false)")
+    return {"status": "updated"}
+
+
+def _persist_config_payload(payload: dict) -> dict:
     config_path = app.state.config_path
     config_dir = os.path.dirname(config_path) or "."
     os.makedirs(config_dir, exist_ok=True)
@@ -9871,24 +9993,79 @@ async def api_put_config(payload: dict = Body(...)):
                 pass
 
     normalized_payload = safe_json(payload)
-    app.state.loaded_config = normalized_payload if isinstance(normalized_payload, dict) else {}
-    app.state.config = app.state.loaded_config
+    normalized_dict = normalized_payload if isinstance(normalized_payload, dict) else {}
+    app.state.loaded_config = normalized_dict
+    app.state.config = normalized_dict
     worker_engine = getattr(app.state, "worker_engine", None)
     if worker_engine is not None:
-        worker_engine.config = app.state.loaded_config
+        worker_engine.config = normalized_dict
     search_service = getattr(app.state, "search_service", None)
     if search_service is not None:
-        search_service.config = app.state.loaded_config
-
-    if "schedule" in payload:
-        schedule = _merge_schedule_config(payload.get("schedule"))
-        app.state.schedule_config = schedule
-        _apply_schedule_config(schedule)
+        search_service.config = normalized_dict
+    return normalized_dict
 
 
 def _current_loaded_config() -> dict:
     cfg = getattr(app.state, "loaded_config", None)
     return cfg if isinstance(cfg, dict) else {}
+
+
+def _normalized_music_preferences(config: dict | None) -> dict:
+    cfg = config if isinstance(config, dict) else {}
+    prefs = cfg.get("music_preferences")
+    if not isinstance(prefs, dict):
+        prefs = {}
+    favorite_genres = []
+    raw_genres = prefs.get("favorite_genres")
+    if isinstance(raw_genres, list):
+        seen = set()
+        for value in raw_genres:
+            genre = str(value or "").strip()
+            key = genre.lower()
+            if not genre or key in seen:
+                continue
+            seen.add(key)
+            favorite_genres.append(genre)
+    favorite_artists = []
+    raw_artists = prefs.get("favorite_artists")
+    if isinstance(raw_artists, list):
+        seen = set()
+        for item in raw_artists:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            artist_mbid = str(item.get("artist_mbid") or "").strip() or None
+            if not name:
+                continue
+            dedupe_key = (artist_mbid or "").lower() or name.lower()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            favorite_artists.append({
+                "name": name,
+                "artist_mbid": artist_mbid,
+            })
+    return {
+        "favorite_genres": favorite_genres,
+        "favorite_artists": favorite_artists,
+    }
+
+
+@app.get("/api/music/preferences")
+async def api_music_preferences_get():
+    return _normalized_music_preferences(_read_config_or_404())
+
+
+@app.put("/api/music/preferences")
+async def api_music_preferences_put(payload: dict = Body(...)):
+    current = _read_config_or_404()
+    next_config = dict(current)
+    next_config["music_preferences"] = _normalized_music_preferences({"music_preferences": payload})
+    errors = validate_config(next_config)
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+    _persist_config_payload(next_config)
+    return next_config["music_preferences"]
 
 
 @app.get("/api/arr/radarr/health")
@@ -9902,17 +10079,25 @@ async def api_arr_sonarr_health():
 
 
 @app.get("/api/arr/search/movies")
-async def api_arr_search_movies(q: str = Query("", min_length=1), limit: int = Query(20, ge=1, le=50)):
+async def api_arr_search_movies(
+    q: str = Query("", min_length=1),
+    limit: int = Query(20, ge=1, le=50),
+    year: int | None = Query(None, ge=1888, le=2100),
+):
     try:
-        return safe_json(build_movie_search_response(_current_loaded_config(), q, limit=limit))
+        return safe_json(build_movie_search_response(_current_loaded_config(), q, limit=limit, year=year))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
 @app.get("/api/arr/search/tv")
-async def api_arr_search_tv(q: str = Query("", min_length=1), limit: int = Query(20, ge=1, le=50)):
+async def api_arr_search_tv(
+    q: str = Query("", min_length=1),
+    limit: int = Query(20, ge=1, le=50),
+    year: int | None = Query(None, ge=1888, le=2100),
+):
     try:
-        return safe_json(build_tv_search_response(_current_loaded_config(), q, limit=limit))
+        return safe_json(build_tv_search_response(_current_loaded_config(), q, limit=limit, year=year))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
@@ -9962,21 +10147,22 @@ async def api_arr_trailer(kind: str = Query(...), tmdb_id: int = Query(...)):
         return safe_json(get_tmdb_trailer(_current_loaded_config(), kind, tmdb_id))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
-    _apply_spotify_schedule(payload or {})
-    _apply_community_publish_schedule(payload or {})
-    _apply_resolution_cache_sync_schedule(payload or {})
-    policy = normalize_watch_policy(payload)
-    if getattr(normalize_watch_policy, "valid", True):
-        app.state.watch_policy = policy
-        _apply_watch_policy(policy)
-        app.state.watch_config_cache = payload
-    enable_watcher = _config_watcher_enabled(payload)
-    if enable_watcher:
-        _enable_watcher_runtime()
-    else:
-        await _disable_watcher_runtime("config updated (enable_watcher=false)")
 
-    return {"status": "updated"}
+
+@app.get("/api/arr/cast")
+async def api_arr_cast(kind: str = Query(...), tmdb_id: int = Query(...), limit: int = Query(8, ge=1, le=20)):
+    try:
+        return safe_json(get_tmdb_cast(_current_loaded_config(), kind, tmdb_id, limit=limit))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/person")
+async def api_arr_person_titles(person_id: int = Query(...), kind: str = Query(...), limit: int = Query(24, ge=1, le=50)):
+    try:
+        return safe_json(get_tmdb_person_titles(_current_loaded_config(), person_id, kind=kind, limit=limit))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
 @app.get("/api/community-cache/publish/status")
@@ -9993,6 +10179,41 @@ async def api_community_cache_publish_status():
         status["backfill_last_summary"] = backfill_last_summary
     status["next_run_at"] = _get_next_community_publish_run_iso()
     return safe_json(status)
+
+
+@app.get("/api/music/long-term-retry/status")
+async def api_music_long_term_retry_status():
+    worker_engine = getattr(app.state, "worker_engine", None)
+    if worker_engine is None:
+        raise HTTPException(status_code=503, detail="worker_engine_unavailable")
+    config = get_loaded_config() or _read_config_or_404()
+    queue_summary = worker_engine.store.summarize_long_term_retry_queue()
+    return safe_json(
+        {
+            "enabled": bool((config if isinstance(config, dict) else {}).get("long_term_retry_enabled", True)),
+            "interval_hours": int((config if isinstance(config, dict) else {}).get("long_term_retry_interval_hours", 24) or 24),
+            "batch_size": int((config if isinstance(config, dict) else {}).get("long_term_retry_batch_size", 10) or 10),
+            "max_attempts": int((config if isinstance(config, dict) else {}).get("long_term_retry_max_attempts", 0) or 0),
+            "poll_minutes": int((config if isinstance(config, dict) else {}).get("long_term_retry_poll_minutes", 60) or 60),
+            "queue": queue_summary,
+            "last_summary": getattr(app.state, "long_term_retry_last_summary", None),
+            "next_run_at": _get_next_long_term_retry_run_iso(),
+        }
+    )
+
+
+@app.post("/api/music/long-term-retry/run")
+async def api_music_long_term_retry_run():
+    worker_engine = getattr(app.state, "worker_engine", None)
+    if worker_engine is None:
+        raise HTTPException(status_code=503, detail="worker_engine_unavailable")
+    try:
+        summary = worker_engine.process_long_term_retry_once()
+        app.state.long_term_retry_last_summary = summary
+        return safe_json(summary)
+    except Exception as exc:
+        logger.exception("manual_long_term_retry_run_failed")
+        raise HTTPException(status_code=500, detail=str(exc) or "long_term_retry_run_failed")
 
 
 @app.get("/api/community-cache/sync/status")

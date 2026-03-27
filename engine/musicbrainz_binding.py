@@ -639,6 +639,50 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
     return response
 
 
+def search_artists_by_genre(genre=None, offset=0, limit=24):
+    genre_value = str(genre or "").strip()
+    if not genre_value:
+        return []
+
+    mb_service = get_musicbrainz_service()
+
+    def _mb_call(func):
+        try:
+            return mb_service._call_with_retry(func)  # noqa: SLF001
+        except Exception:
+            return None
+
+    escaped = genre_value.replace("\\", "\\\\").replace('"', '\\"')
+    artist_query = f'tag:"{escaped}"'
+    logger.info(
+        "[MUSICBRAINZ] genre_artist_search endpoint=search_artists query=%s",
+        artist_query,
+    )
+    payload = _mb_call(
+        lambda: musicbrainzngs.search_artists(
+            query=artist_query,
+            limit=max(1, int(limit or 24)),
+            offset=max(0, int(offset or 0)),
+        )
+    )
+    artist_list = payload.get("artist-list", []) if isinstance(payload, dict) else []
+    results = []
+    for artist_item in artist_list[: max(1, int(limit or 24))]:
+        if not isinstance(artist_item, dict):
+            continue
+        results.append(
+            {
+                "artist_mbid": artist_item.get("id"),
+                "name": artist_item.get("name"),
+                "country": artist_item.get("country"),
+                "disambiguation": artist_item.get("disambiguation"),
+                "genre": genre_value,
+                "source_score": _safe_int(artist_item.get("score") or artist_item.get("ext:score")) or 0,
+            }
+        )
+    return results
+
+
 def _collect_isrc(recording: dict[str, Any]) -> bool:
     isrcs = recording.get("isrcs")
     if isinstance(isrcs, list):
