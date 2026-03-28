@@ -5088,6 +5088,42 @@ body.home-page .home-search-actions {
   min-height: 110px;
 }
 
+.setup-module-summary,
+.connection-detail-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.setup-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.14);
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.setup-status-chip.is-verified {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(74, 222, 128, 0.24);
+}
+
+.setup-status-chip.is-needs_input,
+.setup-status-chip.is-needs_attention {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(251, 191, 36, 0.22);
+}
+
+.setup-status-chip.is-optional {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.22);
+}
+
 .setup-stack-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -5128,6 +5164,12 @@ body.home-page .home-search-actions {
   display: grid;
   gap: 8px;
   margin-top: 10px;
+}
+
+.admin-pin-card {
+  width: min(420px, 92vw);
+  display: grid;
+  gap: 12px;
 }
 
 .movies-tv-setup-landing {

@@ -104,6 +104,13 @@ const state = {
   arrStatusPollTimer: null,
   setupStatus: null,
   servicesHealth: null,
+  lastAutoConfigureResults: {},
+  adminSecurity: {
+    admin_pin_enabled: false,
+    admin_pin_session_minutes: 30,
+    session_valid: false,
+  },
+  adminPinToken: "",
   playerView: "library",
   playerLibrary: [],
   playerLibrarySummary: { artists: [], albums: [], tracks: [] },
@@ -161,6 +168,7 @@ const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at_v2";
 const RELEASE_CACHE_KEY = "yt_archiver_release_cache_v2";
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version_v2";
 const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
+const ADMIN_PIN_TOKEN_KEY = "retreivr.admin.pin.token";
 const HOME_MUSIC_DEBUG_KEY = "retreivr.debug.music";
 const HOME_ALBUM_COVER_CACHE_KEY = "retreivr.home.album_cover_cache.v1";
 const HOME_ARTIST_COVER_CACHE_KEY = "retreivr.home.artist_cover_cache.v1";
@@ -1243,6 +1251,7 @@ async function refreshSetupStatus() {
   try {
     const payload = await fetchJson("/api/setup/status");
     state.setupStatus = payload;
+    state.adminSecurity = payload?.security || state.adminSecurity;
     const modules = payload?.modules || {};
     const stack = payload?.stack || {};
     if ($("#setup-enable-arr-stack")) $("#setup-enable-arr-stack").checked = !!stack.enable_arr_stack;
@@ -1264,14 +1273,21 @@ async function refreshSetupStatus() {
       modulesEl.innerHTML = Object.entries(modules).map(([key, module]) => `
         <div class="group setup-module-card">
           <div class="group-title">${escapeHtml(module.title || key)}</div>
-          <div class="meta">Status: <strong>${escapeHtml(module.status || "pending")}</strong>${module.required ? " • Required" : " • Optional"}</div>
+          <div class="setup-status-chip is-${escapeAttr(String(module.status || "pending").replace(/[^a-z_]/gi, "_").toLowerCase())}">${escapeHtml(module.status || "pending")}${module.required ? " • Required" : " • Optional"}</div>
+          <div class="meta">${escapeHtml(module.summary || "")}</div>
+          <div class="setup-module-summary">
+            ${module.complete ? `<div class="meta">Complete</div>` : `<div class="meta">Awaiting input or enablement</div>`}
+          </div>
         </div>
       `).join("");
     }
     const profiles = Array.isArray(stack.compose_profiles) ? stack.compose_profiles : [];
     const command = String(stack.compose_command || "").trim();
     if (helperEl) {
-      setNotice(helperEl, command ? `Restart required after apply. Run: ${command}` : "Retreivr-only mode is active. Save stack choices, then apply when you are ready.", false);
+      const helperText = stack.restart_required
+        ? `Restart required after apply. Run: ${command}`
+        : (command ? `Managed stack is saved. Apply command: ${command}` : "Retreivr-only mode is active. Save stack choices, then apply when you are ready.");
+      setNotice(helperEl, helperText, false);
     }
     if (summaryEl) {
       const pathRows = [
@@ -1292,7 +1308,9 @@ async function refreshSetupStatus() {
         <div class="group setup-command-card">
           <div class="group-title">Apply Summary</div>
           <div class="meta">${profiles.length ? `Profiles: ${escapeHtml(profiles.join(", "))}` : "Profiles: none (Retreivr-only mode)"}</div>
-          <div class="meta">Restart required after writing the managed env block.</div>
+          <div class="meta">${stack.restart_required ? "Restart required after the last managed stack change." : "No pending restart requirement recorded."}</div>
+          ${stack.last_applied_at ? `<div class="meta">Last applied: ${escapeHtml(stack.last_applied_at)}</div>` : `<div class="meta">Last applied: never</div>`}
+          ${stack.last_applied_env_path ? `<div class="meta">Managed env target: ${escapeHtml(stack.last_applied_env_path)}</div>` : ""}
           <div class="meta">VPN policy: ${vpnPolicy.enabled ? `enabled via ${escapeHtml(vpnPolicy.provider || "gluetun")}` : "disabled"} • Routes: ${escapeHtml(routeSummary)}</div>
           <code class="setup-command-code">${escapeHtml(command || "docker compose up -d")}</code>
         </div>
@@ -1359,6 +1377,7 @@ function collectSetupStackPayload() {
 
 async function saveSetupStack() {
   const helperEl = $("#setup-command-helper");
+  if (!(await ensureAdminPinSession())) return;
   setNotice(helperEl, "Saving stack choices…", false);
   const payload = await fetchJson("/api/setup/stack", {
     method: "POST",
@@ -1373,6 +1392,7 @@ async function saveSetupStack() {
 async function applySetupStack() {
   const helperEl = $("#setup-command-helper");
   const summaryEl = $("#setup-command-summary");
+  if (!(await ensureAdminPinSession())) return;
   setNotice(helperEl, "Writing managed env block…", false);
   await saveSetupStack();
   const payload = await fetchJson("/api/setup/apply-stack", { method: "POST" });
@@ -1393,6 +1413,49 @@ async function applySetupStack() {
   }
 }
 
+async function saveAdminPinSettings() {
+  const enabled = !!$("#cfg-security-admin-pin-enabled")?.checked;
+  const currentPin = String($("#cfg-security-admin-pin-current")?.value || "").trim();
+  const newPin = String($("#cfg-security-admin-pin-new")?.value || "").trim();
+  const confirmPin = String($("#cfg-security-admin-pin-confirm")?.value || "").trim();
+  const sessionMinutes = Number.parseInt(String($("#cfg-security-admin-pin-session-minutes")?.value || "30").trim(), 10) || 30;
+  const statusEl = $("#security-admin-pin-status");
+  if (enabled && !state.adminSecurity?.admin_pin_enabled && !newPin) {
+    if (statusEl) statusEl.textContent = "Set a new PIN to enable admin protection.";
+    return;
+  }
+  if (newPin && newPin !== confirmPin) {
+    if (statusEl) statusEl.textContent = "New PIN and confirmation do not match.";
+    return;
+  }
+  if (statusEl) statusEl.textContent = "Saving admin PIN settings…";
+  try {
+    const payload = await fetchJson("/api/admin/pin/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        admin_pin_enabled: enabled,
+        current_pin: currentPin,
+        new_pin: newPin,
+        admin_pin_session_minutes: sessionMinutes,
+      }),
+    });
+    state.adminPinToken = String(payload?.token || state.adminPinToken || "");
+    if (state.adminPinToken) {
+      localStorage.setItem(ADMIN_PIN_TOKEN_KEY, state.adminPinToken);
+    } else {
+      localStorage.removeItem(ADMIN_PIN_TOKEN_KEY);
+    }
+    await refreshAdminSecurityStatus();
+    if ($("#cfg-security-admin-pin-current")) $("#cfg-security-admin-pin-current").value = "";
+    if ($("#cfg-security-admin-pin-new")) $("#cfg-security-admin-pin-new").value = "";
+    if ($("#cfg-security-admin-pin-confirm")) $("#cfg-security-admin-pin-confirm").value = "";
+    if (statusEl) statusEl.textContent = enabled ? "Admin PIN settings saved." : "Admin PIN disabled.";
+  } catch (err) {
+    if (statusEl) statusEl.textContent = toUserErrorMessage(err);
+  }
+}
+
 async function refreshConnectionsStatus() {
   const grid = $("#connections-grid");
   const messageEl = $("#connections-message");
@@ -1406,8 +1469,16 @@ async function refreshConnectionsStatus() {
       grid.innerHTML = Object.entries(state.servicesHealth).map(([name, entry]) => `
         <div class="group setup-module-card">
           <div class="group-title">${escapeHtml(name)}</div>
-          <div class="meta">${entry.configured ? "Configured" : "Not configured"} • ${escapeHtml(entry.status || "unknown")}</div>
-          <div class="meta">${entry.reachable ? "Reachable" : "Unavailable"}</div>
+          <div class="setup-status-chip is-${entry.reachable ? "verified" : (entry.configured ? "needs_attention" : "optional")}">${entry.reachable ? "Reachable" : (entry.configured ? "Needs attention" : "Not configured")}</div>
+          <div class="connection-detail-list">
+            <div class="meta">${entry.configured ? "Configured in Retreivr" : "Not configured in Retreivr"} • ${escapeHtml(entry.status || "unknown")}</div>
+            ${entry.base_url ? `<div class="meta">Base URL: ${escapeHtml(entry.base_url)}</div>` : ""}
+            ${entry.target_path ? `<div class="meta">Target path: ${escapeHtml(entry.target_path)}</div>` : ""}
+            ${entry.download_root ? `<div class="meta">Download root: ${escapeHtml(entry.download_root)}</div>` : ""}
+            ${state.lastAutoConfigureResults?.[name]?.status ? `<div class="meta">Last auto-config: ${escapeHtml(state.lastAutoConfigureResults[name].status)}</div>` : ""}
+            ${state.lastAutoConfigureResults?.[name]?.message ? `<div class="meta">${escapeHtml(state.lastAutoConfigureResults[name].message)}</div>` : ""}
+            ${Array.isArray(state.lastAutoConfigureResults?.[name]?.actions) && state.lastAutoConfigureResults[name].actions.length ? `<div class="meta">Actions: ${escapeHtml(state.lastAutoConfigureResults[name].actions.join(", "))}</div>` : ""}
+          </div>
           ${entry.external_ip ? `<div class="meta">External IP: ${escapeHtml(entry.external_ip)}</div>` : ""}
           ${entry.provider ? `<div class="meta">Provider: ${escapeHtml(entry.provider)}</div>` : ""}
           ${entry.expected_routes ? `<div class="meta">Routes: ${escapeHtml(Object.entries(entry.expected_routes).filter(([, enabled]) => !!enabled).map(([service]) => service).join(", ") || "none")}</div>` : ""}
@@ -1430,10 +1501,12 @@ async function refreshConnectionsStatus() {
 
 async function autoConfigureConnections() {
   const messageEl = $("#connections-message");
+  if (!(await ensureAdminPinSession())) return;
   setNotice(messageEl, "Applying best-effort ARR and qBittorrent configuration…", false);
   try {
     const payload = await fetchJson("/api/services/autoconfigure", { method: "POST" });
     const services = payload?.services || {};
+    state.lastAutoConfigureResults = services || {};
     const configured = Object.entries(services).filter(([, item]) => item?.status === "configured" || item?.status === "updated" || item?.status === "created" || item?.status === "connected").length;
     const attention = Object.entries(services).filter(([, item]) => item?.status === "needs_attention").length;
     const summary = attention
@@ -2893,12 +2966,101 @@ function resolveBrowseStart(rootKey, value) {
 
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const nextOptions = { ...options };
+  const headers = new Headers(options.headers || {});
+  const token = state.adminPinToken || localStorage.getItem(ADMIN_PIN_TOKEN_KEY) || "";
+  if (token) {
+    headers.set("X-Retreivr-Admin-Token", token);
+  }
+  nextOptions.headers = headers;
+  const response = await fetch(url, nextOptions);
   if (!response.ok) {
     const text = await response.text();
+    if (response.status === 403 && text.includes("admin_pin_required")) {
+      state.adminPinToken = "";
+      state.adminSecurity = { ...(state.adminSecurity || {}), session_valid: false };
+      localStorage.removeItem(ADMIN_PIN_TOKEN_KEY);
+    }
     throw new Error(`${response.status} ${text}`);
   }
   return response.json();
+}
+
+async function refreshAdminSecurityStatus() {
+  try {
+    const payload = await fetchJson("/api/admin/security/status");
+    state.adminSecurity = payload || state.adminSecurity;
+    if (!payload?.session_valid) {
+      state.adminPinToken = "";
+      localStorage.removeItem(ADMIN_PIN_TOKEN_KEY);
+    }
+    const statusEl = $("#security-admin-pin-status");
+    if ($("#cfg-security-admin-pin-enabled")) $("#cfg-security-admin-pin-enabled").checked = !!payload?.admin_pin_enabled;
+    if ($("#cfg-security-admin-pin-session-minutes")) {
+      $("#cfg-security-admin-pin-session-minutes").value = Number(payload?.admin_pin_session_minutes || 30);
+    }
+    if (statusEl) {
+      statusEl.textContent = payload?.admin_pin_enabled
+        ? (payload.session_valid ? `Admin PIN enabled • unlocked for ${payload.admin_pin_session_minutes || 30} min` : "Admin PIN enabled • locked")
+        : "Admin PIN is disabled.";
+    }
+  } catch (_err) {
+    // ignore
+  }
+}
+
+function setAdminPinModalOpen(open) {
+  const modal = $("#admin-pin-modal");
+  if (!modal) return;
+  modal.classList.toggle("hidden", !open);
+  if (open) {
+    const input = $("#admin-pin-input");
+    const message = $("#admin-pin-message");
+    if (message) message.textContent = "";
+    if (input) {
+      input.value = "";
+      setTimeout(() => input.focus(), 0);
+    }
+  }
+}
+
+async function ensureAdminPinSession() {
+  if (!state.adminSecurity?.admin_pin_enabled) {
+    return true;
+  }
+  if (state.adminSecurity?.session_valid && (state.adminPinToken || localStorage.getItem(ADMIN_PIN_TOKEN_KEY))) {
+    return true;
+  }
+  setAdminPinModalOpen(true);
+  return false;
+}
+
+async function submitAdminPinUnlock() {
+  const input = $("#admin-pin-input");
+  const messageEl = $("#admin-pin-message");
+  const pin = String(input?.value || "").trim();
+  if (!pin) {
+    if (messageEl) messageEl.textContent = "PIN is required.";
+    return false;
+  }
+  if (messageEl) messageEl.textContent = "Verifying PIN…";
+  try {
+    const payload = await fetchJson("/api/admin/pin/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin }),
+    });
+    state.adminPinToken = String(payload?.token || "");
+    if (state.adminPinToken) {
+      localStorage.setItem(ADMIN_PIN_TOKEN_KEY, state.adminPinToken);
+    }
+    await refreshAdminSecurityStatus();
+    setAdminPinModalOpen(false);
+    return true;
+  } catch (err) {
+    if (messageEl) messageEl.textContent = toUserErrorMessage(err);
+    return false;
+  }
 }
 
 // Helper to cancel a job by ID
@@ -3427,6 +3589,10 @@ async function setConfigPath() {
   const path = $("#config-path").value.trim();
   if (!path) {
     setConfigNotice("Config path is required", true);
+    return;
+  }
+  if (!(await ensureAdminPinSession())) {
+    setConfigNotice("Admin PIN unlock is required before changing the config path.", true);
     return;
   }
   try {
@@ -10902,7 +11068,13 @@ function renderConfig(cfg) {
   const arrQbit = (arrCfg && typeof arrCfg.qbittorrent === "object") ? arrCfg.qbittorrent : {};
   const arrJellyfin = (arrCfg && typeof arrCfg.jellyfin === "object") ? arrCfg.jellyfin : {};
   const arrVpn = (arrCfg && typeof arrCfg.vpn === "object") ? arrCfg.vpn : {};
+  const setupCfg = (cfg && typeof cfg.setup === "object") ? cfg.setup : {};
+  const setupStack = (setupCfg && typeof setupCfg.stack === "object") ? setupCfg.stack : {};
+  const securityCfg = (cfg && typeof cfg.security === "object") ? cfg.security : {};
   $("#cfg-arr-tmdb-api-key").value = arrCfg.tmdb_api_key ?? "";
+  $("#cfg-arr-movies-root").value = setupStack.movies_root ?? "./media/movies";
+  $("#cfg-arr-tv-root").value = setupStack.tv_root ?? "./media/tv";
+  $("#cfg-arr-books-root").value = setupStack.books_root ?? "./media/books";
   $("#cfg-arr-radarr-base-url").value = arrRadarr.base_url ?? "";
   $("#cfg-arr-radarr-api-key").value = arrRadarr.api_key ?? "";
   $("#cfg-arr-sonarr-base-url").value = arrSonarr.base_url ?? "";
@@ -10925,6 +11097,13 @@ function renderConfig(cfg) {
   $("#cfg-arr-vpn-route-qbittorrent").checked = arrVpn.route_qbittorrent !== false;
   $("#cfg-arr-vpn-route-prowlarr").checked = !!arrVpn.route_prowlarr;
   $("#cfg-arr-vpn-route-retreivr").checked = !!arrVpn.route_retreivr;
+  $("#cfg-security-admin-pin-enabled").checked = !!securityCfg.admin_pin_enabled;
+  $("#cfg-security-admin-pin-session-minutes").value = Number.isFinite(securityCfg.admin_pin_session_minutes)
+    ? Number(securityCfg.admin_pin_session_minutes)
+    : 30;
+  if ($("#cfg-security-admin-pin-current")) $("#cfg-security-admin-pin-current").value = "";
+  if ($("#cfg-security-admin-pin-new")) $("#cfg-security-admin-pin-new").value = "";
+  if ($("#cfg-security-admin-pin-confirm")) $("#cfg-security-admin-pin-confirm").value = "";
   $("#cfg-music-template").value = cfg.music_filename_template ?? "";
   $("#cfg-yt-dlp-cookies").value = cfg.yt_dlp_cookies ?? "";
   const musicMetaDefaults = {
@@ -11365,6 +11544,7 @@ async function loadConfig() {
     applyHomeDefaultActiveFormat({ force: true });
     state.configDirty = false;
     updatePollingState();
+    await refreshAdminSecurityStatus();
     refreshArrConnectionStatus({ quiet: true }).catch(() => {});
     setConfigNotice("Config loaded", false);
   } catch (err) {
@@ -11753,6 +11933,14 @@ function buildConfigFromForm() {
   arr.vpn.route_retreivr = !!$("#cfg-arr-vpn-route-retreivr").checked;
   base.arr = arr;
 
+  const setup = (base.setup && typeof base.setup === "object") ? { ...base.setup } : {};
+  const setupStack = (setup.stack && typeof setup.stack === "object") ? { ...setup.stack } : {};
+  setupStack.movies_root = $("#cfg-arr-movies-root").value.trim() || "./media/movies";
+  setupStack.tv_root = $("#cfg-arr-tv-root").value.trim() || "./media/tv";
+  setupStack.books_root = $("#cfg-arr-books-root").value.trim() || "./media/books";
+  setup.stack = setupStack;
+  base.setup = setup;
+
   base.schedule = buildSchedulePayloadFromForm();
 
   const telegramToken = $("#cfg-telegram-token").value.trim();
@@ -11937,6 +12125,10 @@ async function saveConfig() {
   const result = buildConfigFromForm();
   if (result.errors.length) {
     setConfigNotice(result.errors.join("; "), true);
+    return;
+  }
+  if (!(await ensureAdminPinSession())) {
+    setConfigNotice("Admin PIN unlock is required before saving settings.", true);
     return;
   }
 
@@ -12902,6 +13094,15 @@ function bindEvents() {
   $("#schedule-run-now").addEventListener("click", runScheduleNow);
   $("#schedule-enabled").addEventListener("change", syncConfigSectionCollapsedStates);
   $("#save-config").addEventListener("click", saveConfig);
+  const securityAdminPinSave = $("#security-admin-pin-save");
+  if (securityAdminPinSave) {
+    securityAdminPinSave.addEventListener("click", () => {
+      saveAdminPinSettings().catch((err) => {
+        const statusEl = $("#security-admin-pin-status");
+        if (statusEl) statusEl.textContent = toUserErrorMessage(err);
+      });
+    });
+  }
   const ytdlpUpdate = $("#ytdlp-update");
   if (ytdlpUpdate) {
     ytdlpUpdate.addEventListener("click", updateYtdlp);
@@ -13043,6 +13244,25 @@ function bindEvents() {
   if (connectionsAutoconfigure) {
     connectionsAutoconfigure.addEventListener("click", () => {
       autoConfigureConnections().catch(() => {});
+    });
+  }
+  const adminPinClose = $("#admin-pin-close");
+  if (adminPinClose) {
+    adminPinClose.addEventListener("click", () => setAdminPinModalOpen(false));
+  }
+  const adminPinSubmit = $("#admin-pin-submit");
+  if (adminPinSubmit) {
+    adminPinSubmit.addEventListener("click", () => {
+      submitAdminPinUnlock().catch(() => {});
+    });
+  }
+  const adminPinInput = $("#admin-pin-input");
+  if (adminPinInput) {
+    adminPinInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        submitAdminPinUnlock().catch(() => {});
+      }
     });
   }
   const playerPanel = $("#music-player-panel");
@@ -13240,6 +13460,10 @@ function bindEvents() {
       const key = String($("#movies-tv-inline-tmdb-key")?.value || "").trim();
       if (!state.config) {
         await loadConfig();
+      }
+      if (!(await ensureAdminPinSession())) {
+        setNotice($("#movies-tv-setup-message"), "Admin PIN unlock is required before saving TMDb settings.", true);
+        return;
       }
       const payload = state.config ? JSON.parse(JSON.stringify(state.config)) : {};
       payload.arr = (payload.arr && typeof payload.arr === "object") ? payload.arr : {};
@@ -13727,6 +13951,7 @@ function bindEvents() {
 }
 
 async function init() {
+  state.adminPinToken = localStorage.getItem(ADMIN_PIN_TOKEN_KEY) || "";
   mountHomePageNodes();
   window.addEventListener("spotify-oauth-complete", () => {
     setNotice(

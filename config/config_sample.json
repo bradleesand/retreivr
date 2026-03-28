@@ -178,6 +178,10 @@
   "setup": {
     "show_on_startup": true,
     "completed_modules": [],
+    "last_applied_at": "",
+    "last_applied_command": "",
+    "last_applied_env_path": "",
+    "restart_required": false,
     "stack": {
       "enable_arr_stack": false,
       "enable_radarr": false,
@@ -196,6 +200,11 @@
       "downloads_root": "./downloads",
       "books_root": "./media/books"
     }
+  },
+  "security": {
+    "admin_pin_enabled": false,
+    "admin_pin_hash": "",
+    "admin_pin_session_minutes": 30
   },
   "custom_search_adapters_file": "config/custom_search_adapters.yaml"
 }

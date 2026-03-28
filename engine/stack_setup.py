@@ -517,15 +517,20 @@ def build_setup_status(config: dict[str, Any]) -> dict[str, Any]:
     youtube_ready = bool(((youtube_cfg.get("cookies") or {}).get("enabled")))
     storage_ready = bool(_trimmed(music_cfg.get("library_path")) or _trimmed(config.get("single_download_folder")))
     arr_enabled = any(stack.get(key) for key in ("enable_arr_stack", "enable_radarr", "enable_sonarr", "enable_readarr", "enable_prowlarr"))
+    setup_cfg = config.get("setup") if isinstance(config.get("setup"), dict) else {}
+    restart_required = bool(setup_cfg.get("restart_required"))
+    last_applied_at = _trimmed(setup_cfg.get("last_applied_at"))
+    last_applied_command = _trimmed(setup_cfg.get("last_applied_command"))
+    last_applied_env_path = _trimmed(setup_cfg.get("last_applied_env_path"))
     modules = {
-        "core": {"required": True, "status": "verified", "title": "Core Retreivr"},
-        "youtube": {"required": False, "status": "verified" if youtube_ready else "pending", "title": "YouTube / Cookies"},
-        "telegram": {"required": False, "status": "verified" if telegram_ready else "pending", "title": "Telegram Notifications"},
-        "tmdb": {"required": False, "status": "verified" if tmdb_ready else "pending", "title": "TMDb"},
-        "arr": {"required": False, "status": "verified" if arr_enabled else "pending", "title": "ARR Stack"},
-        "vpn": {"required": False, "status": "verified" if stack.get("enable_vpn") else "pending", "title": "VPN / Gluetun"},
-        "jellyfin": {"required": False, "status": "verified" if stack.get("enable_jellyfin") else "pending", "title": "Jellyfin"},
-        "storage": {"required": True, "status": "verified" if storage_ready else "pending", "title": "Storage / Media Folders"},
+        "core": {"required": True, "status": "verified", "title": "Core Retreivr", "summary": "Retreivr is installed and reachable."},
+        "youtube": {"required": False, "status": "verified" if youtube_ready else "needs_input", "title": "YouTube / Cookies", "summary": "Optional for watcher and authenticated YouTube flows."},
+        "telegram": {"required": False, "status": "verified" if telegram_ready else "needs_input", "title": "Telegram Notifications", "summary": "Optional operator notifications and summaries."},
+        "tmdb": {"required": False, "status": "verified" if tmdb_ready else "needs_input", "title": "TMDb", "summary": "Required for native Movies & TV discovery."},
+        "arr": {"required": False, "status": "verified" if arr_enabled else "optional", "title": "ARR Stack", "summary": "Optional Radarr/Sonarr/Readarr/Prowlarr stack."},
+        "vpn": {"required": False, "status": "verified" if stack.get("enable_vpn") else "optional", "title": "VPN / Gluetun", "summary": "Recommended for torrent-backed flows."},
+        "jellyfin": {"required": False, "status": "verified" if stack.get("enable_jellyfin") else "optional", "title": "Jellyfin", "summary": "Optional playback server integration."},
+        "storage": {"required": True, "status": "verified" if storage_ready else "needs_input", "title": "Storage / Media Folders", "summary": "Media and download roots for Retreivr and optional stack services."},
     }
     for key, payload in modules.items():
         payload["complete"] = key in completed_modules or payload["status"] == "verified"
@@ -536,6 +541,10 @@ def build_setup_status(config: dict[str, Any]) -> dict[str, Any]:
             "compose_profiles": derive_profiles(stack),
             "compose_command": build_compose_command(stack),
             "vpn_policy": build_stack_apply_summary(config, stack).get("vpn_policy") or {},
+            "restart_required": restart_required,
+            "last_applied_at": last_applied_at,
+            "last_applied_command": last_applied_command,
+            "last_applied_env_path": last_applied_env_path,
         },
     }
 
@@ -582,6 +591,7 @@ def build_stack_apply_summary(config: dict[str, Any], stack: dict[str, Any]) -> 
 
 def build_connections_status(config: dict[str, Any]) -> dict[str, Any]:
     arr_cfg = config.get("arr") if isinstance(config.get("arr"), dict) else {}
+    stack = normalize_stack_config(config)
     result: dict[str, Any] = {}
     for service_name, endpoint in (
         ("radarr", "system/status"),
@@ -597,20 +607,26 @@ def build_connections_status(config: dict[str, Any]) -> dict[str, Any]:
             continue
         headers = {"X-Api-Key": api_key} if api_key else {}
         reachable, message = _probe_json(f"{base_url}/api/{_service_api_version(service_name)}/{endpoint}", headers=headers)
-        result[service_name] = {"configured": True, "reachable": reachable, "status": message, "base_url": base_url}
+        target_path = {
+            "radarr": str(stack.get("movies_root") or "./media/movies"),
+            "sonarr": str(stack.get("tv_root") or "./media/tv"),
+            "readarr": str(stack.get("books_root") or "./media/books"),
+            "prowlarr": "",
+        }.get(service_name, "")
+        result[service_name] = {"configured": True, "reachable": reachable, "status": message, "base_url": base_url, "target_path": target_path}
     bazarr_cfg = arr_cfg.get("bazarr") if isinstance(arr_cfg.get("bazarr"), dict) else {}
     bazarr_base = _trimmed(bazarr_cfg.get("base_url")).rstrip("/")
     if bazarr_base:
         headers = {"X-Api-Key": _trimmed(bazarr_cfg.get("api_key"))} if _trimmed(bazarr_cfg.get("api_key")) else {}
         reachable, message = _probe_json(f"{bazarr_base}/api/system/status", headers=headers)
-        result["bazarr"] = {"configured": True, "reachable": reachable, "status": message, "base_url": bazarr_base}
+        result["bazarr"] = {"configured": True, "reachable": reachable, "status": message, "base_url": bazarr_base, "target_path": ""}
     else:
         result["bazarr"] = {"configured": False, "reachable": False, "status": "not_configured"}
     qb_cfg = arr_cfg.get("qbittorrent") if isinstance(arr_cfg.get("qbittorrent"), dict) else {}
     qb_base = _trimmed(qb_cfg.get("base_url")).rstrip("/")
     if qb_base:
         reachable, message = _probe_json(f"{qb_base}/api/v2/app/version")
-        result["qbittorrent"] = {"configured": True, "reachable": reachable, "status": message, "base_url": qb_base}
+        result["qbittorrent"] = {"configured": True, "reachable": reachable, "status": message, "base_url": qb_base, "download_root": _trimmed(qb_cfg.get("download_dir")) or str(stack.get("downloads_root") or "./downloads")}
     else:
         result["qbittorrent"] = {"configured": False, "reachable": False, "status": "not_configured"}
     jelly_cfg = arr_cfg.get("jellyfin") if isinstance(arr_cfg.get("jellyfin"), dict) else {}
@@ -618,7 +634,7 @@ def build_connections_status(config: dict[str, Any]) -> dict[str, Any]:
     if jelly_base:
         headers = {"X-Emby-Token": _trimmed(jelly_cfg.get("api_key"))} if _trimmed(jelly_cfg.get("api_key")) else {}
         reachable, message = _probe_json(f"{jelly_base}/System/Info/Public", headers=headers)
-        result["jellyfin"] = {"configured": True, "reachable": reachable, "status": message, "base_url": jelly_base}
+        result["jellyfin"] = {"configured": True, "reachable": reachable, "status": message, "base_url": jelly_base, "target_path": str(stack.get("media_root") or "./media")}
     else:
         result["jellyfin"] = {"configured": False, "reachable": False, "status": "not_configured"}
     vpn_cfg = arr_cfg.get("vpn") if isinstance(arr_cfg.get("vpn"), dict) else {}

@@ -19,6 +19,7 @@ import concurrent.futures
 import importlib
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import logging
@@ -28,6 +29,7 @@ import re
 import sqlite3
 import subprocess
 import shutil
+import secrets
 import tempfile
 import threading
 import time
@@ -255,6 +257,10 @@ DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
 DEFAULT_SAVED_ALBUMS_SYNC_INTERVAL_MINUTES = 30
 DEFAULT_USER_PLAYLISTS_SYNC_INTERVAL_MINUTES = 30
 DEFAULT_SPOTIFY_PLAYLISTS_SYNC_INTERVAL_MINUTES = 15
+ADMIN_PIN_HEADER = "X-Retreivr-Admin-Token"
+_ADMIN_PIN_ITERATIONS = 200_000
+_ADMIN_PIN_SESSIONS: dict[str, datetime] = {}
+_ADMIN_PIN_SESSIONS_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 OAUTH_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 OAUTH_SESSION_TTL = timedelta(minutes=15)
@@ -7184,7 +7190,8 @@ async def api_get_config_path():
 
 
 @app.put("/api/config/path")
-async def api_put_config_path(payload: ConfigPathRequest):
+async def api_put_config_path(request: Request, payload: ConfigPathRequest):
+    _require_admin_session(request)
     path = payload.path.strip()
     if not path:
         raise HTTPException(status_code=400, detail="Config path is required")
@@ -10125,7 +10132,8 @@ async def api_get_config():
 
 
 @app.put("/api/config")
-async def api_put_config(payload: dict = Body(...)):
+async def api_put_config(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
     payload = _strip_deprecated_fields(payload)
     errors = validate_config(payload)
     # Saving config should not require Spotify OAuth client credentials.
@@ -10168,14 +10176,64 @@ async def api_put_config(payload: dict = Body(...)):
     return {"status": "updated"}
 
 
+@app.get("/api/admin/security/status")
+async def api_admin_security_status(request: Request):
+    cfg = _current_loaded_config()
+    return safe_json(_admin_security_status(cfg, request=request))
+
+
+@app.post("/api/admin/pin/verify")
+async def api_admin_pin_verify(payload: dict = Body(...)):
+    cfg = _current_loaded_config()
+    security = _security_config(cfg)
+    if not security.get("admin_pin_enabled"):
+        raise HTTPException(status_code=400, detail={"error": "admin_pin_disabled"})
+    pin = str(payload.get("pin") or "").strip()
+    if not _verify_admin_pin(pin, security.get("admin_pin_hash") or ""):
+        raise HTTPException(status_code=403, detail={"error": "admin_pin_invalid", "message": "PIN did not match."})
+    token, expires_at = _issue_admin_session(cfg)
+    return safe_json({"status": "verified", "token": token, "expires_at": expires_at, **_admin_security_status(cfg)})
+
+
+@app.post("/api/admin/pin/configure")
+async def api_admin_pin_configure(request: Request, payload: dict = Body(...)):
+    cfg = dict(_current_loaded_config())
+    security = _security_config(cfg)
+    desired_enabled = bool(payload.get("admin_pin_enabled"))
+    session_minutes = int(payload.get("admin_pin_session_minutes") or security.get("admin_pin_session_minutes") or 30)
+    session_minutes = max(1, min(1440, session_minutes))
+    current_pin = str(payload.get("current_pin") or "").strip()
+    new_pin = str(payload.get("new_pin") or "").strip()
+    existing_enabled = bool(security.get("admin_pin_enabled"))
+    if existing_enabled:
+        if not (_has_valid_admin_session(_admin_token_from_request(request)) or _verify_admin_pin(current_pin, security.get("admin_pin_hash") or "")):
+            raise HTTPException(status_code=403, detail={"error": "admin_pin_required", "message": "Current admin PIN required."})
+    if desired_enabled and not existing_enabled and not new_pin:
+        raise HTTPException(status_code=400, detail={"error": "new_pin_required"})
+    next_security = dict(cfg.get("security") or {})
+    next_security["admin_pin_enabled"] = desired_enabled
+    next_security["admin_pin_session_minutes"] = session_minutes
+    if desired_enabled:
+        next_security["admin_pin_hash"] = _hash_admin_pin(new_pin) if new_pin else str(security.get("admin_pin_hash") or "")
+    else:
+        next_security["admin_pin_hash"] = ""
+    cfg["security"] = next_security
+    _persist_config_payload(cfg)
+    if desired_enabled:
+        token, expires_at = _issue_admin_session(cfg)
+        return safe_json({"status": "updated", "token": token, "expires_at": expires_at, **_admin_security_status(cfg)})
+    return safe_json({"status": "updated", **_admin_security_status(cfg)})
+
+
 @app.get("/api/setup/status")
 async def api_setup_status():
     cfg = _current_loaded_config()
-    return safe_json(_build_stack_payload(cfg))
+    return safe_json({**_build_stack_payload(cfg), "security": _admin_security_status(cfg)})
 
 
 @app.post("/api/setup/stack")
-async def api_setup_stack_update(payload: dict = Body(...)):
+async def api_setup_stack_update(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
     cfg = dict(_current_loaded_config())
     setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
     stack_cfg = setup_cfg.get("stack") if isinstance(setup_cfg.get("stack"), dict) else {}
@@ -10198,9 +10256,10 @@ async def api_setup_stack_update(payload: dict = Body(...)):
             next_stack[key] = str(payload.get(key) or "").strip()
     next_stack["compose_profiles"] = normalize_stack_config({"setup": {"stack": next_stack}}).get("compose_profiles", [])
     setup_cfg["stack"] = next_stack
+    setup_cfg["restart_required"] = True
     cfg["setup"] = setup_cfg
     _persist_config_payload(cfg)
-    return safe_json(_build_stack_payload(cfg))
+    return safe_json({**_build_stack_payload(cfg), "security": _admin_security_status(cfg, request=request)})
 
 
 @app.get("/api/setup/command")
@@ -10212,12 +10271,21 @@ async def api_setup_command():
 
 
 @app.post("/api/setup/apply-stack")
-async def api_setup_apply_stack():
+async def api_setup_apply_stack(request: Request):
+    _require_admin_session(request)
     cfg = _current_loaded_config()
     stack = normalize_stack_config(cfg)
     env_path = _default_env_path(cfg)
     written = write_managed_env_block(env_path, managed_env_values(cfg, stack))
     summary = build_stack_apply_summary(cfg, stack)
+    updated_cfg = dict(cfg)
+    setup_cfg = updated_cfg.get("setup") if isinstance(updated_cfg.get("setup"), dict) else {}
+    setup_cfg["last_applied_at"] = datetime.now(timezone.utc).isoformat()
+    setup_cfg["last_applied_command"] = str(summary["compose_command"] or "")
+    setup_cfg["last_applied_env_path"] = str(written)
+    setup_cfg["restart_required"] = True
+    updated_cfg["setup"] = setup_cfg
+    _persist_config_payload(updated_cfg)
     return safe_json(
         {
             "status": "written",
@@ -10237,7 +10305,8 @@ async def api_services_health():
 
 
 @app.post("/api/services/autoconfigure")
-async def api_services_autoconfigure():
+async def api_services_autoconfigure(request: Request):
+    _require_admin_session(request)
     cfg = _current_loaded_config()
     return safe_json({"status": "completed", "services": auto_configure_services(cfg)})
 
@@ -10456,6 +10525,93 @@ def _build_stack_payload(config: dict | None = None) -> dict[str, Any]:
 def _service_health_summary(config: dict | None = None) -> dict[str, Any]:
     cfg = config if isinstance(config, dict) else _current_loaded_config()
     return build_connections_status(cfg)
+
+
+def _security_config(config: dict | None = None) -> dict[str, Any]:
+    cfg = config if isinstance(config, dict) else _current_loaded_config()
+    security = cfg.get("security") if isinstance(cfg.get("security"), dict) else {}
+    return {
+        "admin_pin_enabled": bool(security.get("admin_pin_enabled")),
+        "admin_pin_hash": str(security.get("admin_pin_hash") or "").strip(),
+        "admin_pin_session_minutes": int(security.get("admin_pin_session_minutes") or 30),
+    }
+
+
+def _hash_admin_pin(pin: str) -> str:
+    pin_value = str(pin or "").strip()
+    if not pin_value:
+        raise ValueError("pin is required")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pin_value.encode("utf-8"), salt, _ADMIN_PIN_ITERATIONS)
+    return f"pbkdf2_sha256${_ADMIN_PIN_ITERATIONS}${base64.b64encode(salt).decode('ascii')}${base64.b64encode(digest).decode('ascii')}"
+
+
+def _verify_admin_pin(pin: str, stored_hash: str) -> bool:
+    raw = str(stored_hash or "").strip()
+    pin_value = str(pin or "").strip()
+    if not raw or not pin_value:
+        return False
+    try:
+        algorithm, iterations_raw, salt_b64, digest_b64 = raw.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        iterations = int(iterations_raw)
+        salt = base64.b64decode(salt_b64.encode("ascii"))
+        expected = base64.b64decode(digest_b64.encode("ascii"))
+    except Exception:
+        return False
+    candidate = hashlib.pbkdf2_hmac("sha256", pin_value.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(candidate, expected)
+
+
+def _cleanup_admin_sessions() -> None:
+    now = datetime.now(timezone.utc)
+    with _ADMIN_PIN_SESSIONS_LOCK:
+        expired = [token for token, expires_at in _ADMIN_PIN_SESSIONS.items() if expires_at <= now]
+        for token in expired:
+            _ADMIN_PIN_SESSIONS.pop(token, None)
+
+
+def _issue_admin_session(config: dict | None = None) -> tuple[str, str]:
+    security = _security_config(config)
+    minutes = max(1, min(1440, int(security.get("admin_pin_session_minutes") or 30)))
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    token = secrets.token_urlsafe(32)
+    with _ADMIN_PIN_SESSIONS_LOCK:
+        _ADMIN_PIN_SESSIONS[token] = expires_at
+    return token, expires_at.isoformat()
+
+
+def _has_valid_admin_session(token: str | None) -> bool:
+    candidate = str(token or "").strip()
+    if not candidate:
+        return False
+    _cleanup_admin_sessions()
+    with _ADMIN_PIN_SESSIONS_LOCK:
+        expires_at = _ADMIN_PIN_SESSIONS.get(candidate)
+    return bool(expires_at and expires_at > datetime.now(timezone.utc))
+
+
+def _admin_token_from_request(request: Request) -> str:
+    return str(request.headers.get(ADMIN_PIN_HEADER) or "").strip()
+
+
+def _require_admin_session(request: Request, config: dict | None = None) -> None:
+    security = _security_config(config)
+    if not security.get("admin_pin_enabled"):
+        return
+    if _has_valid_admin_session(_admin_token_from_request(request)):
+        return
+    raise HTTPException(status_code=403, detail={"error": "admin_pin_required", "message": "Admin PIN required for this action."})
+
+
+def _admin_security_status(config: dict | None = None, *, request: Request | None = None) -> dict[str, Any]:
+    security = _security_config(config)
+    return {
+        "admin_pin_enabled": bool(security.get("admin_pin_enabled")),
+        "admin_pin_session_minutes": int(security.get("admin_pin_session_minutes") or 30),
+        "session_valid": _has_valid_admin_session(_admin_token_from_request(request)) if request is not None else False,
+    }
 
 
 def _normalized_music_preferences(config: dict | None) -> dict:

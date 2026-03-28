@@ -1188,6 +1188,24 @@
                 <div class="notice">Retreivr performs metadata-first Movies &amp; TV search through TMDb, then hands add actions off to Radarr or Sonarr.</div>
               </div>
               <div class="group">
+                <div class="group-title">ARR Media Paths</div>
+                <div class="grid two">
+                  <label class="field full">
+                    <span>Movies root</span>
+                    <input id="cfg-arr-movies-root" type="text" placeholder="./media/movies">
+                  </label>
+                  <label class="field full">
+                    <span>TV root</span>
+                    <input id="cfg-arr-tv-root" type="text" placeholder="./media/tv">
+                  </label>
+                  <label class="field full">
+                    <span>Books root</span>
+                    <input id="cfg-arr-books-root" type="text" placeholder="./media/books">
+                  </label>
+                </div>
+                <div class="notice">These paths align Retreivr Setup with ARR auto-configuration targets so Radarr, Sonarr, and Readarr receive the same destination roots.</div>
+              </div>
+              <div class="group">
                 <div class="group-title">Radarr</div>
                 <div class="grid two">
                   <label class="field full">
@@ -1323,6 +1341,40 @@
                   </label>
                 </div>
                 <div class="notice">Current compose enforces qBittorrent through VPN. Prowlarr and Retreivr routing are policy settings surfaced in Retreivr health/setup so the routing plan stays explicit.</div>
+              </div>
+            </section>
+
+            <section id="settings-security" class="settings-section" data-settings-section="security" data-settings-level="advanced">
+              <div class="settings-section-heading">Security</div>
+              <div class="group">
+                <div class="group-title">Admin PIN</div>
+                <div class="notice">Optional local-only protection for settings, stack changes, env writes, and auto-configuration. Recommended when Retreivr is exposed on a shared device or local network.</div>
+                <div class="grid two">
+                  <label class="field inline short">
+                    <span>Enable admin PIN</span>
+                    <input id="cfg-security-admin-pin-enabled" type="checkbox">
+                  </label>
+                  <label class="field short">
+                    <span>Admin session minutes</span>
+                    <input id="cfg-security-admin-pin-session-minutes" type="number" min="1" max="1440" step="1" placeholder="30">
+                  </label>
+                  <label class="field full">
+                    <span>Current PIN</span>
+                    <input id="cfg-security-admin-pin-current" type="password" placeholder="Required to change or disable an existing PIN">
+                  </label>
+                  <label class="field full">
+                    <span>New PIN</span>
+                    <input id="cfg-security-admin-pin-new" type="password" placeholder="4 digits or longer recommended">
+                  </label>
+                  <label class="field full">
+                    <span>Confirm new PIN</span>
+                    <input id="cfg-security-admin-pin-confirm" type="password" placeholder="Repeat new PIN">
+                  </label>
+                </div>
+                <div class="row">
+                  <button id="security-admin-pin-save" class="button ghost small" type="button">Save Admin PIN Settings</button>
+                  <span id="security-admin-pin-status" class="meta">Admin PIN is disabled.</span>
+                </div>
               </div>
             </section>
 
@@ -1907,6 +1959,24 @@
           </div>
           <div id="arr-details-overview" class="arr-details-overview"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="admin-pin-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="admin-pin-title">
+    <div class="modal-card admin-pin-card">
+      <div class="row space-between">
+        <div id="admin-pin-title" class="panel-title">Admin PIN Required</div>
+        <button id="admin-pin-close" class="button ghost small" type="button">Close</button>
+      </div>
+      <div class="meta">This action changes Retreivr settings or managed stack state. Enter the local admin PIN to continue.</div>
+      <label class="field">
+        <span>Admin PIN</span>
+        <input id="admin-pin-input" type="password" placeholder="Enter admin PIN">
+      </label>
+      <div id="admin-pin-message" class="notice" role="status"></div>
+      <div class="row">
+        <button id="admin-pin-submit" class="button primary" type="button">Unlock</button>
       </div>
     </div>
   </div>

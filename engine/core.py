@@ -936,6 +936,18 @@ def validate_config(config):
             if completed_modules is not None:
                 if not isinstance(completed_modules, list) or not all(isinstance(entry, str) for entry in completed_modules):
                     errors.append("setup.completed_modules must be a list of strings")
+            last_applied_at = setup_cfg.get("last_applied_at")
+            if last_applied_at is not None and not isinstance(last_applied_at, str):
+                errors.append("setup.last_applied_at must be a string")
+            last_applied_command = setup_cfg.get("last_applied_command")
+            if last_applied_command is not None and not isinstance(last_applied_command, str):
+                errors.append("setup.last_applied_command must be a string")
+            last_applied_env_path = setup_cfg.get("last_applied_env_path")
+            if last_applied_env_path is not None and not isinstance(last_applied_env_path, str):
+                errors.append("setup.last_applied_env_path must be a string")
+            restart_required = setup_cfg.get("restart_required")
+            if restart_required is not None and not isinstance(restart_required, bool):
+                errors.append("setup.restart_required must be true/false")
             stack_cfg = setup_cfg.get("stack")
             if stack_cfg is not None:
                 if not isinstance(stack_cfg, dict):
@@ -963,6 +975,22 @@ def validate_config(config):
                     if compose_profiles is not None:
                         if not isinstance(compose_profiles, list) or not all(isinstance(entry, str) for entry in compose_profiles):
                             errors.append("setup.stack.compose_profiles must be a list of strings")
+
+    security_cfg = config.get("security")
+    if security_cfg is not None:
+        if not isinstance(security_cfg, dict):
+            errors.append("security must be an object")
+        else:
+            enabled = security_cfg.get("admin_pin_enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                errors.append("security.admin_pin_enabled must be true/false")
+            pin_hash = security_cfg.get("admin_pin_hash")
+            if pin_hash is not None and not isinstance(pin_hash, str):
+                errors.append("security.admin_pin_hash must be a string")
+            session_minutes = security_cfg.get("admin_pin_session_minutes")
+            if session_minutes is not None:
+                if not isinstance(session_minutes, int) or session_minutes < 1 or session_minutes > 1440:
+                    errors.append("security.admin_pin_session_minutes must be an integer between 1 and 1440")
 
     custom_adapter_file = config.get("custom_search_adapters_file")
     if custom_adapter_file is not None:
