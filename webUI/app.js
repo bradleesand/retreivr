@@ -432,8 +432,20 @@ function syncTopbarSubbarVisibility() {
 function clearTopbarHosts() {
   const searchHost = $("#topbar-search-host");
   const subbarHost = $("#topbar-subbar-host");
-  if (searchHost) searchHost.textContent = "";
-  if (subbarHost) {
+  const parkingHost = $("#topbar-node-parking");
+  if (searchHost && parkingHost) {
+    while (searchHost.firstChild) {
+      parkingHost.appendChild(searchHost.firstChild);
+    }
+  } else if (searchHost) {
+    searchHost.textContent = "";
+  }
+  if (subbarHost && parkingHost) {
+    while (subbarHost.firstChild) {
+      parkingHost.appendChild(subbarHost.firstChild);
+    }
+    subbarHost.classList.add("hidden");
+  } else if (subbarHost) {
     subbarHost.textContent = "";
     subbarHost.classList.add("hidden");
   }
