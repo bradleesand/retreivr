@@ -869,6 +869,14 @@ body.home-page .home-results {
   cursor: none;
 }
 
+.retreivr-hunt-bird.flap-fast .retreivr-hunt-bird-wing {
+  animation-duration: 120ms;
+}
+
+.retreivr-hunt-bird.flap-slow .retreivr-hunt-bird-wing {
+  animation-duration: 170ms;
+}
+
 .retreivr-hunt-bird-body,
 .retreivr-hunt-bird-wing {
   position: absolute;
@@ -892,12 +900,12 @@ body.home-page .home-results {
 
 .retreivr-hunt-bird-wing.left {
   left: 6px;
-  transform: rotate(-28deg);
+  animation: retreivr-hunt-wing-flap-left 140ms ease-in-out infinite alternate;
 }
 
 .retreivr-hunt-bird-wing.right {
   right: 6px;
-  transform: scaleX(-1) rotate(-28deg);
+  animation: retreivr-hunt-wing-flap-right 140ms ease-in-out infinite alternate;
 }
 
 .retreivr-hunt-bird.is-hit {
@@ -907,15 +915,13 @@ body.home-page .home-results {
 .retreivr-hunt-reticle,
 .retreivr-hunt-flash {
   position: absolute;
-  width: 46px;
-  height: 46px;
-  margin-left: -23px;
-  margin-top: -23px;
+  width: 86px;
+  height: 86px;
+  margin-left: -43px;
+  margin-top: -43px;
   pointer-events: none;
 }
 
-.retreivr-hunt-reticle::before,
-.retreivr-hunt-reticle::after,
 .retreivr-hunt-flash::before,
 .retreivr-hunt-flash::after {
   content: "";
@@ -924,17 +930,45 @@ body.home-page .home-results {
   border-radius: 999px;
 }
 
-.retreivr-hunt-reticle::before {
-  border: 2px solid rgba(245, 245, 245, 0.86);
+.retreivr-hunt-reticle {
+  filter: drop-shadow(0 0 10px rgba(255, 245, 214, 0.2));
 }
 
-.retreivr-hunt-reticle::after {
-  inset: 50%;
-  margin: -1px 0 0 -22px;
-  width: 44px;
-  height: 2px;
-  background: rgba(245, 245, 245, 0.84);
-  box-shadow: 21px -21px 0 -20px rgba(245, 245, 245, 0.84), 21px 21px 0 -20px rgba(245, 245, 245, 0.84), -21px -21px 0 -20px rgba(245, 245, 245, 0.84), -21px 21px 0 -20px rgba(245, 245, 245, 0.84);
+.retreivr-hunt-reticle-svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.retreivr-hunt-reticle-ring,
+.retreivr-hunt-reticle-post,
+.retreivr-hunt-reticle-axis,
+.retreivr-hunt-reticle-tick,
+.retreivr-hunt-reticle-core {
+  fill: rgba(252, 247, 233, 0.97);
+  stroke: rgba(252, 247, 233, 0.97);
+}
+
+.retreivr-hunt-reticle-ring {
+  fill: none;
+  stroke-width: 5.5;
+}
+
+.retreivr-hunt-reticle-post,
+.retreivr-hunt-reticle-tick,
+.retreivr-hunt-reticle-core {
+  stroke: none;
+}
+
+.retreivr-hunt-reticle-gap {
+  fill: rgba(240, 158, 82, 0.95);
+  stroke: none;
+}
+
+.retreivr-hunt-reticle-axis {
+  fill: none;
+  stroke-width: 3.2;
+  stroke-linecap: round;
 }
 
 .retreivr-hunt-flash {
@@ -1003,6 +1037,16 @@ body.home-page .home-results {
 @keyframes retreivr-hunt-flash {
   0% { opacity: 1; transform: scale(0.8); }
   100% { opacity: 0; transform: scale(1.18); }
+}
+
+@keyframes retreivr-hunt-wing-flap-left {
+  0% { transform: rotate(-38deg) translateY(2px) scaleY(0.92); }
+  100% { transform: rotate(-12deg) translateY(-2px) scaleY(1.08); }
+}
+
+@keyframes retreivr-hunt-wing-flap-right {
+  0% { transform: scaleX(-1) rotate(-38deg) translateY(2px) scaleY(0.92); }
+  100% { transform: scaleX(-1) rotate(-12deg) translateY(-2px) scaleY(1.08); }
 }
 
 @media (max-width: 900px) {
