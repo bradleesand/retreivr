@@ -526,13 +526,21 @@ function mountTopbarForPage(page) {
       syncTopbarSubbarVisibility();
       return;
     }
-    const searchRow = $("#movies-tv-panel .movies-tv-search-row");
-    const filtersPanel = $("#movies-tv-filters-panel");
+    const searchRow = getMoviesTvSearchRowEl();
+    const filtersPanel = getMoviesTvFiltersPanelEl();
     if (searchRow) searchHost.appendChild(searchRow);
     if (filtersPanel) subbarHost.appendChild(filtersPanel);
     syncTopbarSubbarVisibility();
     return;
   }
+}
+
+function getMoviesTvSearchRowEl() {
+  return document.querySelector(".movies-tv-search-row");
+}
+
+function getMoviesTvFiltersPanelEl() {
+  return $("#movies-tv-filters-panel");
 }
 
 function setNotice(el, message, isError = false) {
@@ -551,7 +559,27 @@ function getMusicPageMessageEl() {
 }
 
 function setMusicPageNotice(message, isError = false) {
-  setNotice(getMusicPageMessageEl(), message, isError);
+  const el = getMusicPageMessageEl();
+  const region = $("#music-page-message-region");
+  const hasText = !!String(message || "").trim();
+  if (el) {
+    el.classList.toggle("music-error-notice", !!isError && hasText);
+  }
+  if (state.currentPage === "music" && state.musicSection === "browse" && !isError) {
+    setNotice(el, "", false);
+    if (region) {
+      region.classList.add("hidden");
+    }
+    return;
+  }
+  setNotice(el, message, isError);
+  if (region) {
+    region.classList.toggle("hidden", !hasText || !isError);
+  }
+}
+
+function getMusicToolbarSlot() {
+  return $("#music-toolbar-slot");
 }
 
 function focusMusicResults() {
@@ -1650,7 +1678,7 @@ function setMoviesTvSearchYear(year) {
 
 function applyMoviesTvWorkspaceState() {
   const configured = isTmdbConfigured();
-  const searchRow = $("#movies-tv-panel .movies-tv-search-row");
+  const searchRow = getMoviesTvSearchRowEl();
   const sectionToggle = $("#movies-tv-panel .movies-tv-section-toggle");
   const messageRegion = $("#movies-tv-message-region");
   const setupView = $("#movies-tv-setup-view");
@@ -1658,7 +1686,7 @@ function applyMoviesTvWorkspaceState() {
   const discoveryView = $("#movies-tv-discovery-view");
   const genresView = $("#movies-tv-genres-view");
   const resultsView = $("#movies-tv-results-view");
-  const filtersPanel = $("#movies-tv-filters-panel");
+  const filtersPanel = getMoviesTvFiltersPanelEl();
   const section = String(state.moviesTvSection || "search").trim() || "search";
   const hasResults = Array.isArray(state.arrResults) && state.arrResults.length > 0;
 
@@ -1785,11 +1813,15 @@ function setMusicSection(section) {
   }
   const messageRegion = $("#music-page-message-region");
   const reviewRegion = $("#music-page-review-region");
+  const toolbarSlot = getMusicToolbarSlot();
   if (messageRegion) {
     messageRegion.classList.toggle("hidden", normalized !== "browse");
   }
   if (reviewRegion) {
     reviewRegion.classList.toggle("hidden", normalized !== "browse");
+  }
+  if (toolbarSlot && normalized !== "browse") {
+    toolbarSlot.innerHTML = "";
   }
   if (normalized === "browse") {
     renderMusicLanding();
@@ -2337,7 +2369,7 @@ async function saveSetupWizardConfig() {
       }),
     });
   }
-  await loadSetupStatus();
+  await refreshSetupStatus();
 }
 
 function buildSetupWizardSummaryRows() {
@@ -2422,14 +2454,14 @@ function renderSetupWizard() {
   } else if (step.id === "arr-managed-features") {
     body = `
       <div class="setup-wizard-note">Choose what you want Retreivr to set up. You only need to choose features here, not internal app addresses or app-to-app API keys.</div>
-      <div class="setup-wizard-fields two">
-        <label class="field checkbox"><input data-setup-toggle="managed_movies" type="checkbox" ${draft.managed_movies ? "checked" : ""}><span>Movies</span></label>
-        <label class="field checkbox"><input data-setup-toggle="managed_tv" type="checkbox" ${draft.managed_tv ? "checked" : ""}><span>TV</span></label>
-        <label class="field checkbox"><input data-setup-toggle="managed_books" type="checkbox" ${draft.managed_books ? "checked" : ""}><span>Books</span></label>
-        <label class="field checkbox"><input data-setup-toggle="managed_subtitles" type="checkbox" ${draft.managed_subtitles ? "checked" : ""}><span>Subtitles</span></label>
-        <label class="field checkbox"><input data-setup-toggle="managed_downloader" type="checkbox" ${draft.managed_downloader ? "checked" : ""}><span>Downloader</span></label>
-        <label class="field checkbox"><input data-setup-toggle="managed_vpn" type="checkbox" ${draft.managed_vpn ? "checked" : ""}><span>VPN</span></label>
-        <label class="field checkbox"><input data-setup-toggle="managed_jellyfin" type="checkbox" ${draft.managed_jellyfin ? "checked" : ""}><span>Jellyfin</span></label>
+      <div class="setup-wizard-chip-grid">
+        <button type="button" class="button ${draft.managed_movies ? "setup-wizard-choice active" : "ghost"}" data-setup-toggle-choice="managed_movies">Movies</button>
+        <button type="button" class="button ${draft.managed_tv ? "setup-wizard-choice active" : "ghost"}" data-setup-toggle-choice="managed_tv">TV</button>
+        <button type="button" class="button ${draft.managed_books ? "setup-wizard-choice active" : "ghost"}" data-setup-toggle-choice="managed_books">Books</button>
+        <button type="button" class="button ${draft.managed_subtitles ? "setup-wizard-choice active" : "ghost"}" data-setup-toggle-choice="managed_subtitles">Subtitles</button>
+        <button type="button" class="button ${draft.managed_downloader ? "setup-wizard-choice active" : "ghost"}" data-setup-toggle-choice="managed_downloader">Downloader</button>
+        <button type="button" class="button ${draft.managed_vpn ? "setup-wizard-choice active" : "ghost"}" data-setup-toggle-choice="managed_vpn">VPN</button>
+        <button type="button" class="button ${draft.managed_jellyfin ? "setup-wizard-choice active" : "ghost"}" data-setup-toggle-choice="managed_jellyfin">Jellyfin</button>
       </div>
       <div class="setup-wizard-step-list">
         <div>Movies and TV turn on the matching automation apps.</div>
@@ -8244,15 +8276,19 @@ function getSortedMusicAlbums(albums = []) {
 
 function renderMusicResultsControls({ artists = [], albums = [], tracks = [], backButton = null } = {}) {
   const container = $("#music-results-container");
-  if (!container) return;
+  const toolbarSlot = getMusicToolbarSlot();
+  if (!container || !toolbarSlot) return;
   container.style.setProperty("--music-card-min", `${state.musicCardSize || UI_DEFAULTS.music_card_size}px`);
-  container.querySelector(".music-results-toolbar")?.remove();
+  toolbarSlot.querySelector(".music-results-toolbar")?.remove();
   const hasArtists = Array.isArray(artists) && artists.length > 0;
   const hasAlbums = Array.isArray(albums) && albums.length > 0;
   const hasTracks = Array.isArray(tracks) && tracks.length > 0;
   const showSize = hasArtists || hasAlbums;
   const showSort = hasArtists || hasAlbums;
-  if (!showSize && !showSort) return;
+  if (!showSize && !showSort && !backButton) {
+    toolbarSlot.innerHTML = "";
+    return;
+  }
 
   const toolbar = document.createElement("div");
   toolbar.className = "music-results-toolbar";
@@ -8301,7 +8337,7 @@ function renderMusicResultsControls({ artists = [], albums = [], tracks = [], ba
     actions.appendChild(sortLabel);
   }
   toolbar.appendChild(actions);
-  container.prepend(toolbar);
+  toolbarSlot.appendChild(toolbar);
 
   const sizeInput = $("#music-card-size");
   if (sizeInput) {
@@ -8753,8 +8789,8 @@ function isTmdbConfigured() {
 
 function renderMoviesTvSetupGate() {
   const landing = $("#movies-tv-setup-landing");
-  const searchRow = $("#movies-tv-panel .movies-tv-search-row");
-  const filtersPanel = $("#movies-tv-filters-panel");
+  const searchRow = getMoviesTvSearchRowEl();
+  const filtersPanel = getMoviesTvFiltersPanelEl();
   const sectionToggle = $("#movies-tv-panel .movies-tv-section-toggle");
   const messageRegion = $("#movies-tv-message-region");
   const setupView = $("#movies-tv-setup-view");
@@ -9277,6 +9313,29 @@ async function openArrPersonTitles(personId) {
   }
 }
 
+function getArrItemById(tmdbId) {
+  const key = String(tmdbId || "").trim();
+  if (!key) return null;
+  return state.arrResults.find((entry) => String(entry.tmdb_id) === key)
+    || Object.values(state.arrEditorial || {}).flatMap((bucket) => Array.isArray(bucket?.shelves) ? bucket.shelves : [])
+      .flatMap((shelf) => Array.isArray(shelf?.results) ? shelf.results : [])
+      .find((entry) => String(entry.tmdb_id) === key)
+    || null;
+}
+
+function updateArrItemById(nextItem) {
+  const key = String(nextItem?.tmdb_id || "").trim();
+  if (!key) return;
+  state.arrResults = state.arrResults.map((item) => String(item.tmdb_id) === key ? nextItem : item);
+  Object.values(state.arrEditorial || {}).forEach((bucket) => {
+    if (!Array.isArray(bucket?.shelves)) return;
+    bucket.shelves.forEach((shelf) => {
+      if (!Array.isArray(shelf?.results)) return;
+      shelf.results = shelf.results.map((item) => String(item.tmdb_id) === key ? nextItem : item);
+    });
+  });
+}
+
 function applyArrCardSize(size) {
   const numeric = Number.parseInt(size, 10);
   const nextSize = Number.isFinite(numeric)
@@ -9422,6 +9481,7 @@ function renderArrCardGridMarkup(items) {
             class="button ghost small"
             type="button"
             data-action="arr-trailer"
+            data-tmdb-id="${tmdbId}"
             data-embed-url="${escapeHtml(String(trailer.embed_url || ""))}"
             data-title="${escapeHtml(String(trailer.title || item.title || "Trailer"))}"
           >Trailer</button>
@@ -9538,8 +9598,13 @@ function wireArrCardInteractions(host) {
   host.addEventListener("click", async (event) => {
     const trailerButton = event.target.closest('button[data-action="arr-trailer"]');
     if (trailerButton) {
-      const embedUrl = String(trailerButton.dataset.embedUrl || "").trim();
+      let embedUrl = String(trailerButton.dataset.embedUrl || "").trim();
       const title = String(trailerButton.dataset.title || "").trim() || "Trailer";
+      const tmdbId = String(trailerButton.dataset.tmdbId || "").trim();
+      if (!embedUrl && tmdbId) {
+        const item = await ensureArrTrailerById(tmdbId);
+        embedUrl = String(item?.trailer?.embed_url || "").trim();
+      }
       if (embedUrl) {
         openHomePreviewModal({
           mediaType: "video",
@@ -9554,10 +9619,7 @@ function wireArrCardInteractions(host) {
     if (toggleButton) {
       const tmdbId = String(toggleButton.dataset.tmdbId || "").trim();
       if (!tmdbId) return;
-      const item = state.arrResults.find((entry) => String(entry.tmdb_id) === tmdbId)
-        || Object.values(state.arrEditorial || {}).flatMap((bucket) => Array.isArray(bucket?.shelves) ? bucket.shelves : [])
-          .flatMap((shelf) => Array.isArray(shelf?.results) ? shelf.results : [])
-          .find((entry) => String(entry.tmdb_id) === tmdbId);
+      const item = getArrItemById(tmdbId);
       if (item) {
         openArrDetailsModal(item);
       }
@@ -9567,10 +9629,7 @@ function wireArrCardInteractions(host) {
     if (artwork) {
       const tmdbId = String(artwork.dataset.tmdbId || "").trim();
       if (!tmdbId) return;
-      const item = state.arrResults.find((entry) => String(entry.tmdb_id) === tmdbId)
-        || Object.values(state.arrEditorial || {}).flatMap((bucket) => Array.isArray(bucket?.shelves) ? bucket.shelves : [])
-          .flatMap((shelf) => Array.isArray(shelf?.results) ? shelf.results : [])
-          .find((entry) => String(entry.tmdb_id) === tmdbId);
+      const item = getArrItemById(tmdbId);
       if (item) {
         openArrDetailsModal(item);
       }
@@ -9672,12 +9731,12 @@ async function ensureArrTrailer(item) {
 
 async function ensureArrTrailerById(tmdbId) {
   const key = String(tmdbId || "").trim();
-  const index = state.arrResults.findIndex((item) => String(item.tmdb_id) === key);
-  if (index < 0) {
+  const item = getArrItemById(key);
+  if (!item) {
     return null;
   }
-  const nextItem = await ensureArrTrailer(state.arrResults[index]);
-  state.arrResults = state.arrResults.map((item, itemIndex) => itemIndex === index ? nextItem : item);
+  const nextItem = await ensureArrTrailer(item);
+  updateArrItemById(nextItem);
   return nextItem;
 }
 
@@ -9912,6 +9971,12 @@ function setHomeResultsStatus(text) {
 function setHomeResultsDetail(text, isError = false) {
   const detailEl = $("#home-results-detail");
   if (!detailEl) {
+    return;
+  }
+  if (state.currentPage === "video" && !isError) {
+    detailEl.textContent = "";
+    detailEl.classList.remove("home-results-error");
+    detailEl.classList.add("hidden");
     return;
   }
   if (!text) {
@@ -10843,6 +10908,10 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
 }
 
 function renderMusicLanding() {
+  const toolbarSlot = getMusicToolbarSlot();
+  if (toolbarSlot) {
+    toolbarSlot.innerHTML = "";
+  }
   const container = document.getElementById("music-results-container");
   if (!container) {
     return;
@@ -11550,6 +11619,7 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
     ? artists.filter((artist) => !hiddenArtistKeys.has(getHiddenMusicArtistKey(artist)))
     : artists;
   const container = document.getElementById("music-results-container");
+  const toolbarSlot = getMusicToolbarSlot();
   if (!container) {
     return;
   }
@@ -11563,6 +11633,7 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
   clearHomeAlbumCandidates();
 
   if (!visibleArtists.length && !albums.length && !tracks.length) {
+    if (toolbarSlot) toolbarSlot.innerHTML = "";
     const empty = document.createElement("div");
     empty.className = "home-results-empty";
     empty.textContent = "No music metadata matches found.";
@@ -11571,10 +11642,7 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
     return;
   }
 
-  setMusicPageNotice(
-    query ? `Showing MusicBrainz metadata for “${query}”.` : "Showing MusicBrainz metadata.",
-    false
-  );
+  setMusicPageNotice("", false);
   if (state.homeMusicViewStack.length) {
     const backButton = document.createElement("button");
     backButton.className = "button ghost small";
@@ -17809,6 +17877,16 @@ function bindEvents() {
         }
         state.setupWizard.feedback = null;
         advanceSetupWizardStep(1);
+        renderSetupWizard();
+        return;
+      }
+      const toggleChoiceButton = event.target.closest("[data-setup-toggle-choice]");
+      if (toggleChoiceButton) {
+        const key = String(toggleChoiceButton.dataset.setupToggleChoice || "");
+        if (!key) return;
+        const current = !!state.setupWizard?.draft?.[key];
+        updateSetupWizardDraftField(key, !current);
+        syncSetupWizardToLegacyFields();
         renderSetupWizard();
         return;
       }

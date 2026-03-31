@@ -1461,9 +1461,21 @@ def get_tmdb_cast(config: dict | None, kind: str, tmdb_id: int | str, *, limit: 
                 "known_for_department": _trimmed(person.get("known_for_department")),
                 "profile_url": _poster_url(person.get("profile_path")),
                 "order": int(person.get("order") or 9999),
+                "popularity": float(person.get("popularity") or 0.0),
             }
         )
-    people.sort(key=lambda item: (item.get("order", 9999), item.get("name", "")))
+
+    def _cast_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        order = int(item.get("order", 9999) or 9999)
+        department = str(item.get("known_for_department") or "").strip().lower()
+        is_acting = 0 if department in {"acting", "actors"} else 1
+        has_character = 0 if str(item.get("character") or "").strip() else 1
+        has_profile = 0 if str(item.get("profile_url") or "").strip() else 1
+        popularity = float(item.get("popularity") or 0.0)
+        name = str(item.get("name") or "")
+        return (order, is_acting, has_character, has_profile, -popularity, name)
+
+    people.sort(key=_cast_sort_key)
     return {"cast": people[: max(1, int(limit))]}
 
 

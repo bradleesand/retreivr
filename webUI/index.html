@@ -276,13 +276,16 @@
     </section>
     <section class="panel full page-full page-hidden" id="music-panel" data-page="music">
       <div class="music-page-shell">
-          <div class="music-section-toggle" aria-label="Music sections">
-            <button class="button ghost small music-app-nav active" data-music-section="browse" type="button">Browse</button>
-            <button class="button ghost small music-app-nav" data-music-section="library" type="button">Library</button>
-            <button class="button ghost small music-app-nav" data-music-section="favorites" type="button">Favorites</button>
-            <button class="button ghost small music-app-nav" data-music-section="playlists" type="button">Playlists</button>
-            <button class="button ghost small music-app-nav" data-music-section="player" type="button">Player</button>
-            <button class="button ghost small music-app-nav" data-music-section="radio" type="button">Radio</button>
+          <div class="music-top-row">
+            <div class="music-section-toggle" aria-label="Music sections">
+              <button class="button ghost small music-app-nav active" data-music-section="browse" type="button">Browse</button>
+              <button class="button ghost small music-app-nav" data-music-section="library" type="button">Library</button>
+              <button class="button ghost small music-app-nav" data-music-section="favorites" type="button">Favorites</button>
+              <button class="button ghost small music-app-nav" data-music-section="playlists" type="button">Playlists</button>
+              <button class="button ghost small music-app-nav" data-music-section="player" type="button">Player</button>
+              <button class="button ghost small music-app-nav" data-music-section="radio" type="button">Radio</button>
+            </div>
+            <div id="music-toolbar-slot" class="music-toolbar-slot"></div>
           </div>
           <div id="music-page-message-region">
             <div id="music-page-message" class="notice hidden" role="status"></div>
@@ -523,6 +526,10 @@
           </label>
           <button id="movies-tv-refresh-connections" class="button ghost small" type="button">Refresh ARR Status</button>
         </div>
+        <div class="movies-tv-connection-strip">
+          <div id="movies-tv-radarr-status" class="notice movies-tv-connection-chip">Radarr: Not configured</div>
+          <div id="movies-tv-sonarr-status" class="notice movies-tv-connection-chip">Sonarr: Not configured</div>
+        </div>
         <div class="movies-tv-search-row">
           <span class="searchbar-leading-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
@@ -548,7 +555,7 @@
           </div>
         </div>
         <div id="movies-tv-message-region">
-          <div id="movies-tv-message" class="notice" role="status">Enter a title to search TMDb. Search works without ARR, but add actions require a verified Radarr or Sonarr connection.</div>
+          <div id="movies-tv-message" class="notice hidden" role="status"></div>
         </div>
         <div id="movies-tv-workspace" class="movies-tv-workspace">
           <section id="movies-tv-setup-view" class="movies-tv-view hidden">
@@ -587,12 +594,6 @@
             </div>
           </section>
           <section id="movies-tv-discovery-view" class="movies-tv-view hidden">
-            <div class="movies-tv-discovery-header">
-              <div class="movies-tv-connection-strip">
-                <div id="movies-tv-radarr-status" class="notice movies-tv-connection-chip">Radarr: Not configured</div>
-                <div id="movies-tv-sonarr-status" class="notice movies-tv-connection-chip">Sonarr: Not configured</div>
-              </div>
-            </div>
             <div id="movies-tv-editorial" class="movies-tv-editorial">
               <div id="movies-tv-editorial-shelves"></div>
             </div>
