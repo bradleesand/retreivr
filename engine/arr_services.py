@@ -3,6 +3,8 @@ from typing import Any
 from urllib.parse import quote
 import concurrent.futures
 from datetime import datetime
+import threading
+import time
 
 import requests
 
@@ -37,10 +39,177 @@ DEFAULT_TV_GENRE_NAMES = [
     "Reality",
     "Sci-Fi & Fantasy",
 ]
+MDBLIST_PUBLIC_BASE = "https://mdblist.com/lists"
+MDBLIST_PUBLIC_TIMEOUT = 10
+EDITORIAL_CACHE_DEFAULT_HOURS = 12
+_EDITORIAL_CACHE: dict[str, dict[str, Any]] = {}
+_EDITORIAL_CACHE_LOCK = threading.Lock()
+
+MDBLIST_PUBLIC_SHELVES: dict[str, list[dict[str, Any]]] = {
+    "movie": [
+        {
+            "id": "trending_now",
+            "title": "Trending Now",
+            "subtitle": "What is bubbling up right now across public list activity.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/trending-movies-list",
+            "default_visible": True,
+        },
+        {
+            "id": "new_releases",
+            "title": "New Releases",
+            "subtitle": "Fresh titles worth scanning before you search.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/latest-releases",
+            "default_visible": True,
+        },
+        {
+            "id": "highly_rated",
+            "title": "Highly Rated",
+            "subtitle": "Critically loved picks that still feel mainstream enough to browse.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/certified-fresh",
+            "default_visible": True,
+        },
+        {
+            "id": "hidden_gems",
+            "title": "Hidden Gems",
+            "subtitle": "Recent certified-fresh titles that may have slipped past you.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/latest-certified-fresh-releases",
+            "default_visible": True,
+        },
+        {
+            "id": "popular_on_streaming",
+            "title": "Popular on Streaming",
+            "subtitle": "Broadly popular watch-now titles from public popularity lists.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/mdblist-com-most-popular-movies",
+            "default_visible": False,
+        },
+        {
+            "id": "mindless_action",
+            "title": "Mindless Action",
+            "subtitle": "Explosive, easy-to-queue action picks.",
+            "provider": "tmdb",
+            "fallback": "popular",
+            "genre_name": "Action",
+            "default_visible": False,
+        },
+        {
+            "id": "family_night",
+            "title": "Family Night",
+            "subtitle": "Easy family-friendly picks for a quick decision.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/top-watched-movies-of-the-week-for-kids",
+            "default_visible": False,
+        },
+        {
+            "id": "award_winners",
+            "title": "Award Winners",
+            "subtitle": "Prestige picks and obvious conversation starters.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/certified-fresh",
+            "default_visible": False,
+        },
+    ],
+    "tv": [
+        {
+            "id": "trending_now",
+            "title": "Trending Now",
+            "subtitle": "The shows everyone seems to be talking about right now.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/most-popular-shows-top-50",
+            "default_visible": True,
+        },
+        {
+            "id": "new_releases",
+            "title": "New Releases",
+            "subtitle": "Recently launched series and fresh returning shows.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/best-new-shows",
+            "default_visible": True,
+        },
+        {
+            "id": "highly_rated",
+            "title": "Highly Rated",
+            "subtitle": "Strongly reviewed series surfaced from public editorial lists.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/certified-fresh",
+            "default_visible": True,
+        },
+        {
+            "id": "hidden_gems",
+            "title": "Hidden Gems",
+            "subtitle": "Smarter TV picks beyond the obvious front-page hits.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/latest-certified-fresh-releases",
+            "default_visible": True,
+        },
+        {
+            "id": "popular_on_streaming",
+            "title": "Popular on Streaming",
+            "subtitle": "Popular TV picks that are easy to start tonight.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/most-popular-shows-top-50",
+            "default_visible": False,
+        },
+        {
+            "id": "true_crime_documentary",
+            "title": "True Crime / Documentary",
+            "subtitle": "Factual and crime-leaning TV picks.",
+            "provider": "tmdb",
+            "fallback": "popular",
+            "genre_name": "Documentary",
+            "default_visible": False,
+        },
+        {
+            "id": "family_night",
+            "title": "Family Night",
+            "subtitle": "Accessible shows to put on without overthinking it.",
+            "provider": "tmdb",
+            "fallback": "popular",
+            "genre_name": "Family",
+            "default_visible": False,
+        },
+        {
+            "id": "award_winners",
+            "title": "Award Winners",
+            "subtitle": "Prestige TV picks with strong critical support.",
+            "provider": "mdblist",
+            "list_path": "linaspurinis/certified-fresh",
+            "default_visible": False,
+        },
+    ],
+}
 
 
 class ArrServiceError(RuntimeError):
     pass
+
+
+def _editorial_cache_key(*parts: Any) -> str:
+    return "::".join(str(part or "").strip().lower() for part in parts)
+
+
+def _get_editorial_cache(key: str, ttl_seconds: int) -> Any | None:
+    now = time.time()
+    with _EDITORIAL_CACHE_LOCK:
+        entry = _EDITORIAL_CACHE.get(key)
+        if not isinstance(entry, dict):
+            return None
+        cached_at = float(entry.get("cached_at") or 0)
+        if cached_at <= 0 or (now - cached_at) > max(1, int(ttl_seconds)):
+            return None
+        return entry.get("value")
+
+
+def _set_editorial_cache(key: str, value: Any) -> None:
+    with _EDITORIAL_CACHE_LOCK:
+        _EDITORIAL_CACHE[key] = {
+            "cached_at": time.time(),
+            "value": value,
+        }
 
 
 def _normalize_base_url(url: str) -> str:
@@ -67,6 +236,12 @@ def get_arr_config(config: dict | None) -> dict:
     sonarr = arr.get("sonarr")
     if not isinstance(sonarr, dict):
         sonarr = {}
+    editorial = arr.get("editorial")
+    if not isinstance(editorial, dict):
+        editorial = {}
+    mdblist = editorial.get("mdblist")
+    if not isinstance(mdblist, dict):
+        mdblist = {}
     return {
         "tmdb_api_key": _trimmed(arr.get("tmdb_api_key")),
         "radarr": {
@@ -76,6 +251,15 @@ def get_arr_config(config: dict | None) -> dict:
         "sonarr": {
             "base_url": _normalize_base_url(sonarr.get("base_url")),
             "api_key": _trimmed(sonarr.get("api_key")),
+        },
+        "editorial": {
+            "provider": _trimmed(editorial.get("provider")) or "mdblist",
+            "cache_hours": int(editorial.get("cache_hours") or EDITORIAL_CACHE_DEFAULT_HOURS),
+            "mdblist": {
+                "enabled": bool(mdblist.get("enabled", True)),
+                "api_key": _trimmed(mdblist.get("api_key")),
+                "allow_public_mode": bool(mdblist.get("allow_public_mode", True)),
+            },
         },
     }
 
@@ -96,6 +280,95 @@ def _tmdb_request(config: dict | None, path: str, *, params: dict | None = None)
     if response.status_code >= 400:
         raise ArrServiceError(f"tmdb_error status={response.status_code}")
     return response.json()
+
+
+def _editorial_cache_ttl_seconds(config: dict | None) -> int:
+    arr_cfg = get_arr_config(config)
+    hours = int((arr_cfg.get("editorial") or {}).get("cache_hours") or EDITORIAL_CACHE_DEFAULT_HOURS)
+    return max(1, hours) * 60 * 60
+
+
+def _mdblist_enabled(config: dict | None) -> bool:
+    arr_cfg = get_arr_config(config)
+    editorial = arr_cfg.get("editorial") or {}
+    mdblist = editorial.get("mdblist") or {}
+    return bool(mdblist.get("enabled")) and bool(mdblist.get("allow_public_mode") or mdblist.get("api_key"))
+
+
+def _normalized_media_kind_for_mdblist(value: Any) -> str:
+    text = _trimmed(value).lower()
+    if text in {"movie", "movies"}:
+        return "movie"
+    if text in {"show", "shows", "tv", "series"}:
+        return "tv"
+    return text
+
+
+def _fetch_mdblist_public_list(config: dict | None, list_path: str) -> list[dict]:
+    path = _trimmed(list_path).strip("/")
+    if not path:
+        return []
+    ttl_seconds = _editorial_cache_ttl_seconds(config)
+    cache_key = _editorial_cache_key("mdblist_raw", path)
+    cached = _get_editorial_cache(cache_key, ttl_seconds)
+    if isinstance(cached, list):
+        return cached
+    response = requests.get(
+        f"{MDBLIST_PUBLIC_BASE}/{path}/json/",
+        timeout=MDBLIST_PUBLIC_TIMEOUT,
+        headers={"Accept": "application/json"},
+    )
+    if response.status_code >= 400:
+        raise ArrServiceError(f"mdblist_error status={response.status_code} path={path}")
+    data = response.json()
+    items = data if isinstance(data, list) else []
+    _set_editorial_cache(cache_key, items)
+    return items
+
+
+def _editorial_shelf_definitions(kind: str) -> list[dict[str, Any]]:
+    normalized = _normalized_arr_kind(kind)
+    return [dict(entry) for entry in MDBLIST_PUBLIC_SHELVES.get(normalized, [])]
+
+
+def get_arr_editorial_sources(config: dict | None) -> dict[str, Any]:
+    arr_cfg = get_arr_config(config)
+    editorial = arr_cfg.get("editorial") or {}
+    mdblist = editorial.get("mdblist") or {}
+    provider = _trimmed(editorial.get("provider") or "mdblist").lower()
+    mdblist_active = provider == "mdblist" and _mdblist_enabled(config)
+    return {
+        "selected_provider": provider,
+        "providers": [
+            {
+                "id": "mdblist",
+                "label": "MDBList",
+                "active": mdblist_active,
+                "enabled": bool(mdblist.get("enabled")),
+                "public_mode": bool(mdblist.get("allow_public_mode")),
+                "requires_user_key": False,
+            },
+            {
+                "id": "tmdb",
+                "label": "TMDb",
+                "active": provider == "tmdb" or not mdblist_active,
+                "enabled": True,
+                "public_mode": True,
+                "requires_user_key": True,
+            },
+        ],
+    }
+
+
+def get_arr_editorial_shelves(config: dict | None, *, kind: str) -> dict[str, Any]:
+    normalized = _normalized_arr_kind(kind)
+    sources = get_arr_editorial_sources(config)
+    shelves = _editorial_shelf_definitions(normalized)
+    return {
+        "kind": normalized,
+        "provider": sources.get("selected_provider"),
+        "shelves": shelves,
+    }
 
 
 def _pick_tmdb_video(payload: dict) -> dict | None:
@@ -302,6 +575,58 @@ def _tv_result_row(raw: dict, *, person_boost: bool = False, person_name: str = 
         "_person_match": bool(person_boost),
         "_person_name": _trimmed(person_name),
     }
+
+
+def _tmdb_detail_row(config: dict | None, *, kind: str, tmdb_id: int | str) -> dict | None:
+    normalized = _normalized_arr_kind(kind)
+    try:
+        payload = _tmdb_request(config, f"/{normalized}/{int(tmdb_id)}", params={"language": "en-US"})
+    except Exception:
+        return None
+    return _movie_result_row(payload) if normalized == "movie" else _tv_result_row(payload)
+
+
+def _hydrate_tmdb_rows(config: dict | None, *, kind: str, tmdb_ids: list[int | str], limit: int) -> list[dict]:
+    normalized = _normalized_arr_kind(kind)
+    seen: set[int] = set()
+    ordered_ids: list[int] = []
+    for value in tmdb_ids:
+        try:
+            parsed = int(value)
+        except Exception:
+            continue
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        ordered_ids.append(parsed)
+    ordered_ids = ordered_ids[: max(1, int(limit))]
+    if not ordered_ids:
+        return []
+    rows_by_id: dict[int, dict] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(ordered_ids))) as executor:
+        futures = {
+            executor.submit(_tmdb_detail_row, config, kind=normalized, tmdb_id=tmdb_id): tmdb_id
+            for tmdb_id in ordered_ids
+        }
+        for future, tmdb_id in futures.items():
+            try:
+                row = future.result()
+            except Exception:
+                row = None
+            if row:
+                rows_by_id[int(tmdb_id)] = row
+    rows = [rows_by_id[tmdb_id] for tmdb_id in ordered_ids if tmdb_id in rows_by_id]
+    if normalized == "movie":
+        _enrich_movie_certifications(config, rows)
+        rows = [row for row in rows if _movie_allowed(row)]
+        statuses = get_movie_status_map(config, [item["tmdb_id"] for item in rows])
+    else:
+        _enrich_tv_certifications(config, rows)
+        rows = [row for row in rows if _tv_allowed(row)]
+        statuses = get_series_status_map(config, [item["tmdb_id"] for item in rows])
+    for item in rows:
+        item["arr_status"] = statuses.get(str(item["tmdb_id"])) or _status_record(False, False)
+    return rows[: max(1, int(limit))]
 
 
 def _normalize_search_year(value: Any) -> int | None:
@@ -943,19 +1268,34 @@ def build_arr_genre_browse_response(
     }
 
 
-def build_arr_editorial_response(
+def _build_tmdb_editorial_fallback(
     config: dict | None,
     *,
     kind: str,
     shelf: str,
     limit: int = 12,
+    genre_name: str | None = None,
 ) -> dict:
     normalized = _normalized_arr_kind(kind)
     shelf_key = str(shelf or "").strip().lower()
-    if shelf_key not in {"popular", "new"}:
-        raise ArrServiceError("Unsupported ARR editorial shelf")
-    if shelf_key == "popular":
+    rows: list[dict] = []
+    if genre_name:
+        genres = get_tmdb_genres(config, normalized)
+        genre_entry = next((entry for entry in genres if _trimmed(entry.get("name")).lower() == _trimmed(genre_name).lower()), None)
+        if genre_entry:
+            rows = discover_tmdb_by_genre(
+                config,
+                kind=normalized,
+                genre_id=int(genre_entry["id"]),
+                limit=limit,
+            )
+    elif shelf_key in {"popular", "trending_now", "popular_on_streaming", "highly_rated", "hidden_gems", "award_winners"}:
         payload = _tmdb_request(config, f"/{normalized}/popular", params={"page": "1", "language": "en-US"})
+        raw_results = payload.get("results") or []
+        for raw in raw_results:
+            row = _movie_result_row(raw) if normalized == "movie" else _tv_result_row(raw)
+            if row:
+                rows.append(row)
     else:
         params = {
             "include_adult": "false",
@@ -972,12 +1312,11 @@ def build_arr_editorial_response(
             params["first_air_date.lte"] = datetime.utcnow().strftime("%Y-%m-%d")
             params["first_air_date.gte"] = f"{max(1900, CURRENT_YEAR - 2)}-01-01"
         payload = _tmdb_request(config, f"/discover/{normalized}", params=params)
-    raw_results = payload.get("results") or []
-    rows: list[dict] = []
-    for raw in raw_results:
-        row = _movie_result_row(raw) if normalized == "movie" else _tv_result_row(raw)
-        if row:
-            rows.append(row)
+        raw_results = payload.get("results") or []
+        for raw in raw_results:
+            row = _movie_result_row(raw) if normalized == "movie" else _tv_result_row(raw)
+            if row:
+                rows.append(row)
     rows = rows[: max(1, int(limit))]
     if normalized == "movie":
         _enrich_movie_certifications(config, rows)
@@ -994,9 +1333,78 @@ def build_arr_editorial_response(
     return {
         "kind": normalized,
         "shelf": shelf_key,
+        "provider": "tmdb",
         "results": rows,
         "connection": connection,
     }
+
+
+def build_arr_editorial_response(
+    config: dict | None,
+    *,
+    kind: str,
+    shelf: str,
+    limit: int = 12,
+) -> dict:
+    normalized = _normalized_arr_kind(kind)
+    shelf_key = str(shelf or "").strip().lower()
+    shelf_defs = _editorial_shelf_definitions(normalized)
+    shelf_def = next((entry for entry in shelf_defs if entry.get("id") == shelf_key), None)
+    if shelf_key in {"popular", "new"} and not shelf_def:
+        return _build_tmdb_editorial_fallback(config, kind=normalized, shelf=shelf_key, limit=limit)
+    if not shelf_def:
+        raise ArrServiceError("Unsupported ARR editorial shelf")
+
+    ttl_seconds = _editorial_cache_ttl_seconds(config)
+    cache_key = _editorial_cache_key("editorial_shelf", normalized, shelf_key, int(limit))
+    cached = _get_editorial_cache(cache_key, ttl_seconds)
+    if isinstance(cached, dict):
+        return cached
+
+    use_mdblist = shelf_def.get("provider") == "mdblist" and _mdblist_enabled(config) and _trimmed(shelf_def.get("list_path"))
+    if use_mdblist:
+        try:
+            raw_items = _fetch_mdblist_public_list(config, str(shelf_def.get("list_path") or ""))
+            tmdb_ids: list[int] = []
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                media_kind = _normalized_media_kind_for_mdblist(item.get("mediatype"))
+                if media_kind != normalized:
+                    continue
+                try:
+                    tmdb_id = int(item.get("id"))
+                except Exception:
+                    continue
+                tmdb_ids.append(tmdb_id)
+                if len(tmdb_ids) >= max(int(limit) * 2, int(limit)):
+                    break
+            rows = _hydrate_tmdb_rows(config, kind=normalized, tmdb_ids=tmdb_ids, limit=limit)
+            connection = test_radarr_connection(config) if normalized == "movie" else test_sonarr_connection(config)
+            payload = {
+                "kind": normalized,
+                "shelf": shelf_key,
+                "provider": "mdblist",
+                "results": rows,
+                "connection": connection,
+            }
+            _set_editorial_cache(cache_key, payload)
+            return payload
+        except Exception:
+            pass
+
+    fallback_shelf = str(shelf_def.get("fallback") or ("new" if shelf_key == "new_releases" else "popular")).strip().lower()
+    payload = _build_tmdb_editorial_fallback(
+        config,
+        kind=normalized,
+        shelf=fallback_shelf,
+        limit=limit,
+        genre_name=_trimmed(shelf_def.get("genre_name")) or None,
+    )
+    payload["shelf"] = shelf_key
+    payload["provider"] = "tmdb"
+    _set_editorial_cache(cache_key, payload)
+    return payload
 
 
 def get_bulk_status(config: dict | None, kind: str, tmdb_ids: list[int | str]) -> dict[str, dict]:

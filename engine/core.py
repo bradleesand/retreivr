@@ -766,12 +766,45 @@ def validate_config(config):
                     continue
                 if not isinstance(value, int):
                     errors.append(f"ui_preferences.{key} must be an integer")
-                elif value < 120 or value > 320:
+                elif key == "home_video_card_size" and (value < 220 or value > 420):
+                    errors.append("ui_preferences.home_video_card_size must be between 220 and 420")
+                elif key != "home_video_card_size" and (value < 120 or value > 320):
                     errors.append(f"ui_preferences.{key} must be between 120 and 320")
             for key in ("home_video_sort", "music_sort", "movies_tv_sort"):
                 value = ui_preferences.get(key)
                 if value is not None and not isinstance(value, str):
                     errors.append(f"ui_preferences.{key} must be a string")
+            value = ui_preferences.get("home_video_results_limit")
+            if value is not None:
+                if not isinstance(value, int):
+                    errors.append("ui_preferences.home_video_results_limit must be an integer")
+                elif value < 0 or value > 200:
+                    errors.append("ui_preferences.home_video_results_limit must be between 0 and 200")
+            value = ui_preferences.get("music_hide_suggested_genres")
+            if value is not None and not isinstance(value, bool):
+                errors.append("ui_preferences.music_hide_suggested_genres must be true/false")
+            hidden_genres = ui_preferences.get("music_hidden_genres")
+            if hidden_genres is not None:
+                if not isinstance(hidden_genres, list):
+                    errors.append("ui_preferences.music_hidden_genres must be a list")
+                else:
+                    for index, entry in enumerate(hidden_genres):
+                        if not isinstance(entry, str) or not entry.strip():
+                            errors.append(f"ui_preferences.music_hidden_genres[{index}] must be a non-empty string")
+            hidden_artists = ui_preferences.get("music_hidden_artists")
+            if hidden_artists is not None:
+                if not isinstance(hidden_artists, list):
+                    errors.append("ui_preferences.music_hidden_artists must be a list")
+                else:
+                    for index, entry in enumerate(hidden_artists):
+                        if not isinstance(entry, dict):
+                            errors.append(f"ui_preferences.music_hidden_artists[{index}] must be an object")
+                            continue
+                        if not isinstance(entry.get("name"), str) or not str(entry.get("name") or "").strip():
+                            errors.append(f"ui_preferences.music_hidden_artists[{index}].name must be a non-empty string")
+                        artist_mbid = entry.get("artist_mbid")
+                        if artist_mbid is not None and (not isinstance(artist_mbid, str) or not str(artist_mbid).strip()):
+                            errors.append(f"ui_preferences.music_hidden_artists[{index}].artist_mbid must be a non-empty string when present")
 
     if final_format is not None and not isinstance(final_format, str):
         errors.append("final_format must be a string")
@@ -946,6 +979,35 @@ def validate_config(config):
             tmdb_api_key = arr_cfg.get("tmdb_api_key")
             if tmdb_api_key is not None and not isinstance(tmdb_api_key, str):
                 errors.append("arr.tmdb_api_key must be a string")
+            editorial_cfg = arr_cfg.get("editorial")
+            if editorial_cfg is not None:
+                if not isinstance(editorial_cfg, dict):
+                    errors.append("arr.editorial must be an object")
+                else:
+                    provider = editorial_cfg.get("provider")
+                    if provider is not None and not isinstance(provider, str):
+                        errors.append("arr.editorial.provider must be a string")
+                    cache_hours = editorial_cfg.get("cache_hours")
+                    if cache_hours is not None:
+                        try:
+                            parsed = int(cache_hours)
+                        except Exception:
+                            errors.append("arr.editorial.cache_hours must be an integer")
+                        else:
+                            if parsed < 1:
+                                errors.append("arr.editorial.cache_hours must be >= 1")
+                    mdblist_cfg = editorial_cfg.get("mdblist")
+                    if mdblist_cfg is not None:
+                        if not isinstance(mdblist_cfg, dict):
+                            errors.append("arr.editorial.mdblist must be an object")
+                        else:
+                            for field_name in ("enabled", "allow_public_mode"):
+                                value = mdblist_cfg.get(field_name)
+                                if value is not None and not isinstance(value, bool):
+                                    errors.append(f"arr.editorial.mdblist.{field_name} must be true/false")
+                            api_key = mdblist_cfg.get("api_key")
+                            if api_key is not None and not isinstance(api_key, str):
+                                errors.append("arr.editorial.mdblist.api_key must be a string")
             for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"):
                 service_cfg = arr_cfg.get(service_name)
                 if service_cfg is None:

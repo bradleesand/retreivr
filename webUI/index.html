@@ -86,12 +86,11 @@
     <section class="panel full page-full page-hidden" id="home-panel" data-page="video">
       <div class="app-page-shell home-page-shell">
         <div class="app-page-main">
-      <div class="home-section-toggle video-mode-toggle" aria-label="Video sections">
+      <div class="video-page-toolbar home-section-toggle video-mode-toggle" aria-label="Video sections">
         <button class="button ghost small app-page-nav active" data-home-section="search" type="button">Search</button>
         <button class="button ghost small app-page-nav" data-home-section="library" type="button">Library</button>
       </div>
-      <section id="home-search-surface" class="app-page-surface active">
-      <div class="home-search-shell">
+      <section id="home-search-surface" class="app-page-surface active video-page-surface">
         <div id="standard-search-container">
           <div class="video-header-searchbar">
             <div id="home-source-filters" class="home-source-filters">
@@ -126,6 +125,15 @@
               placeholder="Search YouTube, Rumble, podcasts, archives…"
               autocomplete="off"
             />
+            <button
+              id="home-search-clear"
+              class="button ghost small searchbar-clear-button"
+              type="button"
+              aria-label="Clear search"
+              title="Clear search"
+            >
+              ×
+            </button>
             <button
               id="home-advanced-toggle"
               class="button ghost small home-advanced-toggle"
@@ -182,7 +190,6 @@
           <span id="home-review-alert-text">Items are waiting for review.</span>
           <button id="home-review-alert-open" class="button ghost small" type="button">Open Review Queue</button>
         </div>
-      </div>
       <section id="video-discovery-default" class="video-discovery-default">
         <div class="video-discovery-copy">
           <div class="group-title">Start With Something Familiar</div>
@@ -225,7 +232,7 @@
           <div class="home-results-header-actions">
             <label class="movies-tv-size-control" for="home-video-card-size">
               <span class="meta">Card Size</span>
-              <input id="home-video-card-size" type="range" min="120" max="320" step="10" value="220">
+              <input id="home-video-card-size" type="range" min="220" max="420" step="10" value="220">
               <span id="home-video-card-size-value" class="meta">Default</span>
             </label>
             <label class="movies-tv-sort-control" for="home-video-sort">
@@ -235,6 +242,17 @@
                 <option value="newest">Newest First</option>
                 <option value="source_priority">Source Priority</option>
                 <option value="title_asc">Title: A-Z</option>
+              </select>
+            </label>
+            <label class="movies-tv-sort-control" for="home-video-results-limit">
+              <span class="meta">Results</span>
+              <select id="home-video-results-limit" class="input small">
+                <option value="12">12</option>
+                <option value="24" selected>24</option>
+                <option value="36">36</option>
+                <option value="48">48</option>
+                <option value="72">72</option>
+                <option value="0">All</option>
               </select>
             </label>
             <span id="home-results-status-text" class="meta">Ready to discover media</span>
@@ -284,7 +302,7 @@
             <button class="button ghost small music-app-nav" data-music-section="radio" type="button">Radio</button>
           </div>
           <section id="music-discovery-surface" class="music-surface active">
-            <div class="home-search-shell music-page-shell">
+            <div class="music-page-shell">
               <div id="music-page-results-slot"></div>
               <div id="music-page-message-slot"></div>
               <div id="music-page-review-slot"></div>
@@ -363,8 +381,8 @@
             </svg>
           </span>
           <input id="music-header-query" class="home-search-input music-header-query" type="text" placeholder="Search artists, albums, or tracks">
+          <button id="music-header-search-clear" class="button ghost small searchbar-clear-button" type="button" aria-label="Clear search" title="Clear search">×</button>
           <button id="music-header-advanced-toggle" class="button ghost small" type="button" aria-expanded="false" aria-controls="music-mode-console">Advanced</button>
-          <button id="music-header-search-clear" class="button ghost small" type="button">Clear</button>
           <button id="music-header-search-submit" class="button primary" type="button">Search</button>
         </div>
       </div>
@@ -545,8 +563,20 @@
             <div class="movies-tv-setup-step">3. Verify it and start browsing titles, people, genres, and trailers.</div>
           </div>
           <div class="movies-tv-setup-links">
-            <a class="button ghost" href="https://www.themoviedb.org/signup" target="_blank" rel="noreferrer">Create TMDb Account</a>
-            <a class="button ghost" href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">TMDb API Page</a>
+            <a class="movies-tv-setup-link-tile" href="https://www.themoviedb.org/signup" target="_blank" rel="noreferrer">
+              <span class="movies-tv-setup-link-icon" aria-hidden="true">🎬</span>
+              <span class="movies-tv-setup-link-copy">
+                <span class="movies-tv-setup-link-title">Create TMDb Account</span>
+                <span class="movies-tv-setup-link-meta">Sign up free and unlock movie discovery</span>
+              </span>
+            </a>
+            <a class="movies-tv-setup-link-tile" href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">
+              <span class="movies-tv-setup-link-icon" aria-hidden="true">🔑</span>
+              <span class="movies-tv-setup-link-copy">
+                <span class="movies-tv-setup-link-title">TMDb API Page</span>
+                <span class="movies-tv-setup-link-meta">Create and copy the API key you need</span>
+              </span>
+            </a>
           </div>
           <div class="movies-tv-setup-form">
             <input id="movies-tv-inline-tmdb-key" type="password" placeholder="Paste TMDb API key">
@@ -578,6 +608,7 @@
             placeholder="Search titles, actors, or directors via TMDb…"
             autocomplete="off"
           />
+          <button id="movies-tv-search-clear" class="button ghost small searchbar-clear-button" type="button" aria-label="Clear search" title="Clear search">×</button>
           <button id="movies-tv-filters-toggle" class="button ghost" type="button" aria-expanded="false" aria-controls="movies-tv-filters-panel">Filters</button>
           <button id="movies-tv-search-button" class="button primary" type="button">Search</button>
         </div>
@@ -604,24 +635,7 @@
         <div id="movies-tv-genres-list" class="movies-tv-genre-grid"></div>
       </div>
       <div id="movies-tv-editorial" class="movies-tv-editorial">
-        <section class="home-results movies-tv-editorial-shelf" id="movies-tv-popular">
-          <div class="home-results-header">
-            <span>Popular Now</span>
-            <div class="home-results-header-actions">
-              <span id="movies-tv-popular-status-text" class="meta">Loading popular titles</span>
-            </div>
-          </div>
-          <div id="movies-tv-popular-list" class="music-meta-grid movies-tv-results-grid"></div>
-        </section>
-        <section class="home-results movies-tv-editorial-shelf" id="movies-tv-new">
-          <div class="home-results-header">
-            <span>New Releases</span>
-            <div class="home-results-header-actions">
-              <span id="movies-tv-new-status-text" class="meta">Loading new releases</span>
-            </div>
-          </div>
-          <div id="movies-tv-new-list" class="music-meta-grid movies-tv-results-grid"></div>
-        </section>
+        <div id="movies-tv-editorial-shelves"></div>
       </div>
       <div class="home-results hidden" id="movies-tv-results">
         <div class="home-results-header">
@@ -2274,6 +2288,9 @@
       <div id="home-preview-audio-wrap" class="home-preview-audio-wrap hidden">
         <audio id="home-preview-audio" controls preload="none" class="home-preview-audio"></audio>
       </div>
+      <div id="home-preview-actions" class="home-preview-actions">
+        <button id="home-preview-download" class="button ghost small home-candidate-download-primary hidden" type="button">Download</button>
+      </div>
       <div class="home-preview-frame-wrap">
         <iframe
           id="home-preview-frame"
@@ -2284,6 +2301,10 @@
           allowfullscreen
           referrerpolicy="strict-origin-when-cross-origin"
         ></iframe>
+      </div>
+      <div id="home-preview-details" class="home-preview-details hidden">
+        <div id="home-preview-details-meta" class="meta home-preview-details-meta"></div>
+        <div id="home-preview-description" class="home-preview-description"></div>
       </div>
     </div>
   </div>

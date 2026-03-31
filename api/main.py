@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -140,6 +141,8 @@ from engine.arr_services import (
     build_arr_genre_browse_response,
     build_movie_search_response,
     build_tv_search_response,
+    get_arr_editorial_shelves,
+    get_arr_editorial_sources,
     get_bulk_status,
     get_tmdb_genres,
     get_tmdb_cast,
@@ -267,6 +270,24 @@ WATCHER_SUMMARY_WAIT_SECONDS = 900
 WATCHER_SUMMARY_POLL_SECONDS = 2
 COVER_ART_CACHE_TTL_SECONDS = 3600
 COVER_ART_NEGATIVE_CACHE_TTL_SECONDS = 120
+MUSIC_GENRE_ARTIST_CACHE_TTL_SECONDS = 60 * 60 * 12
+MUSIC_GENRE_MAX_ALIAS_SEARCHES = 2
+MUSIC_GENRE_FALLBACK_CANDIDATE_POOL = 18
+LISTENBRAINZ_ARTIST_POPULARITY_CACHE_TTL_SECONDS = 60 * 60 * 24 * 14
+LISTENBRAINZ_BASE_URL = "https://api.listenbrainz.org/1"
+LISTENBRAINZ_REQUEST_TIMEOUT_SECONDS = 2.5
+LISTENBRAINZ_MAX_RERANK_CANDIDATES = 12
+STARTUP_MUSIC_GENRE_PREWARM_LIMIT = 12
+STARTUP_MUSIC_GENRE_PREWARM_TARGETS = [
+    "Pop",
+    "Rock",
+    "Hip Hop",
+    "Electronic",
+    "Country",
+    "Indie",
+    "Alternative",
+    "R&B",
+]
 DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
 DEFAULT_SAVED_ALBUMS_SYNC_INTERVAL_MINUTES = 30
 DEFAULT_USER_PLAYLISTS_SYNC_INTERVAL_MINUTES = 30
@@ -292,6 +313,22 @@ GHCR_TOKEN_URL = "https://ghcr.io/token"
 GHCR_TAGS_URL_TEMPLATE = "https://ghcr.io/v2/{repo}/tags/list"
 GITHUB_RELEASES_LATEST_URL = "https://api.github.com/repos/sudoStacks/retreivr/releases/latest"
 _SEMVER_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$", re.IGNORECASE)
+
+_MUSIC_GENRE_ALIAS_MAP = {
+    "rock": ["rock", "alternative rock", "hard rock", "classic rock", "pop rock", "indie rock"],
+    "pop": ["pop", "dance-pop", "synth-pop", "electropop", "teen pop"],
+    "hip hop": ["hip hop", "hip-hop", "rap", "trap", "conscious hip hop", "southern hip hop"],
+    "jazz": ["jazz", "smooth jazz", "vocal jazz", "jazz fusion", "bebop"],
+    "electronic": ["electronic", "electronica", "edm", "house", "techno", "ambient", "downtempo", "trance"],
+    "metal": ["metal", "heavy metal", "thrash metal", "death metal", "black metal", "metalcore"],
+    "country": ["country", "contemporary country", "alt-country", "country pop", "americana"],
+    "folk": ["folk", "indie folk", "folk rock", "singer-songwriter", "acoustic folk"],
+    "r&b": ["r&b", "rnb", "rhythm and blues", "neo soul", "contemporary r&b", "soul"],
+    "classical": ["classical", "orchestral", "opera", "chamber music", "instrumental classical"],
+    "christian": ["contemporary christian", "ccm", "christian", "christian pop", "christian rock", "worship"],
+    "contemporary christian": ["contemporary christian", "ccm", "christian", "christian pop", "christian rock", "worship"],
+    "indie": ["indie", "indie pop", "indie rock", "alternative", "lo-fi", "dream pop"],
+}
 
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
 MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024
@@ -1574,6 +1611,293 @@ def _read_persisted_run_summary_dispatch(run_type: str, run_id: str) -> dict[str
                 conn.close()
             except Exception:
                 pass
+
+
+def _normalize_music_genre_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower()).strip()
+
+
+def _music_genre_aliases(value: Any) -> list[str]:
+    normalized = _normalize_music_genre_key(value)
+    aliases = _MUSIC_GENRE_ALIAS_MAP.get(normalized) or [str(value or "").strip()]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for alias in aliases:
+        text = str(alias or "").strip()
+        key = _normalize_music_genre_key(text)
+        if not text or not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(text)
+    return ordered or [str(value or "").strip()]
+
+
+def _extract_release_year_from_text(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if len(text) >= 4 and text[:4].isdigit():
+        try:
+            return int(text[:4])
+        except ValueError:
+            return None
+    return None
+
+
+def _read_listenbrainz_artists_popularity(artist_mbids: list[str]) -> dict[str, dict[str, Any]]:
+    now = time.time()
+    normalized_mbids = []
+    seen: set[str] = set()
+    for artist_mbid in artist_mbids:
+        mbid = str(artist_mbid or "").strip().lower()
+        if not mbid or mbid in seen:
+            continue
+        seen.add(mbid)
+        normalized_mbids.append(mbid)
+
+    results: dict[str, dict[str, Any]] = {}
+    uncached: list[str] = []
+    for mbid in normalized_mbids:
+        cached = _get_music_artwork_cache_entry("listenbrainz_artist_popularity", mbid) or {}
+        updated_at = float(cached.get("updated_at") or 0)
+        if updated_at > 0 and (now - updated_at) < LISTENBRAINZ_ARTIST_POPULARITY_CACHE_TTL_SECONDS:
+            results[mbid] = cached
+        else:
+            uncached.append(mbid)
+
+    if uncached:
+        url = f"{LISTENBRAINZ_BASE_URL}/popularity/artist"
+        payload = {"artist_mbids": uncached}
+        try:
+            response = requests.post(
+                url,
+                timeout=LISTENBRAINZ_REQUEST_TIMEOUT_SECONDS,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                json=payload,
+            )
+            if response.ok:
+                data = response.json()
+                items = data if isinstance(data, list) else []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    mbid = str(item.get("artist_mbid") or "").strip().lower()
+                    if not mbid:
+                        continue
+                    cached_payload = {
+                        "updated_at": now,
+                        "artist_mbid": mbid,
+                        "total_listen_count": int(item.get("total_listen_count") or 0),
+                        "total_user_count": int(item.get("total_user_count") or 0),
+                    }
+                    results[mbid] = cached_payload
+                    _set_music_artwork_cache_entry("listenbrainz_artist_popularity", mbid, cached_payload)
+        except Exception:
+            logging.debug("ListenBrainz artist popularity batch lookup failed", exc_info=True)
+
+        for mbid in uncached:
+            if mbid in results:
+                continue
+            fallback_payload = {
+                "updated_at": now,
+                "artist_mbid": mbid,
+                "total_listen_count": 0,
+                "total_user_count": 0,
+            }
+            results[mbid] = fallback_payload
+            _set_music_artwork_cache_entry("listenbrainz_artist_popularity", mbid, fallback_payload)
+
+    return results
+
+
+def _rank_genre_artists_with_listenbrainz(artists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(artists, list) or not artists:
+        return []
+
+    sorted_by_source = sorted(
+        [item for item in artists if isinstance(item, dict)],
+        key=lambda item: int(item.get("source_score") or 0),
+        reverse=True,
+    )
+    candidates = [
+        item for item in sorted_by_source[:LISTENBRAINZ_MAX_RERANK_CANDIDATES]
+        if str(item.get("artist_mbid") or "").strip()
+    ]
+    popularity_by_mbid: dict[str, dict[str, Any]] = {}
+    if candidates:
+        popularity_by_mbid = _read_listenbrainz_artists_popularity(
+            [str(item.get("artist_mbid") or "").strip() for item in candidates]
+        )
+
+    max_listens = max(
+        [int((popularity_by_mbid.get(str(item.get("artist_mbid") or "").strip().lower()) or {}).get("total_listen_count") or 0) for item in candidates]
+        or [0]
+    )
+    max_users = max(
+        [int((popularity_by_mbid.get(str(item.get("artist_mbid") or "").strip().lower()) or {}).get("total_user_count") or 0) for item in candidates]
+        or [0]
+    )
+    peak_listens_log = math.log1p(max_listens) if max_listens > 0 else 0.0
+    peak_users_log = math.log1p(max_users) if max_users > 0 else 0.0
+
+    ranked: list[dict[str, Any]] = []
+    for artist in artists:
+        if not isinstance(artist, dict):
+            continue
+        mbid = str(artist.get("artist_mbid") or "").strip().lower()
+        popularity = popularity_by_mbid.get(mbid) or {}
+        source_score = max(0.0, min(1.0, float(int(artist.get("source_score") or 0)) / 100.0))
+        listen_count = int(popularity.get("total_listen_count") or 0)
+        user_count = int(popularity.get("total_user_count") or 0)
+        listen_norm = (math.log1p(listen_count) / peak_listens_log) if peak_listens_log > 0 and listen_count > 0 else 0.0
+        user_norm = (math.log1p(user_count) / peak_users_log) if peak_users_log > 0 and user_count > 0 else 0.0
+        popularity_norm = (listen_norm * 0.72) + (user_norm * 0.28)
+        rank_score = (source_score * 0.50) + (popularity_norm * 0.50)
+        ranked.append(
+            {
+                **artist,
+                "listenbrainz": {
+                    "total_listen_count": listen_count,
+                    "total_user_count": user_count,
+                },
+                "rank_score": round(rank_score, 6),
+            }
+        )
+
+    ranked.sort(
+        key=lambda item: (
+            float(item.get("rank_score") or 0),
+            int(((item.get("listenbrainz") or {}).get("total_listen_count") or 0)),
+            int(item.get("source_score") or 0),
+            str(item.get("name") or "").lower(),
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
+def _fallback_rank_genre_artists(artists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleaned = [item for item in artists if isinstance(item, dict)]
+    cleaned.sort(
+        key=lambda item: (
+            int(item.get("source_score") or 0),
+            str(item.get("name") or "").strip().lower(),
+        ),
+        reverse=True,
+    )
+    return cleaned
+
+
+def _best_effort_rank_genre_artists(artists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fallback = _fallback_rank_genre_artists(artists)
+    if not fallback:
+        return []
+    try:
+        ranked = _rank_genre_artists_with_listenbrainz(fallback)
+        if isinstance(ranked, list) and ranked:
+            return ranked
+    except Exception:
+        logging.warning("ListenBrainz rerank failed for genre artists", exc_info=True)
+    return fallback
+
+
+def _music_genre_prewarm_targets(config: dict | None) -> list[str]:
+    prefs = _normalized_music_preferences(config if isinstance(config, dict) else {})
+    ui_preferences = (config or {}).get("ui_preferences") if isinstance(config, dict) else {}
+    hidden_keys = {
+        _normalize_music_genre_key(value)
+        for value in (ui_preferences.get("music_hidden_genres") if isinstance(ui_preferences, dict) else []) or []
+        if str(value or "").strip()
+    }
+    ordered: list[str] = []
+    seen: set[str] = set()
+    candidates = [
+        *prefs.get("favorite_genres", []),
+        *STARTUP_MUSIC_GENRE_PREWARM_TARGETS,
+    ]
+    for value in candidates:
+        text = str(value or "").strip()
+        key = _normalize_music_genre_key(text)
+        if not text or not key or key in seen or key in hidden_keys:
+            continue
+        seen.add(key)
+        ordered.append(text)
+    return ordered[:8]
+
+
+def _warm_single_music_genre_artist_cache(genre: str, *, limit: int = STARTUP_MUSIC_GENRE_PREWARM_LIMIT) -> None:
+    genre_value = str(genre or "").strip()
+    if not genre_value:
+        return
+    normalized_limit = max(1, min(24, int(limit or STARTUP_MUSIC_GENRE_PREWARM_LIMIT)))
+    cache_key = f"{_normalize_music_genre_key(genre_value)}:{normalized_limit}:0"
+    now = time.time()
+    persisted_payload = _get_music_artwork_cache_entry("genre_artists", cache_key) or {}
+    persisted_updated_at = float(persisted_payload.get("updated_at") or 0)
+    persisted_items = persisted_payload.get("artists")
+    if (
+        isinstance(persisted_items, list)
+        and persisted_updated_at > 0
+        and (now - persisted_updated_at) < MUSIC_GENRE_ARTIST_CACHE_TTL_SECONDS
+    ):
+        cache = getattr(app.state, "music_genre_artist_cache", None)
+        if isinstance(cache, dict) and cache_key not in cache:
+            cache[cache_key] = {
+                "cached_at": now,
+                "artists": persisted_items,
+            }
+        return
+
+    aliases = _music_genre_aliases(genre_value)[:MUSIC_GENRE_MAX_ALIAS_SEARCHES]
+    per_alias_limit = max(
+        8,
+        min(16, int(math.ceil(normalized_limit / max(1, len(aliases)))) * 2),
+    )
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        alias_results = search_artists_by_genre(genre=alias, limit=per_alias_limit, offset=0)
+        for artist in alias_results:
+            if not isinstance(artist, dict):
+                continue
+            dedupe_key = str(artist.get("artist_mbid") or artist.get("name") or "").strip().lower()
+            if not dedupe_key or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            merged.append(
+                {
+                    **artist,
+                    "genre": genre_value,
+                }
+            )
+        if len(merged) >= max(MUSIC_GENRE_FALLBACK_CANDIDATE_POOL, normalized_limit * 2):
+            break
+    if not merged:
+        return
+    artists = _best_effort_rank_genre_artists(merged)[:normalized_limit]
+    cache = getattr(app.state, "music_genre_artist_cache", None)
+    if isinstance(cache, dict):
+        cache[cache_key] = {
+            "cached_at": now,
+            "artists": artists,
+        }
+    _set_music_artwork_cache_entry(
+        "genre_artists",
+        cache_key,
+        {
+            "updated_at": now,
+            "artists": artists,
+        },
+    )
+
+
+def _startup_prewarm_music_genres(config: dict | None) -> None:
+    targets = _music_genre_prewarm_targets(config)
+    if not targets:
+        return
+    for genre in targets:
+        try:
+            _warm_single_music_genre_artist_cache(genre)
+        except Exception:
+            logging.warning("Startup music genre prewarm failed genre=%s", genre, exc_info=True)
 
 
 def _write_persisted_run_summary_dispatch(run_type: str, run_id: str, record: dict[str, object]) -> None:
@@ -3124,6 +3448,13 @@ async def startup():
     app.state.playlist_import_jobs_lock = threading.Lock()
     app.state.playlist_import_active_count = 0
     app.state.music_cover_art_cache = {}
+    app.state.music_genre_artist_cache = {}
+    threading.Thread(
+        target=_startup_prewarm_music_genres,
+        args=(startup_cfg if isinstance(startup_cfg, dict) else {},),
+        daemon=True,
+        name="music-genre-prewarm",
+    ).start()
     app.state.community_publish_last_summary = None
     app.state.community_publish_backfill_last_summary = None
     app.state.community_publish_task_lock = threading.Lock()
@@ -8729,14 +9060,126 @@ def music_genre_artists(
     genre_value = str(genre or "").strip()
     if not genre_value:
         raise HTTPException(status_code=400, detail="genre required")
+    stale_items: list[dict[str, Any]] | None = None
     try:
+        normalized_genre = _normalize_music_genre_key(genre_value)
+        normalized_limit = int(limit)
+        normalized_offset = int(offset)
+        cache_key = f"{normalized_genre}:{normalized_limit}:{normalized_offset}"
+        cache = getattr(app.state, "music_genre_artist_cache", None)
+        now = time.time()
+        persisted_payload = _get_music_artwork_cache_entry("genre_artists", cache_key) or {}
+        persisted_updated_at = float(persisted_payload.get("updated_at") or 0)
+        persisted_items = persisted_payload.get("artists")
+        if (
+            isinstance(persisted_items, list)
+            and persisted_updated_at > 0
+            and (now - persisted_updated_at) < MUSIC_GENRE_ARTIST_CACHE_TTL_SECONDS
+        ):
+            if isinstance(cache, dict):
+                cache[cache_key] = {
+                    "cached_at": now,
+                    "artists": persisted_items,
+                }
+            return {
+                "genre": genre_value,
+                "artists": persisted_items,
+                "cached": True,
+            }
+        if isinstance(persisted_items, list) and persisted_items:
+            stale_items = persisted_items
+        if isinstance(cache, dict):
+            cached = cache.get(cache_key)
+            if isinstance(cached, dict):
+                cached_at = float(cached.get("cached_at") or 0)
+                cached_items = cached.get("artists")
+                if now - cached_at < MUSIC_GENRE_ARTIST_CACHE_TTL_SECONDS and isinstance(cached_items, list):
+                    return {
+                        "genre": genre_value,
+                        "artists": cached_items,
+                        "cached": True,
+                    }
+                if isinstance(cached_items, list) and cached_items:
+                    stale_items = cached_items
+        aliases = _music_genre_aliases(genre_value)[:MUSIC_GENRE_MAX_ALIAS_SEARCHES]
+        per_alias_limit = max(
+            8,
+            min(
+                16,
+                int(math.ceil(normalized_limit / max(1, len(aliases)))) * 2,
+            ),
+        )
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for alias_index, alias in enumerate(aliases):
+            alias_results = search_artists_by_genre(
+                genre=alias,
+                limit=per_alias_limit,
+                offset=normalized_offset if alias_index == 0 else 0,
+            )
+            for artist in alias_results:
+                if not isinstance(artist, dict):
+                    continue
+                dedupe_key = str(artist.get("artist_mbid") or artist.get("name") or "").strip().lower()
+                if not dedupe_key or dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                merged.append(
+                    {
+                        **artist,
+                        "genre": genre_value,
+                    }
+                )
+            if len(merged) >= max(MUSIC_GENRE_FALLBACK_CANDIDATE_POOL, normalized_limit * 2):
+                break
+        if not merged:
+            if stale_items:
+                return {
+                    "genre": genre_value,
+                    "artists": stale_items[:normalized_limit],
+                    "cached": True,
+                    "degraded": True,
+                }
+            return {
+                "genre": genre_value,
+                "artists": [],
+                "cached": False,
+                "degraded": True,
+            }
+        artists = _best_effort_rank_genre_artists(merged)[:normalized_limit]
+        if isinstance(cache, dict):
+            cache[cache_key] = {
+                "cached_at": now,
+                "artists": artists,
+            }
+        _set_music_artwork_cache_entry(
+            "genre_artists",
+            cache_key,
+            {
+                "updated_at": now,
+                "artists": artists,
+            },
+        )
         return {
             "genre": genre_value,
-            "artists": search_artists_by_genre(genre=genre_value, limit=int(limit), offset=int(offset)),
+            "artists": artists,
+            "cached": False,
         }
     except Exception:
         logging.exception("music_genre_artists failed genre=%s", genre_value)
-        raise HTTPException(status_code=502, detail="musicbrainz_genre_artist_search_failed")
+        if stale_items:
+            return {
+                "genre": genre_value,
+                "artists": stale_items[:normalized_limit],
+                "cached": True,
+                "degraded": True,
+            }
+        return {
+            "genre": genre_value,
+            "artists": [],
+            "cached": False,
+            "degraded": True,
+        }
 
 
 @app.post("/api/music/video/availability")
@@ -10207,6 +10650,8 @@ async def api_put_ui_preferences(payload: dict = Body(...)):
         "home_video_sort",
         "music_card_size",
         "music_sort",
+        "music_hide_suggested_genres",
+        "music_hidden_genres",
         "movies_tv_card_size",
         "movies_tv_sort",
     ):
@@ -11241,6 +11686,36 @@ async def api_arr_genre_browse(
 
 @app.get("/api/arr/editorial")
 async def api_arr_editorial(
+    kind: str = Query(...),
+    shelf: str = Query(...),
+    limit: int = Query(12, ge=1, le=24),
+):
+    try:
+        return safe_json(build_arr_editorial_response(_current_loaded_config(), kind=kind, shelf=shelf, limit=limit))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/editorial-sources")
+async def api_arr_editorial_sources():
+    try:
+        return safe_json(get_arr_editorial_sources(_current_loaded_config()))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/editorial/shelves")
+async def api_arr_editorial_shelves(
+    kind: str = Query(...),
+):
+    try:
+        return safe_json(get_arr_editorial_shelves(_current_loaded_config(), kind=kind))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/editorial/shelf")
+async def api_arr_editorial_shelf(
     kind: str = Query(...),
     shelf: str = Query(...),
     limit: int = Query(12, ge=1, le=24),

@@ -96,8 +96,11 @@
   "ui_preferences": {
     "home_video_card_size": 220,
     "home_video_sort": "best_match",
+    "home_video_results_limit": 24,
     "music_card_size": 180,
     "music_sort": "recommended",
+    "music_hidden_genres": [],
+    "music_hidden_artists": [],
     "movies_tv_card_size": 260,
     "movies_tv_sort": "best_match"
   },
@@ -141,6 +144,15 @@
   },
   "arr": {
     "tmdb_api_key": "",
+    "editorial": {
+      "provider": "mdblist",
+      "cache_hours": 12,
+      "mdblist": {
+        "enabled": true,
+        "api_key": "",
+        "allow_public_mode": true
+      }
+    },
     "radarr": {
       "base_url": "",
       "api_key": ""
