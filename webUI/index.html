@@ -277,6 +277,7 @@
     <section class="panel full page-full page-hidden" id="music-panel" data-page="music">
       <div class="music-page-shell">
           <div class="music-top-row">
+            <div id="music-nav-slot" class="music-nav-slot"></div>
             <div class="music-section-toggle" aria-label="Music sections">
               <button class="button ghost small music-app-nav active" data-music-section="browse" type="button">Browse</button>
               <button class="button ghost small music-app-nav" data-music-section="library" type="button">Library</button>
@@ -2241,14 +2242,14 @@
     <div class="modal-card home-preview-card">
       <div class="row space-between">
         <div id="home-preview-title" class="panel-title">Preview</div>
-        <button id="home-preview-close" class="button ghost small" type="button">Close</button>
+        <div class="home-preview-header-actions">
+          <button id="home-preview-close" class="button ghost small" type="button">Close</button>
+          <button id="home-preview-download" class="button primary small home-candidate-download-primary hidden" type="button">Download</button>
+        </div>
       </div>
       <div id="home-preview-source" class="meta home-preview-meta"></div>
       <div id="home-preview-audio-wrap" class="home-preview-audio-wrap hidden">
         <audio id="home-preview-audio" controls preload="none" class="home-preview-audio"></audio>
-      </div>
-      <div id="home-preview-actions" class="home-preview-actions">
-        <button id="home-preview-download" class="button ghost small home-candidate-download-primary hidden" type="button">Download</button>
       </div>
       <div class="home-preview-frame-wrap">
         <iframe

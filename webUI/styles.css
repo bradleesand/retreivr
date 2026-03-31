@@ -959,8 +959,8 @@ body.topbar-hidden .topbar {
   gap: 0;
   width: 100%;
   position: relative;
-  height: 42px;
-  min-height: 42px;
+  height: 44px;
+  min-height: 44px;
   background: rgba(11, 15, 20, 0.96);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -1014,23 +1014,24 @@ body.topbar-hidden .topbar {
 .topbar-search-host .home-search-input,
 .topbar-search-host .movies-tv-search-row input,
 .topbar-search-host .music-header-query {
-  height: 42px !important;
-  min-height: 42px !important;
+  height: 40px !important;
+  min-height: 40px !important;
   padding: 0 10px !important;
-  margin: 0 !important;
+  margin: 1px 0 !important;
   font-size: 12px !important;
-  line-height: 42px !important;
+  line-height: 40px !important;
   display: block;
   border-radius: 0 !important;
   box-sizing: border-box;
   vertical-align: middle;
+  align-self: center;
 }
 
 .topbar-search-host .home-search-input::placeholder,
 .topbar-search-host .movies-tv-search-row input::placeholder,
 .topbar-search-host .music-header-query::placeholder {
   font-size: 13px !important;
-  line-height: 42px !important;
+  line-height: 40px !important;
 }
 
 .topbar-search-host .home-search-input:focus,
@@ -1040,8 +1041,8 @@ body.topbar-hidden .topbar {
 }
 
 .topbar-search-host .button {
-  height: 42px;
-  min-height: 42px;
+  height: 40px;
+  min-height: 40px;
   border-radius: 0;
   border-top: 0;
   border-bottom: 0;
@@ -1050,7 +1051,7 @@ body.topbar-hidden .topbar {
   align-items: center;
   justify-content: center;
   align-self: stretch;
-  font-size: 12px;
+  font-size: 11px;
   padding: 0 13px;
   min-width: 78px;
   font-weight: 700;
@@ -1060,13 +1061,15 @@ body.topbar-hidden .topbar {
   box-sizing: border-box;
   position: relative;
   z-index: 1;
+  align-self: center;
+  margin: 1px 0;
 }
 
 .topbar-search-host .home-source-toggle {
   height: 40px;
   min-height: 40px;
   padding: 0 9px;
-  min-width: 84px;
+  min-width: 80px;
   border: 0;
   border-right: 1px solid var(--border);
   border-radius: 14px 0 0 14px;
@@ -1075,8 +1078,8 @@ body.topbar-hidden .topbar {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  align-self: stretch;
-  font-size: 10px;
+  align-self: center;
+  font-size: 11px;
   line-height: 1;
   box-sizing: border-box;
   position: relative;
@@ -1090,7 +1093,7 @@ body.topbar-hidden .topbar {
 .topbar-search-host .home-source-filters {
   position: relative;
   flex: 0 0 auto;
-  z-index: 25;
+  z-index: 2;
   margin: 1px 0 1px 1px;
 }
 
@@ -1098,12 +1101,13 @@ body.topbar-hidden .topbar {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
+  z-index: 40;
 }
 
 .searchbar-leading-icon {
   width: 36px;
   min-width: 36px;
-  height: 42px;
+  height: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1112,6 +1116,8 @@ body.topbar-hidden .topbar {
   pointer-events: none;
   position: relative;
   z-index: 1;
+  align-self: center;
+  margin: 1px 0;
 }
 
 .searchbar-leading-icon svg {
@@ -1139,8 +1145,8 @@ body.topbar-hidden .topbar {
 .topbar-search-host .button.primary,
 .topbar-search-host .button.ghost.small,
 .topbar-search-host .button.primary.small {
-  height: 42px;
-  min-height: 42px;
+  height: 40px;
+  min-height: 40px;
   border-radius: 0;
 }
 
@@ -1604,6 +1610,8 @@ body.topbar-hidden .topbar {
   padding: 22px;
   display: grid;
   gap: 12px;
+  min-height: 236px;
+  align-content: start;
   cursor: pointer;
   transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
 }
@@ -2432,12 +2440,14 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
 
 .music-results-toolbar {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   margin: 0;
   gap: 12px;
   min-height: 38px;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
+  margin-left: auto;
 }
 
 .music-results-toolbar-nav {
@@ -2453,7 +2463,9 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
   gap: 14px;
   flex-wrap: nowrap;
   justify-content: flex-end;
-  margin-left: auto;
+  margin-left: 0;
+  padding-right: 8px;
+  max-width: 100%;
 }
 
 .music-results-size-control,
@@ -2527,6 +2539,16 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
   gap: 8px;
   align-items: center;
   margin: 0;
+}
+
+.movies-tv-section-toggle .movies-tv-nav {
+  min-height: 44px;
+  height: 44px;
+  padding: 0 18px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .home-section-toggle {
@@ -6510,15 +6532,14 @@ body.home-page .home-search-actions {
   margin-bottom: 10px;
 }
 
-.home-preview-actions {
+.home-preview-header-actions {
   display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
-  margin-bottom: 12px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
 }
 
-.home-preview-actions .button {
+.home-preview-header-actions .button {
   min-height: 40px;
   padding-inline: 16px;
 }
@@ -7279,9 +7300,9 @@ body.home-page .home-search-actions {
 }
 
 #music-panel .music-top-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr) 440px;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
   width: 100%;
   min-width: 0;
@@ -7301,9 +7322,17 @@ body.home-page .home-search-actions {
 }
 
 .music-section-toggle {
-  justify-content: flex-start;
+  justify-content: center;
   margin: 0;
-  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.music-nav-slot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 38px;
+  min-width: 0;
 }
 
 .music-toolbar-slot {
@@ -7311,8 +7340,27 @@ body.home-page .home-search-actions {
   align-items: center;
   justify-content: flex-end;
   min-height: 38px;
-  flex: 1 1 auto;
   min-width: 0;
+}
+
+@media (max-width: 1200px) {
+  #music-panel .music-top-row {
+    grid-template-columns: 132px minmax(0, 1fr) 360px;
+    gap: 12px;
+  }
+}
+
+@media (max-width: 980px) {
+  #music-panel .music-top-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .music-nav-slot,
+  .music-section-toggle,
+  .music-toolbar-slot {
+    justify-content: flex-start;
+  }
 }
 
 #music-workspace {

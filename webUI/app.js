@@ -582,6 +582,10 @@ function getMusicToolbarSlot() {
   return $("#music-toolbar-slot");
 }
 
+function getMusicNavSlot() {
+  return $("#music-nav-slot");
+}
+
 function focusMusicResults() {
   const results = $("#music-results-container");
   if (!results) return;
@@ -1814,6 +1818,7 @@ function setMusicSection(section) {
   const messageRegion = $("#music-page-message-region");
   const reviewRegion = $("#music-page-review-region");
   const toolbarSlot = getMusicToolbarSlot();
+  const navSlot = getMusicNavSlot();
   if (messageRegion) {
     messageRegion.classList.toggle("hidden", normalized !== "browse");
   }
@@ -1822,6 +1827,9 @@ function setMusicSection(section) {
   }
   if (toolbarSlot && normalized !== "browse") {
     toolbarSlot.innerHTML = "";
+  }
+  if (navSlot && normalized !== "browse") {
+    navSlot.innerHTML = "";
   }
   if (normalized === "browse") {
     renderMusicLanding();
@@ -8277,9 +8285,11 @@ function getSortedMusicAlbums(albums = []) {
 function renderMusicResultsControls({ artists = [], albums = [], tracks = [], backButton = null } = {}) {
   const container = $("#music-results-container");
   const toolbarSlot = getMusicToolbarSlot();
-  if (!container || !toolbarSlot) return;
+  const navSlot = getMusicNavSlot();
+  if (!container || !toolbarSlot || !navSlot) return;
   container.style.setProperty("--music-card-min", `${state.musicCardSize || UI_DEFAULTS.music_card_size}px`);
   toolbarSlot.querySelector(".music-results-toolbar")?.remove();
+  navSlot.innerHTML = "";
   const hasArtists = Array.isArray(artists) && artists.length > 0;
   const hasAlbums = Array.isArray(albums) && albums.length > 0;
   const hasTracks = Array.isArray(tracks) && tracks.length > 0;
@@ -8296,7 +8306,7 @@ function renderMusicResultsControls({ artists = [], albums = [], tracks = [], ba
     const nav = document.createElement("div");
     nav.className = "music-results-toolbar-nav";
     nav.appendChild(backButton);
-    toolbar.appendChild(nav);
+    navSlot.appendChild(nav);
   }
   const actions = document.createElement("div");
   actions.className = "music-results-toolbar-actions";
@@ -8773,13 +8783,7 @@ function findArrGenreMatch(query) {
   const normalizedQuery = normalizeArrGenreQuery(query);
   if (!normalizedQuery) return null;
   const genres = getCurrentArrGenres();
-  let exact = genres.find((item) => normalizeArrGenreQuery(item?.name) === normalizedQuery);
-  if (exact) return exact;
-  exact = genres.find((item) => {
-    const name = normalizeArrGenreQuery(item?.name);
-    return normalizedQuery.length >= 4 && (name.includes(normalizedQuery) || normalizedQuery.includes(name));
-  });
-  return exact || null;
+  return genres.find((item) => normalizeArrGenreQuery(item?.name) === normalizedQuery) || null;
 }
 
 function isTmdbConfigured() {
@@ -9964,6 +9968,10 @@ function stopHomeResultPolling() {
 function setHomeResultsStatus(text) {
   const statusEl = $("#home-results-status-text");
   if (statusEl) {
+    if (state.currentPage === "video" && String(text || "").trim() === "Searching sources…") {
+      statusEl.textContent = "Results";
+      return;
+    }
     statusEl.textContent = text;
   }
 }
