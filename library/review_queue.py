@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -499,7 +500,15 @@ def _backfill_resolution_for_accepted_review(db_path: str, item: dict[str, Any],
             "final_path": str(final_path or "").strip() or None,
         },
     )
-    return result if isinstance(result, dict) else {"status": "updated"}
+    normalized = result if isinstance(result, dict) else {"status": "updated"}
+    logging.info(
+        "review_accept_resolution_backfill recording_mbid=%s source=%s source_url=%s status=%s",
+        recording_mbid,
+        source,
+        candidate_url,
+        str(normalized.get("status") or "updated"),
+    )
+    return normalized
 
 
 def accept_review_queue_items(db_path: str, item_ids: list[str]) -> dict[str, Any]:

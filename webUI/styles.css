@@ -5331,16 +5331,82 @@ a[aria-disabled="true"] {
   color: var(--muted);
 }
 
+.notice[data-kind="success"],
+.notice[data-kind="info"] {
+  color: var(--accent);
+}
+
 .hidden {
   display: none;
 }
 
-.notice.warn {
+.notice.warn,
+.notice[data-kind="warning"] {
   color: var(--warn);
 }
 
-.notice.critical {
+.notice.critical,
+.notice[data-kind="error"] {
   color: var(--danger);
+}
+
+.app-toast-region {
+  position: fixed;
+  top: 78px;
+  right: 20px;
+  z-index: 60;
+  display: grid;
+  gap: 10px;
+  width: min(360px, calc(100vw - 28px));
+  pointer-events: none;
+}
+
+.app-toast {
+  pointer-events: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(89, 176, 255, 0.24);
+  background: color-mix(in srgb, #09111c 94%, transparent);
+  box-shadow: 0 18px 36px rgba(2, 6, 23, 0.28);
+  backdrop-filter: blur(12px);
+}
+
+:root[data-theme="light"] .app-toast {
+  background: color-mix(in srgb, #ffffff 94%, transparent);
+  border-color: rgba(15, 23, 42, 0.1);
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.12);
+}
+
+.app-toast[data-kind="warning"] {
+  border-color: rgba(241, 199, 104, 0.34);
+}
+
+.app-toast[data-kind="error"] {
+  border-color: rgba(255, 123, 123, 0.34);
+}
+
+.app-toast-copy {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.93rem;
+  line-height: 1.4;
+}
+
+.app-toast-close {
+  min-width: 28px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.app-toast-close:hover {
+  color: var(--text);
 }
 
 .chip {
@@ -6559,8 +6625,7 @@ body.home-page .home-search-actions {
 }
 
 :root[data-theme="light"] .home-preview-card,
-:root[data-theme="light"] .arr-details-card,
-:root[data-theme="light"] .music-player-modal-card {
+:root[data-theme="light"] .arr-details-card {
   background: #ffffff;
   border-color: rgba(15, 23, 42, 0.1);
   box-shadow: 0 18px 36px rgba(15, 23, 42, 0.08);
@@ -7683,10 +7748,6 @@ body.home-page .home-search-actions {
   justify-content: flex-end;
 }
 
-.music-player-modal-card {
-  max-width: 1240px;
-}
-
 .music-player-sidebar {
   display: grid;
   gap: 8px;
@@ -8286,6 +8347,12 @@ body[data-page="music"] #music-panel .music-page-shell {
   .music-player-progress-row {
     grid-template-columns: 48px minmax(0, 1fr) 48px;
     gap: 8px;
+  }
+
+  .app-toast-region {
+    top: 68px;
+    right: 12px;
+    width: min(360px, calc(100vw - 24px));
   }
 }
 

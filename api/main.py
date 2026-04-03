@@ -9364,6 +9364,14 @@ def music_runtime_resolution(data: dict = Body(...)):
         source_id=source_id,
         raw_payload=raw_payload,
     )
+    logging.info(
+        "music_runtime_resolution_recorded recording_mbid=%s source=%s source_url=%s resolved_via=%s status=%s",
+        recording_mbid,
+        source,
+        source_url,
+        str(raw_payload.get("resolved_via") or payload.get("resolved_via") or "runtime_playback"),
+        str((result or {}).get("status") or "updated"),
+    )
     return safe_json({"status": "ok", "result": result})
 
 
@@ -11253,6 +11261,13 @@ async def api_player_station_start(station_id: int, queue_target: int = Query(ST
             raise HTTPException(status_code=404, detail={"error": "station_not_found"})
         payload = start_station(conn, cfg, station=station, queue_target=queue_target)
         detail = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=10)
+    logger.info(
+        "player_station_start station_id=%s queue=%s current_recording_mbid=%s current_source=%s",
+        int(station_id),
+        len(payload.get("queue") or []),
+        str(((payload.get("current_item") or {}).get("recording_mbid") or "")).strip() or None,
+        str(((payload.get("current_item") or {}).get("source") or "")).strip() or None,
+    )
     return safe_json({"station": detail or station, **payload})
 
 
@@ -11267,6 +11282,13 @@ async def api_player_station_next(station_id: int, queue_target: int = Query(STA
             raise HTTPException(status_code=404, detail={"error": "station_not_found"})
         payload = advance_station(conn, cfg, station=station, queue_target=queue_target)
         detail = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=10)
+    logger.info(
+        "player_station_next station_id=%s queue=%s current_recording_mbid=%s current_source=%s",
+        int(station_id),
+        len(payload.get("queue") or []),
+        str(((payload.get("current_item") or {}).get("recording_mbid") or "")).strip() or None,
+        str(((payload.get("current_item") or {}).get("source") or "")).strip() or None,
+    )
     return safe_json({"station": detail or station, **payload})
 
 

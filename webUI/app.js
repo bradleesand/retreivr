@@ -159,7 +159,6 @@ const state = {
   musicSection: "browse",
   homeSection: "search",
   moviesTvSection: "search",
-  musicPlayerExpanded: false,
   musicLibraryMode: "albums",
   musicLibraryLoaded: false,
   videoLibraryItems: [],
@@ -188,6 +187,10 @@ const oauthState = {
   sessionId: null,
   authUrl: "",
   account: "",
+};
+const notificationState = {
+  counter: 0,
+  timers: new Map(),
 };
 const previewState = {
   open: false,
@@ -579,8 +582,103 @@ function setNotice(el, message, isError = false) {
   if (!el) return;
   const text = String(message || "");
   el.textContent = text;
-  el.style.color = isError ? "#ff7b7b" : "#59b0ff";
+  el.dataset.kind = isError ? "error" : "info";
   el.classList.toggle("hidden", !text.trim());
+}
+
+function setInlineStatus(target, options = {}) {
+  const el = typeof target === "string" ? $(target) : target;
+  if (!el) return;
+  if (typeof options === "string") {
+    setNotice(el, options, false);
+    el.setAttribute("role", "status");
+    return;
+  }
+  const kind = String(options.kind || "info").trim().toLowerCase() || "info";
+  const message = String(options.message || "").trim();
+  el.dataset.kind = kind;
+  el.classList.toggle("warn", kind === "warning" && !!message);
+  el.classList.toggle("critical", kind === "error" && !!message);
+  el.setAttribute("role", kind === "error" ? "alert" : "status");
+  setNotice(el, message, kind === "error");
+}
+
+function getToastRegion() {
+  return $("#app-toast-region");
+}
+
+function dismissNotification(notificationId) {
+  const id = String(notificationId || "").trim();
+  if (!id) return;
+  const timer = notificationState.timers.get(id);
+  if (timer) {
+    window.clearTimeout(timer);
+    notificationState.timers.delete(id);
+  }
+  const selector = `.app-toast[data-toast-id="${CSS.escape(id)}"]`;
+  document.querySelector(selector)?.remove();
+}
+
+function clearNotifications(scope) {
+  const normalizedScope = String(scope || "").trim();
+  const host = getToastRegion();
+  if (!host) return;
+  $$(".app-toast", host).forEach((toast) => {
+    if (!normalizedScope || String(toast.dataset.scope || "").trim() === normalizedScope) {
+      dismissNotification(toast.dataset.toastId || "");
+    }
+  });
+}
+
+function notify(options = {}) {
+  const host = getToastRegion();
+  if (!host) return null;
+  const kind = String(options.kind || "info").trim().toLowerCase() || "info";
+  const message = String(options.message || "").trim();
+  if (!message) return null;
+  const sticky = !!options.sticky || kind === "error";
+  const ttlMs = Number.isFinite(Number(options.ttlMs)) ? Math.max(1200, Number(options.ttlMs)) : (kind === "error" ? 7000 : 3200);
+  const scope = String(options.scope || "").trim();
+  if (scope) {
+    clearNotifications(scope);
+  }
+  const id = `toast-${Date.now()}-${notificationState.counter += 1}`;
+  const toast = document.createElement("div");
+  toast.className = "app-toast";
+  toast.dataset.kind = kind;
+  toast.dataset.scope = scope;
+  toast.dataset.toastId = id;
+  toast.setAttribute("role", kind === "error" ? "alert" : "status");
+  toast.innerHTML = `
+    <div class="app-toast-copy">${escapeHtml(message)}</div>
+    <button class="app-toast-close" type="button" aria-label="Dismiss notification">×</button>
+  `;
+  toast.querySelector(".app-toast-close")?.addEventListener("click", () => dismissNotification(id));
+  host.appendChild(toast);
+  if (!sticky) {
+    const timer = window.setTimeout(() => dismissNotification(id), ttlMs);
+    notificationState.timers.set(id, timer);
+  }
+  return id;
+}
+
+function setMusicPlayerStatus(message, options = {}) {
+  const kind = String(options.kind || "info").trim().toLowerCase() || "info";
+  const useToast = !!options.toast || (kind !== "error" && !options.inline);
+  if (useToast) {
+    notify({
+      kind,
+      message,
+      ttlMs: options.ttlMs,
+      sticky: options.sticky,
+      scope: options.scope || "music-player",
+    });
+    if (!options.preserveInline) {
+      setInlineStatus("#music-player-message", { kind: "info", message: "" });
+    }
+    return;
+  }
+  setInlineStatus("#music-player-message", { kind, message });
 }
 
 function getMusicPageMessageEl() {
@@ -593,20 +691,22 @@ function getMusicPageMessageEl() {
 function setMusicPageNotice(message, isError = false) {
   const el = getMusicPageMessageEl();
   const region = $("#music-page-message-region");
-  const hasText = !!String(message || "").trim();
-  if (el) {
-    el.classList.toggle("music-error-notice", !!isError && hasText);
-  }
-  if (state.currentPage === "music" && state.musicSection === "browse" && !isError) {
-    setNotice(el, "", false);
-    if (region) {
-      region.classList.add("hidden");
-    }
+  const text = String(message || "").trim();
+  const hasText = !!text;
+  if (!hasText) {
+    setInlineStatus(el, { kind: "info", message: "" });
+    if (region) region.classList.add("hidden");
     return;
   }
-  setNotice(el, message, isError);
+  if (!isError) {
+    notify({ kind: "info", message: text, scope: "music-browse" });
+    setInlineStatus(el, { kind: "info", message: "" });
+    if (region) region.classList.add("hidden");
+    return;
+  }
+  setInlineStatus(el, { kind: "error", message: text });
   if (region) {
-    region.classList.toggle("hidden", !hasText || !isError);
+    region.classList.toggle("hidden", !hasText);
   }
 }
 
@@ -1513,7 +1613,6 @@ function setPage(page) {
   } else {
     stopHomeResultPolling();
     updateHomeViewAdvancedLink();
-    closeMusicPlayerModal();
   }
   if (target !== "movies-tv") {
     stopArrStatusPolling();
@@ -1944,17 +2043,6 @@ function syncMusicStationCreateForm() {
   }
 }
 
-function openMusicPlayerModal() {
-  const modal = $("#music-player-modal");
-  const slot = $("#music-player-modal-slot");
-  const playerMain = $("#music-player-view .music-player-main");
-  if (modal && slot && playerMain) {
-    slot.appendChild(playerMain);
-    modal.classList.remove("hidden");
-    state.musicPlayerExpanded = true;
-  }
-}
-
 function openMusicPlayerScreen({ showVideo = false } = {}) {
   setPage("music");
   setMusicSection("player");
@@ -1964,19 +2052,6 @@ function openMusicPlayerScreen({ showVideo = false } = {}) {
   }
   syncMusicPlayerVideoShell();
   syncBottomPlayerShell();
-}
-
-function closeMusicPlayerModal() {
-  const modal = $("#music-player-modal");
-  const inlineSlot = $("#music-player-view");
-  const playerMain = $("#music-player-modal-slot .music-player-main");
-  if (inlineSlot && playerMain) {
-    inlineSlot.appendChild(playerMain);
-  }
-  if (modal) {
-    modal.classList.add("hidden");
-  }
-  state.musicPlayerExpanded = false;
 }
 
 function escapeAttr(value) {
@@ -4395,7 +4470,7 @@ function getPlayerTracksForAlbum(artistKey = "", albumKey = "") {
 async function loadMusicPlayerView() {
   const messageEl = $("#music-player-message");
   if (messageEl) {
-    setNotice(messageEl, "Loading music player…", false);
+    setInlineStatus(messageEl, { kind: "info", message: "Loading music player…" });
   }
   try {
     const [libraryPayload, librarySummaryPayload, stationsPayload, historyPayload, playlistsPayload, communityPayload] = await Promise.all([
@@ -4443,11 +4518,11 @@ async function loadMusicPlayerView() {
     syncBottomPlayerShell();
     syncMusicPlayerVideoShell();
     if (messageEl) {
-      setNotice(messageEl, "", false);
+      setInlineStatus(messageEl, { kind: "info", message: "" });
     }
   } catch (err) {
     if (messageEl) {
-      setNotice(messageEl, `Music player failed to load: ${toUserErrorMessage(err)}`, true);
+      setInlineStatus(messageEl, { kind: "error", message: `Music player failed to load: ${toUserErrorMessage(err)}` });
     }
   }
 }
@@ -4481,6 +4556,14 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
 
   const videoId = String(payload.video_id || extractYouTubeVideoId(payload.stream_url) || "").trim();
   const isYouTube = !!videoId;
+  if (!isYouTube && !payload.stream_url) {
+    setMusicPlayerStatus("No playable source found for this track.", {
+      kind: "error",
+      sticky: true,
+      inline: state.currentPage === "music" && state.musicSection === "player",
+    });
+    throw new Error("No playable source found for this track.");
+  }
 
   state.playerCurrent = payload;
   state.playerCurrentHasVideo = !!(isYouTube || String(payload.video_embed_url || "").trim());
@@ -4501,7 +4584,11 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
       state.playerCurrent = payload;
       state.playerCurrentHasVideo = !!String(payload.video_embed_url || "").trim();
       if (messageEl) {
-        setNotice(messageEl, "YouTube API transport failed; falling back to direct embed.", true);
+        setMusicPlayerStatus("YouTube API transport failed; falling back to direct embed.", {
+          kind: "warning",
+          toast: true,
+          preserveInline: true,
+        });
       }
     }
   } else {
@@ -6172,16 +6259,26 @@ async function cancelJob(jobId) {
 }
 
 function setMediaLibraryNotice(element, message, isError = false) {
-  if (!element) return;
-  if (!message) {
-    element.textContent = "";
-    element.classList.add("hidden");
-    element.classList.remove("warning");
+  const normalized = typeof isError === "object" && isError !== null
+    ? isError
+    : { kind: isError ? "error" : "info" };
+  const kind = String(normalized.kind || "info").trim().toLowerCase() || "info";
+  const text = String(message || "").trim();
+  const toast = !!normalized.toast && !!text;
+  if (toast) {
+    notify({
+      kind,
+      message: text,
+      ttlMs: normalized.ttlMs,
+      sticky: normalized.sticky,
+      scope: normalized.scope || "media-library",
+    });
+    if (!normalized.preserveInline) {
+      setInlineStatus(element, { kind: "info", message: "" });
+    }
     return;
   }
-  element.textContent = message;
-  element.classList.remove("hidden");
-  element.classList.toggle("warning", !!isError);
+  setInlineStatus(element, { kind, message: text });
 }
 
 function getMusicLibrarySelectedArtist() {
@@ -17675,16 +17772,24 @@ function bindEvents() {
       const messageEl = $("#music-library-message");
       try {
         if (actionName === "music-history-redownload") {
-          setMediaLibraryNotice(messageEl, "Queueing re-download…", false);
+          setMediaLibraryNotice(messageEl, "Queueing re-download…", { kind: "info" });
           await fetchJson(`/api/player/history/${encodeURIComponent(historyId)}/redownload`, { method: "POST" });
-          setMediaLibraryNotice(messageEl, "Re-download queued. Review Queue and Search will show progress as it resolves.", false);
+          setMediaLibraryNotice(messageEl, "Re-download queued. Review Queue and Search will show progress as it resolves.", {
+            kind: "success",
+            toast: true,
+            scope: "music-library",
+          });
           return;
         }
         if (actionName === "music-history-remove") {
           await fetchJson(`/api/player/history/${encodeURIComponent(historyId)}`, { method: "DELETE" });
           state.playerMissingHistory = (state.playerMissingHistory || []).filter((item) => Number(item?.id || 0) !== historyId);
           renderMusicLibrarySection();
-          setMediaLibraryNotice(messageEl, "Removed from history.", false);
+          setMediaLibraryNotice(messageEl, "Removed from history.", {
+            kind: "success",
+            toast: true,
+            scope: "music-library",
+          });
         }
       } catch (err) {
         setMediaLibraryNotice(messageEl, toUserErrorMessage(err), true);
@@ -18905,12 +19010,6 @@ function bindEvents() {
       openMusicPlayerScreen({ showVideo: false });
     });
   }
-  const musicPlayerModalClose = $("#music-player-modal-close");
-  if (musicPlayerModalClose) {
-    musicPlayerModalClose.addEventListener("click", () => {
-      closeMusicPlayerModal();
-    });
-  }
   $("#music-player-station-seed-type")?.addEventListener("change", () => {
     syncMusicStationCreateForm();
   });
@@ -18923,7 +19022,7 @@ function bindEvents() {
         const stationMode = String($("#music-player-station-mode")?.value || "mix").trim();
         const seedValue = String($("#music-player-station-seed-value")?.value || "").trim();
         if (!seedValue && seedType !== "favorites") {
-          setNotice($("#music-player-message"), "Seed value is required for this station.", true);
+          setMusicPlayerStatus("Seed value is required for this station.", { kind: "error", inline: true });
           return;
         }
         const seedIdentity = seedType === "album"
@@ -18947,7 +19046,7 @@ function bindEvents() {
       if (createPlaylistButton) {
         const name = String($("#music-player-playlist-name")?.value || "").trim();
         if (!name) {
-          setNotice($("#music-player-message"), "Playlist name is required.", true);
+          setMusicPlayerStatus("Playlist name is required.", { kind: "error", inline: true });
           return;
         }
         const payload = await fetchJson("/api/player/playlists", {
@@ -18959,7 +19058,7 @@ function bindEvents() {
         await loadMusicPlayerView();
         setMusicPlayerView("library");
         setMusicSection("playlists");
-        setNotice($("#music-player-message"), "Playlist created.", false);
+        setMusicPlayerStatus("Playlist created.", { kind: "success", toast: true });
         return;
       }
       const loadStationButton = event.target.closest('[data-action="player-load-station"]');
@@ -18971,7 +19070,7 @@ function bindEvents() {
           clearActiveStationPlayback();
           setMusicPlayerView("radio");
           setMusicSection("radio");
-          setNotice($("#music-player-message"), "This station does not have any playable items yet. Try a different seed or browse Community Cache below.", true);
+          setMusicPlayerStatus("This station does not have any playable items yet. Try a different seed or browse Community Cache below.", { kind: "error", inline: true });
           return;
         }
         state.playerActiveStationId = Number(stationId || 0) || null;
@@ -18989,7 +19088,7 @@ function bindEvents() {
           await playMusicPlayerItem(firstItem, { preserveStation: true });
           scheduleStationPrime(stationId, 600);
           const readyCount = Number(payload?.runtime?.ready_count || state.playerQueue.length || 0);
-          setNotice($("#music-player-message"), `Station ready with ${readyCount} prepared item${readyCount === 1 ? "" : "s"}.`, false);
+          setMusicPlayerStatus(`Station ready with ${readyCount} prepared item${readyCount === 1 ? "" : "s"}.`, { kind: "success", toast: true });
         }
         return;
       }
@@ -19008,7 +19107,7 @@ function bindEvents() {
           setPlayerQueue(payload.queue, { preserveCurrent: true });
           state.playerActiveStationRuntime = payload?.runtime || state.playerActiveStationRuntime;
         }
-        setNotice($("#music-player-message"), "Station primed.", false);
+        setMusicPlayerStatus("Station primed.", { kind: "success", toast: true });
         return;
       }
       const deleteStationButton = event.target.closest('[data-action="player-delete-station"]');
@@ -19141,7 +19240,7 @@ function bindEvents() {
         const tracks = getPlayerTracksForAlbum(artistKey, albumKey);
         if (!tracks.length) return;
         queueTracksAtEnd(tracks);
-        setNotice($("#music-player-message"), `${tracks.length} track${tracks.length === 1 ? "" : "s"} added to queue.`, false);
+        setMusicPlayerStatus(`${tracks.length} track${tracks.length === 1 ? "" : "s"} added to queue.`, { kind: "success", toast: true });
         renderMusicPlayerLibrary();
         return;
       }
@@ -19198,7 +19297,7 @@ function bindEvents() {
       if (addToPlaylistButton) {
         const playlistId = Number(addToPlaylistButton.dataset.playlistId || state.playerSelectedPlaylistId || 0) || null;
         if (!playlistId) {
-          setNotice($("#music-player-message"), "Select or create a playlist first.", true);
+          setMusicPlayerStatus("Select or create a playlist first.", { kind: "error", inline: true });
           return;
         }
         await fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}/items`, {
@@ -19223,7 +19322,7 @@ function bindEvents() {
         state.playerPlaylists = Array.isArray(playlistsPayload?.playlists) ? playlistsPayload.playlists : [];
         renderMusicPlayerLibrary();
         setMusicSection("playlists");
-        setNotice($("#music-player-message"), "Track added to playlist.", false);
+        setMusicPlayerStatus("Track added to playlist.", { kind: "success", toast: true });
         return;
       }
       const queueTrackButton = event.target.closest('[data-action="player-queue-track"]');
@@ -19231,7 +19330,7 @@ function bindEvents() {
         const payload = buildPlayableItemFromButton(queueTrackButton);
         queueTracksAtEnd([payload]);
         renderMusicPlayerLibrary();
-        setNotice($("#music-player-message"), "Added to queue.", false);
+        setMusicPlayerStatus("Added to queue.", { kind: "success", toast: true });
         return;
       }
       const playNextButton = event.target.closest('[data-action="player-play-next"]');
@@ -19239,7 +19338,7 @@ function bindEvents() {
         const payload = buildPlayableItemFromButton(playNextButton);
         queueTrackNext(payload);
         renderMusicPlayerLibrary();
-        setNotice($("#music-player-message"), "Will play next.", false);
+        setMusicPlayerStatus("Will play next.", { kind: "success", toast: true });
         return;
       }
       const moveQueueUpButton = event.target.closest('[data-action="player-queue-move-up"]');
@@ -19260,7 +19359,7 @@ function bindEvents() {
       const clearQueueButton = event.target.closest('[data-action="player-clear-queue"]');
       if (clearQueueButton) {
         clearQueue();
-        setNotice($("#music-player-message"), "Queue cleared.", false);
+        setMusicPlayerStatus("Queue cleared.", { kind: "success", toast: true });
         return;
       }
       const saveQueuePlaylistButton = event.target.closest('[data-action="player-save-queue-playlist"]');
@@ -19293,7 +19392,7 @@ function bindEvents() {
         state.playerPlaylists = Array.isArray(playlistsPayload?.playlists) ? playlistsPayload.playlists : [];
         renderMusicPlayerLibrary();
         setMusicSection("playlists");
-        setNotice($("#music-player-message"), "Queue saved as playlist.", false);
+        setMusicPlayerStatus("Queue saved as playlist.", { kind: "success", toast: true });
         return;
       }
       const playButton = event.target.closest('[data-action="player-play"]');
@@ -19309,7 +19408,9 @@ function bindEvents() {
           const playlistItems = Array.isArray(state.playerSelectedPlaylistItems) ? state.playerSelectedPlaylistItems : [];
           setPlayerQueue(buildQueueFromTracks(playlistItems, payload));
         } else if (playButton.closest("#music-player-recent")) {
-          const historyItems = Array.isArray(state.playerHistory) ? state.playerHistory.filter((entry) => entry?.stream_url) : [];
+          const historyItems = Array.isArray(state.playerHistory)
+            ? state.playerHistory.filter((entry) => entry && !entry?.is_missing_local)
+            : [];
           setPlayerQueue(buildQueueFromTracks(historyItems, payload));
         } else if (playButton.closest("#music-player-library")) {
           const libraryTracks = getMusicPlayerFilteredTracks();
@@ -19318,7 +19419,7 @@ function bindEvents() {
         await playMusicPlayerItem(payload, { preserveStation });
       }
     };
-  [$("#music-panel"), $("#music-player-modal")].filter(Boolean).forEach((host) => {
+  [$("#music-panel")].filter(Boolean).forEach((host) => {
     host.addEventListener("click", (event) => {
       handlePlayerHostClick(event).catch(() => {});
     });
