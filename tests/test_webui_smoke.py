@@ -465,8 +465,9 @@ def test_webui_home_direct_url_preview_uses_standard_result_card(webui_server: s
     page.wait_for_selector('#home-results button[data-action="home-download"]', timeout=10000)
     page.wait_for_function(
         """() => {
-          const text = document.querySelector("#home-results .home-result-card strong")?.textContent || "";
-          return /Stub Direct Preview/.test(text);
+          const title = document.querySelector("#home-results .home-candidate-title")?.textContent || "";
+          const hasHeader = !!document.querySelector("#home-results .home-result-card .home-result-header");
+          return /Stub Direct Preview/.test(title) && !hasHeader;
         }""",
         timeout=10000,
     )

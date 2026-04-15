@@ -7791,13 +7791,6 @@ async def api_direct_url_resolve(request: DirectUrlResolveRequest):
         )
     media_mode = _normalize_direct_url_media_mode(request.media_mode)
     playlist_id = extract_playlist_id(url) if _looks_like_playlist_url(url) else None
-    try:
-        normalize_search_payload(
-            {"query": url, "search_only": True},
-            default_sources=list(getattr(app.state.search_service, "adapters", {}).keys()),
-        )
-    except ValueError:
-        pass
     runtime_config = get_loaded_config() or _read_config_or_404()
     if not runtime_config:
         raise RuntimeError("search_missing_runtime_config")

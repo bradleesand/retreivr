@@ -12930,11 +12930,24 @@ async function fetchMusicTracksByAlbum({ artist = "", album = "", releaseGroupMb
 
 async function performMusicModeSearch() {
   const requestSeq = ++state.homeMusicSearchSeq;
+  const rawHeaderQuery = String(document.getElementById("music-header-query")?.value || "").trim();
   const artist = String(document.getElementById("search-artist")?.value || "").trim();
   const album = String(document.getElementById("search-album")?.value || "").trim();
   const track = String(document.getElementById("search-track")?.value || "").trim();
   const musicModeEnabledNow = !!state.homeMusicMode || state.currentPage === "music";
   if (!musicModeEnabledNow) {
+    return;
+  }
+  const directUrlQuery = isValidHttpUrl(rawHeaderQuery)
+    ? rawHeaderQuery
+    : (isValidHttpUrl(artist) ? artist : (isValidHttpUrl(track) ? track : ""));
+  if (directUrlQuery) {
+    const playlistId = extractPlaylistIdFromUrl(directUrlQuery);
+    if (playlistId) {
+      await handleMusicDirectPlaylistPreview(directUrlQuery, playlistId);
+    } else {
+      await handleMusicDirectUrlPreview(directUrlQuery);
+    }
     return;
   }
   if (!artist && !album && !track) {
@@ -13779,6 +13792,18 @@ function renderHomeResultItem(item) {
   if (item.id) {
     card.dataset.itemId = item.id;
   }
+  if (isHomeTransientStandaloneItem(item)) {
+    card.classList.add("direct-url-result-card");
+    const candidateList = document.createElement("div");
+    candidateList.className = "home-candidate-list home-candidate-grid";
+    candidateList.dataset.itemId = item.id || "";
+    const placeholder = document.createElement("div");
+    placeholder.className = "home-results-empty";
+    placeholder.textContent = "Resolving result…";
+    candidateList.appendChild(placeholder);
+    card.appendChild(candidateList);
+    return card;
+  }
   const header = document.createElement("div");
   header.className = "home-result-header";
   const title = document.createElement("div");
@@ -13809,6 +13834,13 @@ function renderHomeResultItem(item) {
 
 function updateHomeResultItemCard(card, item) {
   if (!card || !item) {
+    return;
+  }
+  if (isHomeTransientStandaloneItem(item)) {
+    const candidateList = card.querySelector(".home-candidate-list");
+    if (candidateList) {
+      scheduleHomeCandidateRefresh(item, candidateList);
+    }
     return;
   }
   const summary = buildCompactMediaSummary([item.artist, item.album, item.track]);
@@ -14399,7 +14431,7 @@ function buildHomeTransientRunPayload(item, candidate) {
   return payload;
 }
 
-function presentHomeTransientResolvedResult(resolved, { statusText = "Direct URL preview", detailText = "Review the metadata and click Download to enqueue.", isError = false } = {}) {
+function presentHomeTransientResolvedResult(resolved, { statusText = "Result ready", detailText = "", isError = false } = {}) {
   const container = $("#home-results-list");
   if (!container) return null;
   const normalized = buildHomeTransientResolvedResult(resolved);
@@ -14417,6 +14449,10 @@ function presentHomeTransientResolvedResult(resolved, { statusText = "Direct URL
   setHomeSearchControlsEnabled(true);
   setHomeSearchActive(false);
   return normalized;
+}
+
+function isHomeTransientStandaloneItem(item) {
+  return !!(item?.is_transient_resolved && !item?.request_id);
 }
 
 function formatDetectedIntentLabel(intentType) {
@@ -15000,10 +15036,10 @@ async function submitHomeSearch(autoEnqueue) {
       presentHomeTransientResolvedResult(
         resolved,
         {
-          statusText: isPlaylist ? "Playlist preview" : "Direct URL preview",
+          statusText: "Result ready",
           detailText: isPlaylist
-            ? "Review the card and click Download to enqueue the playlist."
-            : "Review the metadata and click Download to enqueue.",
+            ? ""
+            : "",
         }
       );
       setNotice(

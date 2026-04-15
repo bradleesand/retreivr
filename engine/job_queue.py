@@ -7534,6 +7534,20 @@ def preview_direct_url(url, config):
                 continue
         return oembed_title, oembed_author, oembed_thumbnail
 
+    source = resolve_source(url)
+    video_id = extract_video_id(url)
+    if source in {"youtube", "youtube_music"} and video_id:
+        oembed_title, oembed_author, oembed_thumbnail = _youtube_oembed_fallback(url, video_id)
+        if oembed_title or oembed_author or oembed_thumbnail:
+            return {
+                "title": oembed_title or f"YouTube Video ({video_id})",
+                "uploader": oembed_author or "YouTube",
+                "thumbnail_url": oembed_thumbnail or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                "url": url,
+                "source": source,
+                "duration_sec": None,
+            }
+
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -7542,7 +7556,6 @@ def preview_direct_url(url, config):
         uploader = meta.get("channel") or meta.get("artist")
         thumb = meta.get("thumbnail_url")
         if not (title and uploader):
-            video_id = extract_video_id(url)
             oembed_title, oembed_author, oembed_thumbnail = _youtube_oembed_fallback(url, video_id)
             title = title or oembed_title or (f"YouTube Video ({video_id})" if video_id else "YouTube Video")
             uploader = uploader or oembed_author or "YouTube"
