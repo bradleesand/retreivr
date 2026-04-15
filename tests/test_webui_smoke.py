@@ -37,6 +37,7 @@ def _build_webui_test_app() -> FastAPI:
         "item_id": "item-1",
         "candidate_id": "cand-1",
         "job_id": "job-1",
+        "run_id": "run-1",
         "request_status": "completed",
         "job_status": "",
     }
@@ -50,16 +51,47 @@ def _build_webui_test_app() -> FastAPI:
         return {"app_version": "0.0.0-test"}
 
     @app.get("/api/status")
-    def api_status() -> dict[str, Any]:
+    def api_status(run_id: str | None = None) -> dict[str, Any]:
         return {
             "running": False,
-            "run_id": None,
+            "run_id": run_id or state["run_id"],
             "started_at": None,
             "finished_at": None,
+            "state": "completed" if run_id else "idle",
+            "status": {
+                "client_delivery_id": "delivery-1" if run_id else None,
+                "client_delivery_filename": "direct-preview.mp3" if run_id else None,
+            } if run_id else {"run_successes": [], "run_failures": []},
             "watcher": {"enabled": False, "paused": False},
             "scheduler": {"enabled": False},
-            "status": {"run_successes": [], "run_failures": []},
             "watcher_status": {"state": "idle", "pending_playlists_count": 0, "batch_active": False},
+        }
+
+    @app.post("/api/run", status_code=202)
+    def api_run(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {"run_id": state["run_id"], "status": "started"}
+
+    @app.post("/api/direct_url_preview")
+    def api_direct_url_preview(payload: dict[str, Any]) -> dict[str, Any]:
+        url = str(payload.get("url") or "https://www.youtube.com/watch?v=stub123")
+        return {
+            "preview": {
+                "title": "Stub Direct Preview",
+                "uploader": "Stub Channel",
+                "thumbnail_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
+                "url": url,
+                "source": "youtube",
+                "duration_sec": 123,
+            }
+        }
+
+    @app.get("/api/playlist/preview")
+    def api_playlist_preview(playlist_id: str) -> dict[str, Any]:
+        return {
+            "playlist_id": playlist_id,
+            "playlist_title": "Stub Playlist",
+            "first_video_id": "stub123",
+            "thumbnail_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
         }
 
     @app.get("/api/spotify/status")
@@ -310,6 +342,65 @@ def test_webui_home_import_playlist_smoke(webui_server: str, page, tmp_path: Pat
             && text.includes("Resolved: 3")
             && text.includes("Enqueued: 3")
             && text.includes("Unresolved: 1");
+        }""",
+        timeout=10000,
+    )
+
+    assert not page_errors, f"Page JS errors detected: {page_errors}"
+    assert not console_errors, f"Console errors detected: {console_errors}"
+
+
+def test_webui_home_direct_url_preview_uses_standard_result_card(webui_server: str, page) -> None:
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def on_console(msg) -> None:
+        if msg.type == "error":
+            console_errors.append(msg.text)
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda err: page_errors.append(str(err)))
+
+    page.goto(webui_server, wait_until="networkidle")
+    page.fill("#home-search-input", "https://www.youtube.com/watch?v=stub123")
+    page.click("#home-search-only")
+
+    page.wait_for_selector("#home-results .home-result-card", timeout=10000)
+    page.wait_for_selector("#home-results .home-candidate-row", timeout=10000)
+    page.wait_for_selector('#home-results button[data-action="home-direct-download"]', timeout=10000)
+    page.wait_for_function(
+        """() => {
+          const text = document.querySelector("#home-results .home-result-card strong")?.textContent || "";
+          return /Stub Direct Preview/.test(text);
+        }""",
+        timeout=10000,
+    )
+
+    assert not page_errors, f"Page JS errors detected: {page_errors}"
+    assert not console_errors, f"Console errors detected: {console_errors}"
+
+
+def test_webui_music_direct_url_preview_uses_music_card(webui_server: str, page) -> None:
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def on_console(msg) -> None:
+        if msg.type == "error":
+            console_errors.append(msg.text)
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda err: page_errors.append(str(err)))
+
+    page.goto(f"{webui_server}#music", wait_until="networkidle")
+    page.fill("#music-header-query", "https://www.youtube.com/watch?v=stub123")
+    page.click("#music-header-submit")
+
+    page.wait_for_selector("#music-results-container .home-result-card", timeout=10000)
+    page.wait_for_selector("#music-results-container .music-download-btn", timeout=10000)
+    page.wait_for_function(
+        """() => {
+          const text = document.querySelector("#music-results-container .home-candidate-title")?.textContent || "";
+          return /Stub Direct Preview/.test(text);
         }""",
         timeout=10000,
     )

@@ -202,6 +202,7 @@ const previewState = {
   itemId: "",
   candidateId: "",
   directUrl: "",
+  directOnly: false,
   description: "",
   postedText: "",
   durationText: "",
@@ -4950,6 +4951,7 @@ function buildHomePreviewDescriptorFromRow(row) {
   const itemId = String(previewButton.dataset.previewItemId || "").trim();
   const candidateId = String(previewButton.dataset.previewCandidateId || "").trim();
   const directUrl = String(previewButton.dataset.previewDirectUrl || "").trim();
+  const directOnly = String(previewButton.dataset.previewDirectOnly || "").trim() === "true";
   if (mediaType === "audio") {
     const streamUrl = String(previewButton.dataset.previewStreamUrl || "").trim();
     if (!streamUrl || !isValidHttpUrl(streamUrl)) return null;
@@ -4964,6 +4966,7 @@ function buildHomePreviewDescriptorFromRow(row) {
       itemId,
       candidateId,
       directUrl,
+      directOnly,
     };
   }
   const embedUrl = String(previewButton.dataset.previewEmbedUrl || "").trim();
@@ -4979,6 +4982,7 @@ function buildHomePreviewDescriptorFromRow(row) {
     itemId,
     candidateId,
     directUrl,
+    directOnly,
   };
 }
 
@@ -5014,6 +5018,7 @@ function openHomePreviewModal(descriptor) {
   previewState.itemId = String(descriptor.itemId || "").trim();
   previewState.candidateId = String(descriptor.candidateId || "").trim();
   previewState.directUrl = String(descriptor.directUrl || "").trim();
+  previewState.directOnly = !!descriptor.directOnly;
   previewState.description = String(descriptor.description || "").trim();
   previewState.postedText = String(descriptor.postedText || "").trim();
   previewState.durationText = String(descriptor.durationText || "").trim();
@@ -5026,7 +5031,7 @@ function openHomePreviewModal(descriptor) {
   detailsMetaEl.textContent = detailMeta;
   descriptionEl.textContent = previewState.description || "";
   detailsWrap.classList.toggle("hidden", !detailMeta && !previewState.description);
-  const canDownload = !!(previewState.directUrl && (previewState.candidateId || previewState.itemId));
+  const canDownload = !!(previewState.directUrl && (previewState.candidateId || previewState.itemId || previewState.directOnly));
   downloadButton.classList.toggle("hidden", previewState.mediaType !== "video" || !canDownload);
   downloadButton.disabled = !canDownload;
   downloadButton.textContent = "Download";
@@ -5078,6 +5083,7 @@ function closeHomePreviewModal() {
   previewState.itemId = "";
   previewState.candidateId = "";
   previewState.directUrl = "";
+  previewState.directOnly = false;
   previewState.description = "";
   previewState.postedText = "";
   previewState.durationText = "";
@@ -6118,6 +6124,25 @@ function parseMusicHeaderQuery(rawQuery, mode = "auto") {
 
 async function runMusicHeaderSearch() {
   const query = $("#music-header-query")?.value || "";
+  const trimmedQuery = String(query || "").trim();
+  if (isValidHttpUrl(trimmedQuery)) {
+    persistRecentMusicSearch(trimmedQuery);
+    const playlistId = extractPlaylistIdFromUrl(trimmedQuery);
+    try {
+      if (playlistId) {
+        await handleMusicDirectPlaylistPreview(trimmedQuery, playlistId);
+      } else {
+        await handleMusicDirectUrlPreview(trimmedQuery);
+      }
+    } catch (err) {
+      setMusicPageNotice(`Music direct URL failed: ${toUserErrorMessage(err)}`, true);
+      const container = $("#music-results-container");
+      if (container) {
+        container.innerHTML = '<div class="home-results-empty">Direct URL preview failed.</div>';
+      }
+    }
+    return;
+  }
   const parsed = parseMusicHeaderQuery(query, state.musicHeaderMode || "auto");
   persistRecentMusicSearch(query);
   if ($("#search-artist")) $("#search-artist").value = parsed.artist;
@@ -11396,6 +11421,7 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
 
 function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued } = {}) {
   const releaseGroupMbid = String(albumItem?.release_group_mbid || "").trim();
+  const directPlaylistUrl = String(albumItem?.direct_playlist_url || "").trim();
   const card = document.createElement("article");
   card.className = "home-result-card album-card music-meta-card music-grid-card music-album-grid-card";
   card.dataset.releaseGroupMbid = releaseGroupMbid;
@@ -11420,7 +11446,13 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   content.appendChild(statusRow);
   const albumRef = document.createElement("div");
   albumRef.className = "home-mb-entity-ref";
-  albumRef.textContent = releaseGroupMbid ? `MB: release-group ${releaseGroupMbid}` : "MB: release-group (unknown)";
+  if (releaseGroupMbid) {
+    albumRef.textContent = `MB: release-group ${releaseGroupMbid}`;
+  } else if (directPlaylistUrl) {
+    albumRef.textContent = "Source: direct playlist URL";
+  } else {
+    albumRef.textContent = "MB: release-group (unknown)";
+  }
   content.appendChild(albumRef);
   card.appendChild(content);
   const action = document.createElement("div");
@@ -11434,6 +11466,10 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   viewTracksButton.dataset.albumTitle = String(albumItem?.title || "");
   viewTracksButton.dataset.artistCredit = String(albumItem?.artist || "");
   viewTracksButton.textContent = "View Tracks";
+  if (!releaseGroupMbid) {
+    viewTracksButton.disabled = true;
+    viewTracksButton.title = "Track listing is unavailable for this direct playlist preview.";
+  }
   const button = document.createElement("button");
   button.className = "button primary small album-download-btn home-candidate-download-primary";
   button.dataset.releaseGroupMbid = releaseGroupMbid;
@@ -11494,15 +11530,16 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   });
   button.addEventListener("click", async () => {
     const releaseGroupMbidValue = String(button.dataset.releaseGroupMbid || "").trim();
-    if (!releaseGroupMbidValue) return;
     button.disabled = true;
     button.textContent = "Queueing...";
     setMusicPageNotice(`Queueing ${albumItem?.title || "album"}...`, false);
     try {
-      const result = await enqueueAlbum(releaseGroupMbidValue);
+      const result = releaseGroupMbidValue
+        ? await enqueueAlbum(releaseGroupMbidValue)
+        : await queueDirectMusicPlaylist(albumItem);
       const count = Number.isFinite(Number(result?.tracks_enqueued))
         ? Number(result.tracks_enqueued)
-        : 0;
+        : 1;
       if (count > 0) {
         button.textContent = "Queued...";
       } else {
@@ -11526,6 +11563,10 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   playAlbumButton.dataset.albumTitle = String(albumItem?.title || "");
   playAlbumButton.dataset.artistCredit = String(albumItem?.artist || "");
   playAlbumButton.textContent = "Play Album";
+  if (!releaseGroupMbid) {
+    playAlbumButton.disabled = true;
+    playAlbumButton.title = "Playback is unavailable for this direct playlist preview.";
+  }
   playAlbumButton.addEventListener("click", async (e) => {
     e.stopPropagation();
     if (playAlbumButton.disabled) return;
@@ -11564,6 +11605,8 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
         albumThumb.setImage(coverUrl);
       });
     }
+  } else if (albumItem?.artwork_url) {
+    albumThumb.setImage(albumItem.artwork_url);
   } else {
     albumThumb.setNoArt();
   }
@@ -12361,8 +12404,144 @@ async function playMusicAlbumFromSearch(albumItem) {
   _prefetchNextUnresolved(1);
 }
 
+function buildDirectMusicTrackResult(preview, url) {
+  const resolvedUrl = String(preview?.url || url || "").trim();
+  const durationSec = Number(preview?.duration_sec);
+  return {
+    direct_result_key: `direct:${resolvedUrl}`,
+    direct_url: resolvedUrl,
+    source_url: resolvedUrl,
+    source: String(preview?.source || "direct").trim() || "direct",
+    track: String(preview?.title || resolvedUrl || "Direct URL").trim() || "Direct URL",
+    artist: String(preview?.uploader || "").trim(),
+    album: "",
+    duration_ms: Number.isFinite(durationSec) && durationSec > 0 ? Math.round(durationSec * 1000) : null,
+    artwork_url: String(preview?.thumbnail_url || "").trim() || null,
+    media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
+    is_direct_url_result: true,
+  };
+}
+
+function buildDirectMusicPlaylistAlbum(preview, url, playlistId) {
+  const firstVideoId = String(preview?.first_video_id || "").trim();
+  const thumbnailUrl = String(preview?.thumbnail_url || "").trim()
+    || (firstVideoId ? `https://i.ytimg.com/vi/${firstVideoId}/hqdefault.jpg` : "");
+  return {
+    title: String(preview?.playlist_title || `YouTube Playlist (${playlistId})`).trim() || `YouTube Playlist (${playlistId})`,
+    artist: "YouTube Playlist",
+    artwork_url: thumbnailUrl || null,
+    direct_playlist_url: String(url || "").trim(),
+    playlist_id: String(playlistId || "").trim(),
+    first_video_id: firstVideoId || null,
+    is_direct_url_result: true,
+  };
+}
+
+async function playDirectMusicResult(result) {
+  const directUrl = String(result?.direct_url || "").trim();
+  if (!directUrl) {
+    throw new Error("No playable direct URL found.");
+  }
+  const source = String(result?.source || "").trim().toLowerCase();
+  const videoId = isYouTubeFamilySource(source, directUrl) ? extractYouTubeVideoId(directUrl) : null;
+  const playable = normalizePlayableItem({
+    id: String(result?.direct_result_key || `direct:${directUrl}`),
+    title: String(result?.track || result?.title || "Track").trim() || "Track",
+    artist: String(result?.artist || "").trim(),
+    album: String(result?.album || "").trim(),
+    stream_url: videoId ? directUrl : (buildPreviewStreamUrl(directUrl) || directUrl),
+    video_id: videoId || null,
+    kind: videoId ? "youtube" : "cached",
+    source,
+    artwork_url: result?.artwork_url || null,
+  });
+  clearActiveStationPlayback();
+  setPlayerQueue([playable]);
+  setMusicPlayerView("queue");
+  await playMusicPlayerItem(playable);
+}
+
+async function queueDirectMusicResult(result) {
+  const directUrl = String(result?.direct_url || "").trim();
+  if (!directUrl) {
+    throw new Error("Missing direct URL.");
+  }
+  if (!assertMusicModeDeliveryAllowed(getMusicPageMessageEl())) {
+    throw new Error("Client delivery does not use a server destination.");
+  }
+  const payload = {
+    single_url: directUrl,
+    final_format_override: getMusicModeFinalFormatOverride() || null,
+    music_mode: state.homeMediaMode === "music",
+    media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
+    delivery_mode: getMusicModeDeliveryMode(),
+  };
+  const destination = getMusicModeDestinationValue();
+  if (destination && payload.delivery_mode !== "client") {
+    payload.destination = destination;
+  }
+  return startRun(payload);
+}
+
+async function queueDirectMusicPlaylist(albumItem) {
+  const playlistId = String(albumItem?.playlist_id || "").trim();
+  const directUrl = String(albumItem?.direct_playlist_url || "").trim();
+  if (!playlistId || !directUrl) {
+    throw new Error("Missing playlist identity.");
+  }
+  if (!assertMusicModeDeliveryAllowed(getMusicPageMessageEl())) {
+    throw new Error("Client delivery does not use a server destination.");
+  }
+  const payload = {
+    playlist_id: playlistId,
+    final_format_override: getMusicModeFinalFormatOverride() || null,
+    music_mode: state.homeMediaMode === "music",
+    media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
+    delivery_mode: getMusicModeDeliveryMode(),
+  };
+  const destination = getMusicModeDestinationValue();
+  if (destination && payload.delivery_mode !== "client") {
+    payload.destination = destination;
+  }
+  return startRun(payload);
+}
+
+async function handleMusicDirectUrlPreview(url) {
+  const container = document.getElementById("music-results-container");
+  setMusicSection("browse");
+  setMusicPageNotice("Resolving direct URL...", false);
+  if (container) {
+    container.innerHTML = '<div class="home-results-empty">Resolving direct URL…</div>';
+  }
+  const data = await fetchJson("/api/direct_url_preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+  const preview = data?.preview || {};
+  const track = buildDirectMusicTrackResult(preview, url);
+  renderMusicModeResults({ artists: [], albums: [], tracks: [track], mode_used: "track" }, track.track || url, { pushHistory: false });
+  setMusicPageNotice("Direct URL ready. Review the card and click Download.", false);
+}
+
+async function handleMusicDirectPlaylistPreview(url, playlistId) {
+  const container = document.getElementById("music-results-container");
+  setMusicSection("browse");
+  setMusicPageNotice("Resolving playlist URL...", false);
+  if (container) {
+    container.innerHTML = '<div class="home-results-empty">Resolving playlist URL…</div>';
+  }
+  const preview = await fetchHomePlaylistPreview(playlistId);
+  const albumItem = buildDirectMusicPlaylistAlbum(preview, url, playlistId);
+  renderMusicModeResults({ artists: [], albums: [albumItem], tracks: [], mode_used: "album" }, albumItem.title || url, { pushHistory: false });
+  setMusicPageNotice("Playlist ready. Review the card and click Download.", false);
+}
+
 function createMusicTrackResultCard(result, thumbnailJobs, renderToken, { badgeText = "MusicBrainz" } = {}) {
-  const key = `${result.recording_mbid}::${result.mb_release_id}`;
+  const key = String(
+    result?.direct_result_key
+    || `${result.recording_mbid || result.track || "track"}::${result.mb_release_id || result.direct_url || ""}`
+  ).trim();
   state.homeMusicResultMap[key] = result;
   const card = document.createElement("article");
   card.className = "home-result-card music-meta-card";
@@ -13987,6 +14166,7 @@ function renderHomeCandidateRow(candidate, item) {
       previewButton.dataset.previewItemId = String(item.id || "").trim();
       previewButton.dataset.previewCandidateId = String(candidate.id || "").trim();
       previewButton.dataset.previewDirectUrl = String(candidate.url || "").trim();
+      previewButton.dataset.previewDirectOnly = isSearchResult ? "false" : "true";
       action.appendChild(previewButton);
       titleEl.dataset.previewEnabled = "true";
       artwork.dataset.previewEnabled = "true";
@@ -14076,77 +14256,74 @@ function updateHomeResultDuration(card, item, candidates = []) {
   metaEl.textContent = `Length: ${formatDuration(seconds)}`;
 }
 
-function renderHomeDirectUrlCard(preview, status, options = {}) {
-  const hideStatusBadge = !!options.hideStatusBadge;
-  const card = document.createElement("article");
-  card.className = "home-result-card";
-  card.dataset.directUrl = preview.url || "";
-  const header = document.createElement("div");
-  header.className = "home-result-header";
-  const title = document.createElement("div");
-  const summary = preview.title || preview.url || "Direct URL";
-  title.innerHTML = `<strong>${summary}</strong>`;
-  header.appendChild(title);
-  if (!hideStatusBadge) {
-    header.appendChild(renderHomeStatusBadge(status));
-  }
-  card.appendChild(header);
-  const detail = document.createElement("div");
-  detail.className = "home-candidate-title";
-  detail.textContent = `Source: ${preview.source || "direct"}${preview.uploader ? ` · ${preview.uploader}` : ""}`;
-  card.appendChild(detail);
-  const candidateList = document.createElement("div");
-  candidateList.className = "home-candidate-list";
-  // Compose candidate and item
-  const candidate = {
+function buildDirectHomePreviewItem(preview, status) {
+  const summary = String(preview?.title || preview?.url || "Direct URL").trim() || "Direct URL";
+  return {
+    id: "direct-url-item",
+    status: status || "candidate_found",
+    allow_download: preview?.allow_download !== false,
+    media_type: state.homeMediaMode === "music" ? "music" : "video",
+    track: summary,
+    duration_sec: Number(preview?.duration_sec) || null,
+  };
+}
+
+function buildDirectHomePreviewCandidate(preview) {
+  return {
     id: "direct-url-candidate",
-    title: preview.title,
-    artist_detected: preview.uploader,
+    title: String(preview?.title || preview?.url || "Direct URL").trim() || "Direct URL",
+    artist_detected: String(preview?.uploader || "").trim(),
     album_detected: null,
     track_detected: null,
     final_score: null,
-    source: preview.source || "direct",
-    url: preview.url,
-    thumbnail_url: preview.thumbnail_url,
-    allow_download: preview.allow_download !== false,
-    job_status: preview.job_status || "",
+    source: String(preview?.source || "direct").trim() || "direct",
+    url: String(preview?.url || "").trim(),
+    thumbnail_url: String(preview?.thumbnail_url || "").trim() || null,
+    allow_download: preview?.allow_download !== false,
+    job_status: String(preview?.job_status || "").trim(),
+    duration_sec: Number(preview?.duration_sec) || null,
   };
-  const item = {
-    id: "direct-url-item",
-    status,
-    allow_download: preview.allow_download !== false,
-  };
-  // Insert candidate row, with Cancel button if needed
-  const row = renderHomeCandidateRow(candidate, item);
-  // Add Cancel button for active direct jobs
-  if (
-    ["queued", "claimed", "downloading", "postprocessing"].includes(status)
-  ) {
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "button ghost small";
-    cancelBtn.textContent = "Cancel";
-    cancelBtn.onclick = async () => {
-      try {
-        cancelBtn.disabled = true;
-        await cancelJob(state.homeDirectJob?.runId || state.homeDirectJob?.jobId);
-        stopHomeDirectJobPolling();
-        state.homeDirectPreview.job_status = "cancelled";
-        const container = $("#home-results-list");
-        if (container) {
-          container.textContent = "";
-          container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "cancelled"));
-        }
-        setHomeResultsStatus("Cancelled");
-        setHomeResultsDetail("Download cancelled by user", false);
-        setHomeSearchControlsEnabled(true);
-      } catch (err) {
-        setHomeResultsDetail(`Cancel failed: ${err.message}`, true);
-      }
-    };
-    row.querySelector(".home-candidate-action")?.appendChild(cancelBtn);
+}
+
+function renderHomeDirectUrlCard(preview, status, options = {}) {
+  const hideStatusBadge = !!options.hideStatusBadge;
+  const item = buildDirectHomePreviewItem(preview, status);
+  const candidate = buildDirectHomePreviewCandidate(preview);
+  const card = renderHomeResultItem(item);
+  card.dataset.directUrl = preview?.url || "";
+  if (hideStatusBadge) {
+    card.querySelector(".home-result-badge")?.remove();
   }
-  candidateList.appendChild(row);
-  card.appendChild(candidateList);
+  const candidateList = card.querySelector(".home-candidate-list");
+  if (candidateList) {
+    state.homeCandidatesByItem[item.id] = { item, candidates: [candidate] };
+    renderHomeCandidatesIntoContainer(item, candidateList, [candidate]);
+    const row = candidateList.querySelector(".home-candidate-row");
+    if (row && ["queued", "claimed", "downloading", "postprocessing"].includes(status)) {
+      const cancelBtn = document.createElement("button");
+      cancelBtn.className = "button ghost small";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.onclick = async () => {
+        try {
+          cancelBtn.disabled = true;
+          await cancelJob(state.homeDirectJob?.runId || state.homeDirectJob?.jobId);
+          stopHomeDirectJobPolling();
+          state.homeDirectPreview.job_status = "cancelled";
+          const container = $("#home-results-list");
+          if (container) {
+            container.textContent = "";
+            container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "cancelled"));
+          }
+          setHomeResultsStatus("Cancelled");
+          setHomeResultsDetail("Download cancelled by user", false);
+          setHomeSearchControlsEnabled(true);
+        } catch (err) {
+          setHomeResultsDetail(`Cancel failed: ${err.message}`, true);
+        }
+      };
+      row.querySelector(".home-candidate-action")?.appendChild(cancelBtn);
+    }
+  }
   return card;
 }
 
@@ -14888,6 +15065,16 @@ async function submitHomeSearch(autoEnqueue) {
   const inputValue = $("#home-search-input")?.value.trim() || "";
   const query = inputValue;
   const musicModeEnabled = !!state.homeMusicMode;
+  if (musicModeEnabled && isValidHttpUrl(inputValue)) {
+    clearLegacyHomeSearchState();
+    const playlistId = extractPlaylistIdFromUrl(inputValue);
+    if (playlistId) {
+      await handleHomePlaylistUrlPreview(inputValue, playlistId, messageEl);
+    } else {
+      await handleMusicDirectUrlPreview(inputValue);
+    }
+    return;
+  }
   if (musicModeEnabled) {
     clearLegacyHomeSearchState();
     await performMusicModeSearch();
@@ -14957,18 +15144,10 @@ async function submitHomeSearch(autoEnqueue) {
     if (isValidHttpUrl(inputValue)) {
       const playlistId = extractPlaylistIdFromUrl(inputValue);
       if (playlistId) {
-        if (autoEnqueue) {
-          await handleHomePlaylistUrl(inputValue, playlistId, destinationValue, autoEnqueue, messageEl);
-        } else {
-          await handleHomePlaylistUrlPreview(inputValue, playlistId, messageEl);
-        }
+        await handleHomePlaylistUrlPreview(inputValue, playlistId, messageEl);
         return;
       }
-      if (!autoEnqueue) {
-        await handleHomeDirectUrlPreview(inputValue, destinationValue, messageEl);
-        return;
-      }
-      await handleHomeDirectUrl(inputValue, destinationValue, messageEl);
+      await handleHomeDirectUrlPreview(inputValue, destinationValue, messageEl);
       return;
     }
     if (state.homeMusicMode) {
@@ -15031,7 +15210,7 @@ async function handleHomePlaylistUrl(url, playlistId, destination, autoEnqueue, 
     state.homeDirectPreview = {
       title: `YouTube Playlist (${playlistId})`,
       url,
-      source: "playlist",
+      source: "youtube",
       uploader: null,
       thumbnail_url: null,
       job_status: "queued",
@@ -15101,7 +15280,7 @@ async function handleHomePlaylistUrlPreview(url, playlistId, messageEl) {
   state.homeDirectPreview = {
     title: `YouTube Playlist (${playlistId})`,
     url,
-    source: "playlist",
+    source: "youtube",
     uploader: null,
     thumbnail_url: null,
     allow_download: true,
@@ -15222,12 +15401,6 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
   }
   if (deliveryMode === "client" && destination) {
     setNotice(messageEl, "Client delivery does not use a server destination.", true);
-    setHomeSearchControlsEnabled(true);
-    setHomeSearchActive(false);
-    return;
-  }
-  if (treatAsMusic && deliveryMode === "client") {
-    setNotice(messageEl, "Client delivery is not available for Music Mode direct URLs. Select Server delivery.", true);
     setHomeSearchControlsEnabled(true);
     setHomeSearchActive(false);
     return;
@@ -18400,7 +18573,11 @@ function bindEvents() {
       playBtn.disabled = true;
       playBtn.textContent = "Resolving...";
       try {
-        await playMusicSearchResult(selectedResult);
+        if (selectedResult?.direct_url) {
+          await playDirectMusicResult(selectedResult);
+        } else {
+          await playMusicSearchResult(selectedResult);
+        }
       } catch (err) {
         setMusicPageNotice(`Play failed: ${toUserErrorMessage(err)}`, true);
       } finally {
@@ -18424,6 +18601,44 @@ function bindEvents() {
       previewBtn.disabled = true;
       previewBtn.textContent = "Resolving...";
       try {
+        if (selectedResult?.direct_url) {
+          const descriptor = buildHomePreviewDescriptor({
+            url: selectedResult.direct_url,
+            source: selectedResult.source,
+            title: selectedResult.track || selectedResult.title,
+          });
+          if (!descriptor) {
+            const streamUrl = buildPreviewStreamUrl(selectedResult.direct_url);
+            if (!streamUrl) {
+              throw new Error("Preview is unavailable for this URL.");
+            }
+            openHomePreviewModal({
+              mediaType: "audio",
+              streamUrl,
+              source: selectedResult.source,
+              title: selectedResult.track || selectedResult.title || "Preview",
+              description: "",
+              postedText: "",
+              durationText: Number.isFinite(Number(selectedResult?.duration_ms))
+                ? formatDuration(Number(selectedResult.duration_ms) / 1000)
+                : "",
+              directUrl: selectedResult.direct_url,
+              directOnly: true,
+            });
+            return;
+          }
+          openHomePreviewModal({
+            ...descriptor,
+            description: "",
+            postedText: "",
+            durationText: Number.isFinite(Number(selectedResult?.duration_ms))
+              ? formatDuration(Number(selectedResult.duration_ms) / 1000)
+              : "",
+            directUrl: selectedResult.direct_url,
+            directOnly: true,
+          });
+          return;
+        }
         const response = await fetchMusicTrackPreview(selectedResult);
         const previewType = String(response?.preview_type || "").trim().toLowerCase();
         const source = String(response?.source || "").trim();
@@ -18474,7 +18689,7 @@ function bindEvents() {
     const resultKey = String(btn.dataset.musicResultKey || "").trim();
     const selectedResult = resultKey ? state.homeMusicResultMap[resultKey] : null;
 
-    if (!recording) {
+    if (!recording && !selectedResult?.direct_url) {
       console.error("Missing recording MBID on music download button");
       return;
     }
@@ -18483,9 +18698,10 @@ function bindEvents() {
     btn.disabled = true;
     btn.textContent = "Queuing...";
     try {
-      const payload = buildMusicTrackEnqueuePayload({ button: btn, result: selectedResult });
-      const response = await enqueueMusicTrack(payload);
-      const created = !!response?.created;
+      const response = selectedResult?.direct_url
+        ? await queueDirectMusicResult(selectedResult)
+        : await enqueueMusicTrack(buildMusicTrackEnqueuePayload({ button: btn, result: selectedResult }));
+      const created = selectedResult?.direct_url ? true : !!response?.created;
       if (created) {
         btn.textContent = "Queued...";
         setMusicPageNotice("Track queued.", false);
@@ -19630,7 +19846,7 @@ function bindEvents() {
       const originalText = homePreviewDownload.textContent;
       homePreviewDownload.textContent = "Queued";
       try {
-        if (previewState.itemId && previewState.candidateId) {
+        if (!previewState.directOnly && previewState.itemId && previewState.candidateId) {
           await enqueueSearchCandidate(previewState.itemId, previewState.candidateId, { messageEl: $("#home-search-message") });
           if (state.homeSearchRequestId) {
             await refreshHomeResults(state.homeSearchRequestId);

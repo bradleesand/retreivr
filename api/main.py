@@ -3918,12 +3918,16 @@ def _run_immediate_download_to_client(
     resolved_media_type, resolved_media_intent, audio_mode = _resolve_direct_url_mode(
         media_type=media_type,
         media_intent=media_intent,
-        music_mode=False,
+        music_mode=bool(is_music_media_type(media_type)),
     )
     normalized_format = _normalize_format(raw_final_format)
-    normalized_audio_format = _normalize_audio_format(raw_final_format)
     if audio_mode:
-        raise RuntimeError("music_client_delivery_unsupported")
+        final_format = (
+            _normalize_audio_format(raw_final_format)
+            or _normalize_audio_format(config.get("music_final_format"))
+            or _normalize_audio_format(config.get("audio_final_format"))
+            or "mp3"
+        )
     else:
         final_format = (
             normalized_format
@@ -3965,6 +3969,55 @@ def _run_immediate_download_to_client(
             raise RuntimeError("yt_dlp_no_output")
 
         meta = extract_meta(info, fallback_url=url)
+        if audio_mode:
+            duration_sec = info.get("duration") if isinstance(info, dict) else None
+            duration_ms = int(float(duration_sec) * 1000) if duration_sec else None
+            binding_payload = {
+                "media_type": "music",
+                "media_intent": "music_track",
+                "artist": meta.get("artist") or meta.get("channel"),
+                "track": meta.get("track") or meta.get("title"),
+                "album": meta.get("album"),
+                "duration_ms": duration_ms,
+                "output_template": {
+                    "canonical_metadata": {
+                        "recording_mbid": meta.get("mb_recording_id") or meta.get("recording_mbid"),
+                        "mb_release_id": meta.get("mb_release_id"),
+                        "mb_release_group_id": meta.get("mb_release_group_id"),
+                        "album": meta.get("album"),
+                        "release_date": meta.get("release_date"),
+                        "track_number": meta.get("track_number"),
+                        "disc_number": meta.get("disc") or meta.get("disc_number"),
+                        "duration_ms": duration_ms,
+                        "artist": meta.get("artist") or meta.get("channel"),
+                        "track": meta.get("track") or meta.get("title"),
+                    }
+                },
+            }
+            ensure_mb_bound_music_track(
+                binding_payload,
+                config=config,
+                country_preference=str(config.get("country") or "US"),
+            )
+            canonical = (
+                binding_payload.get("output_template", {}).get("canonical_metadata")
+                if isinstance(binding_payload.get("output_template", {}), dict)
+                else {}
+            )
+            if isinstance(canonical, dict):
+                meta["artist"] = canonical.get("artist") or meta.get("artist")
+                meta["album_artist"] = canonical.get("artist") or meta.get("album_artist") or meta.get("artist")
+                meta["album"] = canonical.get("album")
+                meta["track"] = canonical.get("track") or meta.get("track") or meta.get("title")
+                meta["release_date"] = canonical.get("release_date")
+                meta["track_number"] = canonical.get("track_number")
+                meta["disc_number"] = canonical.get("disc_number")
+                meta["disc"] = canonical.get("disc_number")
+                meta["recording_mbid"] = canonical.get("recording_mbid")
+                meta["mb_recording_id"] = canonical.get("recording_mbid")
+                meta["mb_release_id"] = canonical.get("mb_release_id")
+                meta["mb_release_group_id"] = canonical.get("mb_release_group_id")
+
         video_id = meta.get("video_id") or job_id
         template = audio_template if audio_mode else filename_template
         final_path, _ = finalize_download_artifact(
@@ -3977,8 +4030,8 @@ def _run_immediate_download_to_client(
             template=template,
             paths=paths,
             config=config,
-            enforce_music_contract=False,
-            enqueue_audio_metadata=False,
+            enforce_music_contract=bool(audio_mode and str(resolved_media_intent or "").strip().lower() == "music_track"),
+            enqueue_audio_metadata=bool(audio_mode),
         )
 
         size = 0
@@ -4051,8 +4104,10 @@ def _run_direct_url_with_cli(
     if not url or not isinstance(url, str):
         raise ValueError("single_url is required")
 
-    # Resolve destination (default to configured DOWNLOADS_DIR)
-    dest_dir = (destination or DOWNLOADS_DIR).strip() if destination else DOWNLOADS_DIR
+    # Resolve destination using the same bounded path policy as queued jobs.
+    raw_destination = str(destination or "").strip()
+    base_download_dir = str(getattr(paths, "single_downloads_dir", "") or DOWNLOADS_DIR).strip() or str(DOWNLOADS_DIR)
+    dest_dir = resolve_dir(raw_destination, base_download_dir)
     ensure_dir(dest_dir)
 
     # Direct URL runs are intentionally NOT persisted into the unified download_jobs queue.

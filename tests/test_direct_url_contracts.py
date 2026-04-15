@@ -17,8 +17,10 @@ def api_module(monkeypatch, tmp_path: Path):
     db_path = tmp_path / "direct_url_contracts.sqlite"
     temp_dir = tmp_path / "temp"
     thumbs_dir = tmp_path / "thumbs"
+    downloads_dir = tmp_path / "downloads"
     temp_dir.mkdir(parents=True, exist_ok=True)
     thumbs_dir.mkdir(parents=True, exist_ok=True)
+    downloads_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("RETREIVR_DB_PATH", str(db_path))
     monkeypatch.setattr(sys, "version_info", (3, 11, 0, "final", 0), raising=False)
@@ -30,6 +32,7 @@ def api_module(monkeypatch, tmp_path: Path):
     module.app.state.paths = SimpleNamespace(
         db_path=str(db_path),
         temp_downloads_dir=str(temp_dir),
+        single_downloads_dir=str(downloads_dir),
         thumbs_dir=str(thumbs_dir),
     )
     module.app.state.state = "idle"
@@ -145,21 +148,65 @@ def test_server_direct_url_video_mode_uses_video_template_and_container_policy(
     assert files[0].endswith(".mkv")
 
 
-def test_client_direct_url_music_mode_is_rejected(api_module) -> None:
+def test_client_direct_url_music_mode_returns_client_delivery(api_module, monkeypatch) -> None:
     module = api_module
     config = {"music_final_format": "mp3"}
-    with pytest.raises(RuntimeError, match="music_client_delivery_unsupported"):
-        module._run_immediate_download_to_client(
-            url="https://youtu.be/-LI8X-GhFA8",
-            config=config,
-            paths=module.app.state.paths,
-            media_type="music",
-            media_intent="music_track",
-            final_format_override="mp3",
-            stop_event=threading.Event(),
-            status=None,
-            origin="api",
+
+    def _fake_download_with_ytdlp(url, temp_dir, config_arg, **kwargs):
+        _ = url, config_arg, kwargs
+        output = Path(temp_dir) / "payload.mp3"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"audio")
+        return {
+            "id": "abc123xyz99",
+            "title": "Transport Title",
+            "uploader": "Uploader",
+            "webpage_url": "https://youtu.be/-LI8X-GhFA8",
+        }, str(output)
+
+    def _bind_stub(payload, *, config, country_preference="US"):
+        _ = config, country_preference
+        canonical = payload.setdefault("output_template", {}).setdefault("canonical_metadata", {})
+        canonical.update(
+            {
+                "recording_mbid": "rec-1",
+                "mb_release_id": "rel-1",
+                "mb_release_group_id": "rg-1",
+                "artist": "Canonical Artist",
+                "track": "Canonical Track",
+                "album": "Canonical Album",
+                "release_date": "2010",
+                "track_number": 1,
+                "disc_number": 1,
+            }
         )
+        return canonical
+
+    monkeypatch.setattr(module, "get_loaded_config", lambda: config)
+    monkeypatch.setattr(module, "download_with_ytdlp", _fake_download_with_ytdlp)
+    monkeypatch.setattr(module, "embed_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "ensure_mb_bound_music_track", _bind_stub)
+    monkeypatch.setattr(module, "enqueue_media_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        module,
+        "_register_client_delivery",
+        lambda path, filename, cleanup_dir=None: ("delivery-id", datetime.now(timezone.utc), object()),
+    )
+
+    result = module._run_immediate_download_to_client(
+        url="https://youtu.be/-LI8X-GhFA8",
+        config=config,
+        paths=module.app.state.paths,
+        media_type="music",
+        media_intent="music_track",
+        final_format_override="mp3",
+        stop_event=threading.Event(),
+        status=None,
+        origin="api",
+    )
+
+    assert result["delivery_id"] == "delivery-id"
+    assert result["filename"].endswith(".mp3")
 
 
 def test_server_direct_url_music_mode_enforces_mb_metadata_and_music_path(
@@ -277,3 +324,167 @@ def test_server_direct_url_music_mode_fails_when_mb_binding_incomplete(
         )
 
     assert not any(destination.rglob("*"))
+
+
+def test_server_direct_url_relative_destination_resolves_within_downloads_root(
+    api_module, monkeypatch
+) -> None:
+    module = api_module
+    config = {
+        "final_format": "mkv",
+        "filename_template": "VID-%(title)s__%(uploader)s.%(ext)s",
+    }
+
+    def _fake_download_with_ytdlp(url, temp_dir, config_arg, **kwargs):
+        _ = url, config_arg, kwargs
+        output = Path(temp_dir) / "payload.mkv"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"video")
+        return {
+            "id": "abc123xyz99",
+            "title": "Video Title",
+            "uploader": "Channel Name",
+            "webpage_url": "https://youtu.be/-LI8X-GhFA8",
+        }, str(output)
+
+    monkeypatch.setattr(module, "get_loaded_config", lambda: config)
+    monkeypatch.setattr(module, "download_with_ytdlp", _fake_download_with_ytdlp)
+    monkeypatch.setattr(module, "embed_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_record_direct_url_history", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "ensure_mb_bound_music_track", lambda *args, **kwargs: None)
+
+    module._run_direct_url_with_cli(
+        url="https://youtu.be/-LI8X-GhFA8",
+        paths=module.app.state.paths,
+        config=config,
+        destination="Singles",
+        final_format_override=None,
+        media_type="video",
+        media_intent="episode",
+        music_mode=False,
+        stop_event=threading.Event(),
+        status=None,
+    )
+
+    target_dir = Path(module.app.state.paths.single_downloads_dir) / "Singles"
+    files = [p.name for p in target_dir.glob("*") if p.is_file()]
+    assert len(files) == 1
+    assert files[0].startswith("VID-Video Title__Channel Name.")
+    assert files[0].endswith(".mkv")
+
+
+def test_server_direct_url_default_destination_uses_downloads_root(
+    api_module, monkeypatch
+) -> None:
+    module = api_module
+    config = {
+        "final_format": "mkv",
+        "filename_template": "VID-%(title)s__%(uploader)s.%(ext)s",
+    }
+
+    def _fake_download_with_ytdlp(url, temp_dir, config_arg, **kwargs):
+        _ = url, config_arg, kwargs
+        output = Path(temp_dir) / "payload.mkv"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"video")
+        return {
+            "id": "abc123xyz99",
+            "title": "Video Title",
+            "uploader": "Channel Name",
+            "webpage_url": "https://youtu.be/-LI8X-GhFA8",
+        }, str(output)
+
+    monkeypatch.setattr(module, "get_loaded_config", lambda: config)
+    monkeypatch.setattr(module, "download_with_ytdlp", _fake_download_with_ytdlp)
+    monkeypatch.setattr(module, "embed_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_record_direct_url_history", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "ensure_mb_bound_music_track", lambda *args, **kwargs: None)
+
+    module._run_direct_url_with_cli(
+        url="https://youtu.be/-LI8X-GhFA8",
+        paths=module.app.state.paths,
+        config=config,
+        destination=None,
+        final_format_override=None,
+        media_type="video",
+        media_intent="episode",
+        music_mode=False,
+        stop_event=threading.Event(),
+        status=None,
+    )
+
+    target_dir = Path(module.app.state.paths.single_downloads_dir)
+    files = [p.name for p in target_dir.glob("*") if p.is_file()]
+    assert len(files) == 1
+    assert files[0].startswith("VID-Video Title__Channel Name.")
+    assert files[0].endswith(".mkv")
+
+
+def test_server_direct_url_absolute_destination_within_downloads_root_is_allowed(
+    api_module, monkeypatch
+) -> None:
+    module = api_module
+    config = {
+        "final_format": "mkv",
+        "filename_template": "VID-%(title)s__%(uploader)s.%(ext)s",
+    }
+    absolute_target = Path(module.app.state.paths.single_downloads_dir) / "Singles"
+
+    def _fake_download_with_ytdlp(url, temp_dir, config_arg, **kwargs):
+        _ = url, config_arg, kwargs
+        output = Path(temp_dir) / "payload.mkv"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"video")
+        return {
+            "id": "abc123xyz99",
+            "title": "Video Title",
+            "uploader": "Channel Name",
+            "webpage_url": "https://youtu.be/-LI8X-GhFA8",
+        }, str(output)
+
+    monkeypatch.setattr(module, "get_loaded_config", lambda: config)
+    monkeypatch.setattr(module, "download_with_ytdlp", _fake_download_with_ytdlp)
+    monkeypatch.setattr(module, "embed_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_record_direct_url_history", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "ensure_mb_bound_music_track", lambda *args, **kwargs: None)
+
+    module._run_direct_url_with_cli(
+        url="https://youtu.be/-LI8X-GhFA8",
+        paths=module.app.state.paths,
+        config=config,
+        destination=str(absolute_target),
+        final_format_override=None,
+        media_type="video",
+        media_intent="episode",
+        music_mode=False,
+        stop_event=threading.Event(),
+        status=None,
+    )
+
+    files = [p.name for p in absolute_target.glob("*") if p.is_file()]
+    assert len(files) == 1
+    assert files[0].startswith("VID-Video Title__Channel Name.")
+    assert files[0].endswith(".mkv")
+
+
+def test_server_direct_url_destination_escape_is_rejected(
+    api_module, monkeypatch
+) -> None:
+    module = api_module
+    config = {"final_format": "mkv"}
+
+    monkeypatch.setattr(module, "get_loaded_config", lambda: config)
+
+    with pytest.raises(ValueError, match="Path must be within base directory"):
+        module._run_direct_url_with_cli(
+            url="https://youtu.be/-LI8X-GhFA8",
+            paths=module.app.state.paths,
+            config=config,
+            destination="../outside",
+            final_format_override=None,
+            media_type="video",
+            media_intent="episode",
+            music_mode=False,
+            stop_event=threading.Event(),
+            status=None,
+        )
