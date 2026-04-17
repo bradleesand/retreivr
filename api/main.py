@@ -12375,7 +12375,7 @@ def _list_video_library_items(db_path: str, *, limit: int = 24) -> list[dict[str
                 "source": source,
                 "file_ext": ext or None,
                 "media_type": str(mimetypes.guess_type(filepath)[0] or "").strip() or None,
-                "video_id": external_id or None,
+                "video_id": row.get("external_id") or None,
                 "source_url": str(row.get("canonical_url") or "").strip() or str(row.get("input_url") or "").strip() or None,
                 "canonical_url": str(row.get("canonical_url") or "").strip() or None,
                 "input_url": str(row.get("input_url") or "").strip() or None,
