@@ -34,6 +34,7 @@ from engine.job_queue import (
     resolve_media_type,
     resolve_source,
 )
+from engine.download_defaults import resolve_effective_download_settings
 from engine.paths import EnginePaths
 
 CLIENT_DELIVERY_TIMEOUT_SECONDS = 600
@@ -1813,6 +1814,13 @@ def run_single_download(
                 "duration_ms": duration_ms,
             }
 
+        effective_defaults = resolve_effective_download_settings(
+            config,
+            media_type=media_type,
+            destination=destination,
+            final_format_override=final_format_override,
+            fallback_destination=paths.single_downloads_dir,
+        )
         try:
             enqueue_payload = build_download_job_payload(
                 config=config,
@@ -1822,9 +1830,9 @@ def run_single_download(
                 media_intent=media_intent,
                 source=source,
                 url=video_url,
-                destination=destination,
+                destination=effective_defaults.get("destination"),
                 base_dir=paths.single_downloads_dir,
-                final_format_override=final_format_override,
+                final_format_override=effective_defaults.get("final_format"),
                 resolved_metadata=resolved_metadata,
             )
         except ValueError as exc:
@@ -1906,12 +1914,12 @@ def run_single_playlist(
         logging.error("Invalid playlist ID or URL: %s", playlist_value)
         return status
 
-    normalized_final_format = str(final_format_override or "").strip().lower()
     requested_media_mode = str(_ignored.get("media_mode") or "").strip().lower()
     if requested_media_mode not in {"video", "music", "music_video"}:
         requested_media_mode = "music_video" if bool(_ignored.get("music_video")) else ""
     explicit_music_mode = bool(_ignored.get("music_mode")) or requested_media_mode == "music"
     configured_media_type = str((config or {}).get("media_type") or "").strip().lower()
+    normalized_final_format = str(final_format_override or "").strip().lower()
     inferred_music_mode = explicit_music_mode or configured_media_type in {"music", "audio"} or normalized_final_format in {
         "mp3",
         "m4a",
@@ -1921,16 +1929,19 @@ def run_single_playlist(
         "opus",
         "aac",
     }
-    if inferred_music_mode:
-        default_folder = config.get("music_download_folder") or config.get("single_download_folder") or "."
-    else:
-        default_folder = config.get("single_download_folder") or config.get("music_download_folder") or "."
-    folder = destination or default_folder
+    effective_defaults = resolve_effective_download_settings(
+        config,
+        media_mode=requested_media_mode or ("music" if inferred_music_mode else "video"),
+        destination=destination,
+        final_format_override=final_format_override,
+        fallback_destination=".",
+    )
     entry = {
         "playlist_id": playlist_id,
-        "folder": folder,
+        "folder": effective_defaults.get("destination"),
         "remove_after_download": False,
         "mode": "full",
+        "final_format": effective_defaults.get("final_format"),
     }
     if requested_media_mode:
         entry["media_mode"] = requested_media_mode
@@ -1940,8 +1951,6 @@ def run_single_playlist(
         entry["media_type"] = "music"
     if account:
         entry["account"] = account
-    if final_format_override:
-        entry["final_format"] = final_format_override
 
     run_config = dict(config) if isinstance(config, dict) else {}
     run_config["playlists"] = [entry]

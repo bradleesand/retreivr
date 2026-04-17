@@ -25,6 +25,7 @@ from engine.job_queue import (
     JOB_STATUS_POSTPROCESSING,
     JOB_STATUS_QUEUED,
 )
+from engine.download_defaults import resolve_effective_download_settings
 
 try:
     from engine.musicbrainz_binding import resolve_best_mb_pair
@@ -870,31 +871,15 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
         destination = config.get("destination_dir")
         final_format_override = config.get("final_format")
     if isinstance(runtime_config, dict):
-        if not destination:
-            if media_mode == "music":
-                destination = (
-                    runtime_config.get("home_music_download_folder")
-                    or runtime_config.get("music_download_folder")
-                    or runtime_config.get("single_download_folder")
-                )
-            elif media_mode == "music_video":
-                destination = (
-                    runtime_config.get("home_music_video_download_folder")
-                    or runtime_config.get("single_download_folder")
-                )
-        if not final_format_override:
-            if media_mode == "music":
-                final_format_override = (
-                    runtime_config.get("home_music_final_format")
-                    or runtime_config.get("music_final_format")
-                    or runtime_config.get("audio_final_format")
-                )
-            elif media_mode == "music_video":
-                final_format_override = (
-                    runtime_config.get("home_music_video_final_format")
-                    or runtime_config.get("final_format")
-                    or runtime_config.get("video_final_format")
-                )
+        effective_defaults = resolve_effective_download_settings(
+            runtime_config,
+            media_mode=media_mode,
+            destination=destination,
+            final_format_override=final_format_override,
+            fallback_destination=base_dir,
+        )
+        destination = effective_defaults.get("destination")
+        final_format_override = effective_defaults.get("final_format")
     progress_callback = config.get("progress_callback") if isinstance(config, dict) else None
 
     total_tracks = len(track_intents)

@@ -31,6 +31,7 @@ from engine.community_publish_worker import append_publish_proposal_to_outbox, n
 from engine.music_export import run_music_exports
 from engine.resolution_api import upsert_local_acquired_mapping
 from engine.music_title_normalization import has_live_intent, relaxed_search_title
+from engine.download_defaults import normalize_download_media_mode, resolve_effective_download_settings
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
 from media.music_contract import format_zero_padded_track_number, parse_first_positive_int
@@ -5672,15 +5673,16 @@ def build_output_template(config, *, playlist_entry=None, destination=None, base
     base_dir = base_dir or "."
     config = config or {}
     entry = playlist_entry if isinstance(playlist_entry, dict) else {}
-    output_dir = destination or entry.get("folder") or entry.get("directory")
-    if not output_dir:
-        # Prefer the correct default folder based on media type intent.
-        # If the run is not explicitly music/audio, do NOT default into the music folder.
-        media_type = str(entry.get("media_type") or entry.get("media") or "").strip().lower()
-        if media_type in {"music", "audio"}:
-            output_dir = config.get("music_download_folder") or config.get("single_download_folder") or base_dir
-        else:
-            output_dir = config.get("single_download_folder") or config.get("music_download_folder") or base_dir
+    entry_media_mode = str(entry.get("media_mode") or "").strip().lower()
+    entry_media_type = str(entry.get("media_type") or entry.get("media") or "").strip().lower()
+    effective_defaults = resolve_effective_download_settings(
+        config,
+        media_mode=normalize_download_media_mode(entry_media_mode, media_type=entry_media_type),
+        destination=destination or entry.get("folder") or entry.get("directory"),
+        final_format_override=entry.get("final_format"),
+        fallback_destination=base_dir,
+    )
+    output_dir = effective_defaults.get("destination")
     output_dir = resolve_dir(output_dir, base_dir)
 
     final_format = (

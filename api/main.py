@@ -92,6 +92,7 @@ from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
 )
+from engine.download_defaults import resolve_effective_download_settings
 from metadata.services.musicbrainz_service import get_musicbrainz_service
 
 from engine.core import (
@@ -2769,6 +2770,9 @@ class DirectUrlResolveRequest(BaseModel):
     media_mode: str | None = None
 
 
+DIRECT_URL_MUSIC_PAGE_ERROR = "Direct URLs must be searched from the Video page."
+
+
 # Cancel job API request model
 class CancelJobRequest(BaseModel):
     reason: str | None = None
@@ -3936,18 +3940,23 @@ def _run_immediate_download_to_client(
         media_intent=media_intent,
         music_mode=bool(is_music_media_type(media_type)),
     )
-    normalized_format = _normalize_format(raw_final_format)
+    effective_defaults = resolve_effective_download_settings(
+        config,
+        media_type=resolved_media_type,
+        destination=None,
+        final_format_override=raw_final_format,
+        fallback_destination=str(getattr(paths, "single_downloads_dir", "") or DOWNLOADS_DIR).strip() or str(DOWNLOADS_DIR),
+    )
+    normalized_format = _normalize_format(effective_defaults.get("final_format"))
     if audio_mode:
         final_format = (
-            _normalize_audio_format(raw_final_format)
-            or _normalize_audio_format(config.get("music_final_format"))
+            _normalize_audio_format(effective_defaults.get("final_format"))
             or _normalize_audio_format(config.get("audio_final_format"))
             or "mp3"
         )
     else:
         final_format = (
             normalized_format
-            or _normalize_format(config.get("final_format"))
             or _normalize_format(config.get("video_final_format"))
             or "mkv"
         )
@@ -4136,10 +4145,7 @@ def _run_direct_url_with_cli(
         raise ValueError("single_url is required")
 
     # Resolve destination using the same bounded path policy as queued jobs.
-    raw_destination = str(destination or "").strip()
     base_download_dir = str(getattr(paths, "single_downloads_dir", "") or DOWNLOADS_DIR).strip() or str(DOWNLOADS_DIR)
-    dest_dir = resolve_dir(raw_destination, base_download_dir)
-    ensure_dir(dest_dir)
 
     # Direct URL runs are intentionally NOT persisted into the unified download_jobs queue.
     # They bypass adapters/worker and run yt-dlp CLI synchronously (reference behavior).
@@ -4169,6 +4175,15 @@ def _run_direct_url_with_cli(
         media_intent=media_intent,
         music_mode=music_mode,
     )
+    effective_defaults = resolve_effective_download_settings(
+        config,
+        media_type=cli_media_type,
+        destination=destination,
+        final_format_override=final_format_override,
+        fallback_destination=base_download_dir,
+    )
+    dest_dir = resolve_dir(effective_defaults.get("destination"), base_download_dir)
+    ensure_dir(dest_dir)
 
     logging.info(
         json.dumps(
@@ -4178,7 +4193,7 @@ def _run_direct_url_with_cli(
                     "url": url,
                     "job_id": job_id,
                     "destination": dest_dir,
-                    "final_format": final_format_override,
+                    "final_format": effective_defaults.get("final_format"),
                     "media_type": cli_media_type,
                     "media_intent": cli_media_intent,
                     "audio_mode": bool(audio_mode),
@@ -4189,18 +4204,16 @@ def _run_direct_url_with_cli(
     )
 
     try:
-        resolved_final_format = final_format_override
+        resolved_final_format = effective_defaults.get("final_format")
         if audio_mode:
             resolved_final_format = (
-                _normalize_audio_format(final_format_override)
-                or _normalize_audio_format(config.get("music_final_format"))
+                _normalize_audio_format(effective_defaults.get("final_format"))
                 or _normalize_audio_format(config.get("audio_final_format"))
                 or "mp3"
             )
         else:
             resolved_final_format = (
-                _normalize_format(final_format_override)
-                or _normalize_format(config.get("final_format"))
+                _normalize_format(effective_defaults.get("final_format"))
                 or _normalize_format(config.get("video_final_format"))
                 or "mkv"
             )
@@ -4888,12 +4901,6 @@ async def _start_run_with_config(
 
         async def _runner():
             effective_final_format_override = final_format_override
-            if effective_final_format_override is None:
-                effective_final_format_override = (
-                    config.get("default_video_format")
-                    or config.get("final_format")
-                    or "mkv"
-                )
             try:
                 logging.info(
                     "Run runner entered run_id=%s source=%s single_url=%s playlist_id=%s",
@@ -7700,6 +7707,9 @@ async def api_run(request: RunRequest):
         raise HTTPException(status_code=400, detail="Provide either single_url or playlist_id, not both")
     if request.single_url and _looks_like_playlist_url(request.single_url):
         raise HTTPException(status_code=400, detail=DIRECT_URL_PLAYLIST_ERROR)
+    requested_media_mode = str(request.media_mode or "").strip().lower()
+    if request.single_url and (requested_media_mode == "music" or bool(request.music_mode)):
+        raise HTTPException(status_code=400, detail=DIRECT_URL_MUSIC_PAGE_ERROR)
     if request.playlist_account:
         accounts = (config.get("accounts") or {}) if isinstance(config, dict) else {}
         if request.playlist_account not in accounts:
@@ -7786,44 +7796,6 @@ def _build_home_direct_resolve_payload(*, url: str, preview: dict, playlist_id: 
     }
     return {"home_item": item, "home_candidates": [candidate]}
 
-
-def _build_music_track_resolve_payload(*, url: str, preview: dict, media_mode: str) -> dict:
-    duration_sec = preview.get("duration_sec")
-    return {
-        "music_track": {
-            "direct_result_key": f"direct:{url}",
-            "direct_url": str(preview.get("url") or url).strip() or url,
-            "source_url": str(preview.get("url") or url).strip() or url,
-            "source": str(preview.get("source") or "direct").strip() or "direct",
-            "track": str(preview.get("title") or url).strip() or url,
-            "artist": str(preview.get("uploader") or "").strip() or None,
-            "album": "",
-            "duration_ms": int(float(duration_sec) * 1000) if isinstance(duration_sec, (int, float)) and duration_sec else None,
-            "artwork_url": str(preview.get("thumbnail_url") or "").strip() or None,
-            "media_mode": media_mode,
-            "is_direct_url_result": True,
-        }
-    }
-
-
-def _build_music_album_resolve_payload(*, url: str, playlist_id: str, preview: dict) -> dict:
-    first_video_id = str(preview.get("first_video_id") or "").strip() or None
-    thumbnail_url = str(preview.get("thumbnail_url") or "").strip() or (
-        f"https://i.ytimg.com/vi/{first_video_id}/hqdefault.jpg" if first_video_id else None
-    )
-    return {
-        "music_album": {
-            "title": str(preview.get("playlist_title") or f"YouTube Playlist ({playlist_id})").strip() or f"YouTube Playlist ({playlist_id})",
-            "artist": "YouTube Playlist",
-            "artwork_url": thumbnail_url,
-            "direct_playlist_url": url,
-            "playlist_id": playlist_id,
-            "first_video_id": first_video_id,
-            "is_direct_url_result": True,
-        }
-    }
-
-
 @app.post("/api/direct-url/resolve")
 async def api_direct_url_resolve(request: DirectUrlResolveRequest):
     url = request.url.strip() if request.url else ""
@@ -7835,6 +7807,8 @@ async def api_direct_url_resolve(request: DirectUrlResolveRequest):
             detail="This search result is not directly downloadable."
         )
     media_mode = _normalize_direct_url_media_mode(request.media_mode)
+    if media_mode == "music":
+        raise HTTPException(status_code=400, detail=DIRECT_URL_MUSIC_PAGE_ERROR)
     playlist_id = extract_playlist_id(url) if _looks_like_playlist_url(url) else None
     runtime_config = get_loaded_config() or _read_config_or_404()
     if not runtime_config:
@@ -7863,9 +7837,6 @@ async def api_direct_url_resolve(request: DirectUrlResolveRequest):
             "url": url,
             "source": "youtube",
         }
-        if media_mode in {"music", "music_video"}:
-            payload = _build_music_album_resolve_payload(url=url, playlist_id=playlist_id, preview=resolved_preview)
-            return safe_json({"result_type": "music_album", "playlist_id": playlist_id, "preview": resolved_preview, **payload})
         payload = _build_home_direct_resolve_payload(url=url, preview=resolved_preview, playlist_id=playlist_id)
         return safe_json({"result_type": "home_result", "playlist_id": playlist_id, "preview": resolved_preview, **payload})
     try:
@@ -7874,9 +7845,6 @@ async def api_direct_url_resolve(request: DirectUrlResolveRequest):
         logging.exception("Direct URL resolve failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     preview["url"] = str(preview.get("url") or url).strip() or url
-    if media_mode in {"music", "music_video"}:
-        payload = _build_music_track_resolve_payload(url=url, preview=preview, media_mode=media_mode)
-        return safe_json({"result_type": "music_track", "preview": preview, **payload})
     payload = _build_home_direct_resolve_payload(url=url, preview=preview)
     return safe_json({"result_type": "home_result", "preview": preview, **payload})
 

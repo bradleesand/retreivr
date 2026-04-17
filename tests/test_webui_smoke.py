@@ -75,6 +75,10 @@ def _build_webui_test_app() -> FastAPI:
     def api_direct_url_resolve(payload: dict[str, Any]) -> dict[str, Any]:
         url = str(payload.get("url") or "https://www.youtube.com/watch?v=stub123")
         media_mode = str(payload.get("media_mode") or "video")
+        if media_mode == "music":
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail="Direct URLs must be searched from the Video page.")
         is_playlist = "list=" in url
         preview = {
             "title": "Stub Direct Preview",
@@ -92,21 +96,6 @@ def _build_webui_test_app() -> FastAPI:
                 "url": url,
                 "source": "youtube",
             }
-            if media_mode in {"music", "music_video"}:
-                return {
-                    "result_type": "music_album",
-                    "playlist_id": "PLstub",
-                    "preview": preview,
-                    "music_album": {
-                        "title": "Stub Playlist",
-                        "artist": "YouTube Playlist",
-                        "artwork_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
-                        "direct_playlist_url": url,
-                        "playlist_id": "PLstub",
-                        "first_video_id": "stub123",
-                        "is_direct_url_result": True,
-                    },
-                }
             return {
                 "result_type": "home_result",
                 "playlist_id": "PLstub",
@@ -476,7 +465,7 @@ def test_webui_home_direct_url_preview_uses_standard_result_card(webui_server: s
     assert not console_errors, f"Console errors detected: {console_errors}"
 
 
-def test_webui_music_direct_url_preview_uses_music_card(webui_server: str, page) -> None:
+def test_webui_music_direct_url_is_blocked_with_warning(webui_server: str, page) -> None:
     console_errors: list[str] = []
     page_errors: list[str] = []
 
@@ -491,13 +480,17 @@ def test_webui_music_direct_url_preview_uses_music_card(webui_server: str, page)
     page.fill("#music-header-query", "https://www.youtube.com/watch?v=stub123")
     page.click("#music-header-submit")
 
-    page.wait_for_selector("#music-results-container .home-result-card", timeout=10000)
-    page.wait_for_selector("#music-results-container .music-download-btn", timeout=10000)
     page.wait_for_function(
         """() => {
-          const text = document.querySelector("#music-results-container .home-candidate-title")?.textContent || "";
-          return /Stub Direct Preview/.test(text);
+          const toasts = Array.from(document.querySelectorAll(".app-toast"));
+          const hasWarning = toasts.some((el) => (el.textContent || "").includes("URLs must be searched from the Video page."));
+          const flash = document.querySelector("#music-header-query.input-error-flash");
+          return hasWarning && !!flash;
         }""",
+        timeout=10000,
+    )
+    page.wait_for_function(
+        """() => !document.querySelector("#music-results-container .home-result-card")""",
         timeout=10000,
     )
 

@@ -959,14 +959,15 @@ body.topbar-hidden .topbar {
   gap: 0;
   width: 100%;
   position: relative;
-  height: 44px;
   min-height: 44px;
   background: rgba(11, 15, 20, 0.96);
   border: 1px solid var(--border);
   border-radius: 16px;
-  overflow: hidden;
+  overflow: clip;
   box-shadow: var(--shadow);
   box-sizing: border-box;
+  isolation: isolate;
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
 }
 
 .video-header-searchbar {
@@ -977,7 +978,8 @@ body.topbar-hidden .topbar {
 .music-header-search-bar:focus-within,
 .movies-tv-search-row:focus-within {
   border-color: rgba(89, 176, 255, 0.62);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow), 0 0 0 1px rgba(89, 176, 255, 0.56);
+  z-index: 12;
 }
 
 .video-header-searchbar:focus-within::after,
@@ -987,9 +989,9 @@ body.topbar-hidden .topbar {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  box-shadow: inset 0 0 0 1px rgba(89, 176, 255, 0.56);
+  border: 1px solid rgba(89, 176, 255, 0.56);
   pointer-events: none;
-  z-index: 3;
+  z-index: 20;
 }
 
 .video-header-searchbar .home-search-input,
@@ -1016,8 +1018,8 @@ body.topbar-hidden .topbar {
 .topbar-search-host .music-header-query {
   height: 40px !important;
   min-height: 40px !important;
-  padding: 0 10px !important;
-  margin: 1px 0 !important;
+  padding: 0 14px !important;
+  margin: 0 !important;
   font-size: 12px !important;
   line-height: 40px !important;
   display: block;
@@ -1025,6 +1027,8 @@ body.topbar-hidden .topbar {
   box-sizing: border-box;
   vertical-align: middle;
   align-self: center;
+  position: relative;
+  z-index: 1;
 }
 
 .topbar-search-host .home-search-input::placeholder,
@@ -1056,13 +1060,12 @@ body.topbar-hidden .topbar {
   min-width: 78px;
   font-weight: 700;
   letter-spacing: 0.01em;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.02);
   line-height: 1;
   box-sizing: border-box;
   position: relative;
   z-index: 1;
-  align-self: center;
-  margin: 1px 0;
+  margin: 0;
 }
 
 .topbar-search-host .home-source-toggle {
@@ -1072,13 +1075,13 @@ body.topbar-hidden .topbar {
   min-width: 80px;
   border: 0;
   border-right: 1px solid var(--border);
-  border-radius: 14px 0 0 14px;
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: 15px 0 0 15px;
+  background: rgba(255, 255, 255, 0.02);
   font-weight: 700;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  align-self: center;
+  align-self: stretch;
   font-size: 11px;
   line-height: 1;
   box-sizing: border-box;
@@ -1094,7 +1097,9 @@ body.topbar-hidden .topbar {
   position: relative;
   flex: 0 0 auto;
   z-index: 2;
-  margin: 1px 0 1px 1px;
+  margin: 0;
+  align-self: stretch;
+  display: flex;
 }
 
 .topbar-search-host .home-source-panel {
@@ -1116,8 +1121,8 @@ body.topbar-hidden .topbar {
   pointer-events: none;
   position: relative;
   z-index: 1;
-  align-self: center;
-  margin: 1px 0;
+  align-self: stretch;
+  margin: 0;
 }
 
 .searchbar-leading-icon svg {
@@ -1148,6 +1153,64 @@ body.topbar-hidden .topbar {
   height: 40px;
   min-height: 40px;
   border-radius: 0;
+}
+
+.topbar-search-host .video-header-searchbar > *,
+.topbar-search-host .music-header-search-bar > *,
+.topbar-search-host .movies-tv-search-row > * {
+  position: relative;
+}
+
+.topbar-search-host .video-header-searchbar > *:not(:first-child)::before,
+.topbar-search-host .music-header-search-bar > *:not(:first-child)::before,
+.topbar-search-host .movies-tv-search-row > *:not(:first-child)::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.topbar-search-host .video-header-searchbar:focus-within > *::before,
+.topbar-search-host .music-header-search-bar:focus-within > *::before,
+.topbar-search-host .movies-tv-search-row:focus-within > *::before {
+  opacity: 0.95;
+}
+
+.topbar-search-host .video-header-searchbar > *:first-child::before,
+.topbar-search-host .music-header-search-bar > *:first-child::before,
+.topbar-search-host .movies-tv-search-row > *:first-child::before {
+  display: none;
+}
+
+.topbar-search-host .video-header-searchbar > .button,
+.topbar-search-host .music-header-search-bar > .button,
+.topbar-search-host .movies-tv-search-row > .button,
+.topbar-search-host .searchbar-leading-icon,
+.topbar-search-host .home-source-filters {
+  flex: 0 0 auto;
+}
+
+.topbar-search-host .video-header-searchbar > input,
+.topbar-search-host .music-header-search-bar > input,
+.topbar-search-host .movies-tv-search-row > input {
+  flex: 1 1 auto;
+}
+
+.topbar-search-host .video-header-searchbar > *:hover,
+.topbar-search-host .music-header-search-bar > *:hover,
+.topbar-search-host .movies-tv-search-row > *:hover {
+  z-index: 3;
+}
+
+.topbar-search-host .video-header-searchbar:focus-within > *,
+.topbar-search-host .music-header-search-bar:focus-within > *,
+.topbar-search-host .movies-tv-search-row:focus-within > * {
+  z-index: 4;
 }
 
 .topbar-search-host .button.primary:last-child,
