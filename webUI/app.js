@@ -6921,6 +6921,7 @@ function renderVideoLibrarySection() {
   if (!section || !grid) return;
   const items = Array.isArray(state.videoLibraryItems) ? state.videoLibraryItems : [];
   section.classList.toggle("hidden", !items.length);
+  renderVideoDiscoveryDefault();
   if (!items.length) {
     grid.innerHTML = `<div class="home-results-empty">No local video downloads found yet.</div>`;
     return;
@@ -6948,7 +6949,6 @@ function renderVideoLibrarySection() {
       </article>
     `;
   }).join("");
-  renderVideoDiscoveryDefault();
 }
 
 function renderVideoDiscoveryDefault() {
@@ -6969,7 +6969,19 @@ function renderVideoDiscoveryDefault() {
     `).join("");
   }
   if (!items.length) {
-    grid.innerHTML = `<div class="home-results-empty">Recent video downloads will show up here once you start building your library.</div>`;
+    const intentChips = [
+      "documentary", "lecture", "tutorial", "interview",
+      "conference talk", "music video", "short film", "podcast", "archival footage"
+    ];
+    grid.innerHTML = `
+      <div class="video-empty-state">
+        <p class="video-empty-state-hint">Search by title, topic, or paste a URL — or explore a category:</p>
+        <div class="video-empty-state-chips">
+          ${intentChips.map((chip) => `<button class="button ghost video-recent-search-button" type="button" data-video-suggestion="${escapeAttr(chip)}">${escapeHtml(chip)}</button>`).join("")}
+        </div>
+        <p class="video-empty-state-url-hint">or paste a direct URL above to download anything</p>
+      </div>
+    `;
     return;
   }
   grid.innerHTML = items.map((item) => `
@@ -15205,8 +15217,8 @@ async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
   if (!itemId || !candidateId) return;
   const messageEl = options.messageEl || $("#search-requests-message");
   const transientEntry = isHomeTransientResultId(itemId) ? state.homeCandidatesByItem?.[itemId] : null;
-  if (transientEntry?.item && transientEntry?.candidate) {
-    const candidate = transientEntry.candidates?.find((entry) => entry?.id === candidateId) || transientEntry.candidate;
+  if (transientEntry?.item && Array.isArray(transientEntry?.candidates) && transientEntry.candidates.length) {
+    const candidate = transientEntry.candidates.find((entry) => entry?.id === candidateId) || transientEntry.candidates[0];
     const item = transientEntry.item;
     const payload = buildHomeTransientRunPayload(item, candidate);
     try {
