@@ -83,6 +83,20 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
             self.assertNotIn(key, opts)
         self.assertEqual(opts.get("socket_timeout"), 10)
 
+    def test_replace_in_metadata_passes_through(self):
+        context = {
+            "operation": "download",
+            "audio_mode": False,
+            "final_format": None,
+            "audio_only": False,
+            "config": {},
+            "overrides": {
+                "replace_in_metadata": [["title", r"\s+\(.*?\)$", ""]],
+            },
+        }
+        opts = build_ytdlp_opts(context)
+        self.assertIn("replace_in_metadata", opts)
+
     def test_video_mp4_target_sets_postprocess_conversion(self):
         context = {
             "operation": "download",
