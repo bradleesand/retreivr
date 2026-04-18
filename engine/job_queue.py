@@ -155,6 +155,7 @@ _YTDLP_DOWNLOAD_ALLOWLIST = {
     "noproxy",
     "proxy",
     "ratelimit",
+    "replace_in_metadata",
     "retries",
     "sleep_interval",
     "socket_timeout",
