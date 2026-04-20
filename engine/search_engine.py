@@ -150,7 +150,7 @@ from engine.job_queue import (
 )
 from engine import community_cache
 from engine.json_utils import safe_json_dumps
-from engine.paths import DATA_DIR
+from engine.paths import DATA_DIR, DOWNLOADS_DIR
 from engine.search_adapters import default_adapters, youtube_fast_search
 from engine.search_scoring import (
     classify_music_title_variants,
@@ -3918,7 +3918,7 @@ class SearchResolutionService:
                     url=chosen["url"],
                     input_url=chosen.get("url"),
                     destination=destination_dir,
-                    base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
+                    base_dir=(self.paths.single_downloads_dir if self.paths is not None else str(DOWNLOADS_DIR)),
                     final_format_override=final_format_override,
                     resolved_metadata=(expected_music_metadata if expected_music_metadata else canonical_for_job),
                     trace_id=trace_id,
@@ -4175,7 +4175,7 @@ class SearchResolutionService:
                 url=candidate_url,
                 input_url=candidate_url,
                 destination=destination_dir,
-                base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
+                base_dir=(self.paths.single_downloads_dir if self.paths is not None else str(DOWNLOADS_DIR)),
                 final_format_override=final_format_override,
                 resolved_metadata=(expected_music_metadata if expected_music_metadata else canonical_payload),
                 output_template_overrides=(output_template_overrides or None),
