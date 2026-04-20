@@ -8,11 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from db.migrations import ensure_playlist_snapshot_tables
-from engine.paths import DB_PATH
+from engine.paths import get_db_path
 
 
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path or str(DB_PATH), check_same_thread=False, timeout=30)
+    conn = sqlite3.connect(db_path or str(get_db_path()), check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     ensure_playlist_snapshot_tables(conn)
@@ -53,13 +53,13 @@ class SnapshotWriteResult:
     reason: str | None = None
 
 
-def get_latest_snapshot(playlist_id: str) -> tuple[str | None, list[dict[str, Any]]]:
+def get_latest_snapshot(playlist_id: str, *, db_path: str | None = None) -> tuple[str | None, list[dict[str, Any]]]:
     """Return latest `(snapshot_id, items)` for a playlist, or `(None, [])` when missing."""
     pid = (playlist_id or "").strip()
     if not pid:
         return None, []
 
-    conn = _connect()
+    conn = _connect(db_path)
     try:
         cur = conn.cursor()
         cur.execute(
@@ -93,7 +93,13 @@ def get_latest_snapshot(playlist_id: str) -> tuple[str | None, list[dict[str, An
         conn.close()
 
 
-def store_snapshot(playlist_id: str, snapshot_id: str, items: list[dict[str, Any]]) -> None:
+def store_snapshot(
+    playlist_id: str,
+    snapshot_id: str,
+    items: list[dict[str, Any]],
+    *,
+    db_path: str | None = None,
+) -> None:
     """Store a snapshot and items only when `snapshot_id` differs from the latest snapshot."""
     pid = (playlist_id or "").strip()
     sid = (snapshot_id or "").strip()
@@ -102,7 +108,7 @@ def store_snapshot(playlist_id: str, snapshot_id: str, items: list[dict[str, Any
     if not sid:
         raise ValueError("snapshot_id is required")
 
-    conn = _connect()
+    conn = _connect(db_path)
     try:
         cur = conn.cursor()
         normalized_rows = _normalize_snapshot_rows(items)

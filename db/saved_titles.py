@@ -6,7 +6,7 @@ import sqlite3
 from typing import Any
 
 from db.migrations import ensure_saved_titles_table
-from engine.paths import DB_PATH
+from engine.paths import get_db_path
 
 
 def _normalize_kind(kind: str) -> str:
@@ -19,7 +19,7 @@ def _normalize_kind(kind: str) -> str:
 
 
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path or str(DB_PATH), check_same_thread=False, timeout=30)
+    conn = sqlite3.connect(db_path or str(get_db_path()), check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     ensure_saved_titles_table(conn)

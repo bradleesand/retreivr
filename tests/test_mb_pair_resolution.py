@@ -78,6 +78,7 @@ def test_bound_mb_pair_produces_album_and_track_position():
                     "id": recording_mbid,
                     "title": "Track A",
                     "ext:score": "97",
+                    "length": "210000",
                     "release-list": [{"id": "rel-us"}],
                 }
             ]
@@ -127,6 +128,7 @@ def test_bound_mb_pair_prefers_us_release_when_available():
                     "id": recording_mbid,
                     "title": "Track B",
                     "ext:score": "99",
+                    "length": "210000",
                 }
             ]
         },
@@ -240,6 +242,7 @@ def test_bound_mb_pair_tie_break_is_deterministic_by_release_id():
                     "id": recording_mbid,
                     "title": "Track D",
                     "ext:score": "99",
+                    "length": "210000",
                 }
             ]
         },

@@ -85,6 +85,10 @@ def test_enqueue_spotify_track_enqueues_when_isrc_not_downloaded(monkeypatch) ->
         "scheduler.jobs.spotify_playlist_watch.has_downloaded_isrc",
         lambda playlist_id, isrc: False,
     )
+    monkeypatch.setattr(
+        "scheduler.jobs.spotify_playlist_watch.has_downloaded_isrc_anywhere",
+        lambda isrc: False,
+    )
     queue = _MockQueue()
     search_service = _MockSearchService(
         [

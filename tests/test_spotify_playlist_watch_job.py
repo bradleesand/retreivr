@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from scheduler.jobs.spotify_playlist_watch import run_spotify_playlist_watch_job
+import pytest
+
+from scheduler.jobs.spotify_playlist_watch import _enqueue_added_track, run_spotify_playlist_watch_job
 
 
 def _item(track_id: str, position: int) -> dict[str, Any]:
@@ -119,3 +121,8 @@ def test_watch_job_moved_items_do_not_enqueue(monkeypatch, tmp_path) -> None:
     assert result["enqueued"] == 0
     assert enqueued == []
     assert len(store.store_calls) == 1
+
+
+def test_enqueue_added_track_requires_playlist_context() -> None:
+    with pytest.raises(ValueError):
+        _enqueue_added_track(lambda _item: None, {"spotify_track_id": "abc"})

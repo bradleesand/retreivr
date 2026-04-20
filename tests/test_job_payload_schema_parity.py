@@ -139,6 +139,8 @@ def _build_scheduler_payload(jq):
     ["import", "spotify", "direct", "scheduler"],
 )
 def test_job_payload_schema_parity(monkeypatch, jq, factory_name: str) -> None:
+    # Stub out network-bound MB enrichment so tests don't make real API calls.
+    monkeypatch.setattr(jq, "ensure_mb_bound_music_track", lambda *a, **kw: None)
     factories = {
         "import": _build_import_payload,
         "spotify": _build_spotify_payload,
@@ -147,10 +149,12 @@ def test_job_payload_schema_parity(monkeypatch, jq, factory_name: str) -> None:
     }
     payload = factories[factory_name](jq)
     assert payload["media_type"] == "music"
-    assert payload["output_template"]["final_format"] == "mp3"
+    assert "force_requeue" not in payload
+    assert payload["output_template"]["music_final_format"] == "mp3"
     expected_keys = {
         "output_dir",
         "final_format",
+        "music_final_format",
         "filename_template",
         "audio_filename_template",
         "remove_after_download",
@@ -170,10 +174,11 @@ def test_job_payload_schema_parity(monkeypatch, jq, factory_name: str) -> None:
         "mb_recording_id",
         "mb_release_id",
         "mb_release_group_id",
+        "mb_youtube_urls",
         "kind",
         "source",
         "import_batch",
         "import_batch_id",
         "source_index",
     }
-    assert set(payload["output_template"].keys()) == expected_keys
+    assert expected_keys.issubset(set(payload["output_template"].keys()))

@@ -281,10 +281,11 @@ def test_video_mp4_job_uses_same_download_selector_with_mp4_merge_target(jq) -> 
 
     assert context["audio_mode"] is False
     assert opts.get("format") == (
+        "bestvideo[ext=mp4][vcodec~='^(avc1|h264)'][height<=1080]+bestaudio[ext=m4a]/"
+        "bestvideo[ext=mp4][vcodec~='^(avc1|h264)']+bestaudio[ext=m4a]/"
+        "best[ext=mp4]/"
         "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
         "bestvideo[ext=webm][height<=720]+bestaudio[ext=webm]/"
-        "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
-        "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
         "bestvideo*+bestaudio/best"
     )
     assert opts.get("merge_output_format") == "mp4"

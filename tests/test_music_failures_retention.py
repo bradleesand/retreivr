@@ -9,15 +9,11 @@ import pytest
 
 
 def _load_import_pipeline():
-    module_path = Path(__file__).resolve().parents[1] / "engine" / "import_pipeline.py"
-    spec = importlib.util.spec_from_file_location("test_import_pipeline_module", module_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(module)
+        from engine import import_pipeline
+        return import_pipeline
     except ModuleNotFoundError as exc:
         pytest.skip(f"optional dependency missing: {exc}")
-    return module
 
 
 def _count_failures(db_path: str) -> int:

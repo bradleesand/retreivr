@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import sys
 import types
 
@@ -113,11 +113,16 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
         mp4_context = dict(mkv_context, final_format="mp4")
         mkv_opts = build_ytdlp_opts(mkv_context)
         mp4_opts = build_ytdlp_opts(mp4_context)
-        self.assertEqual(mkv_opts.get("format"), mp4_opts.get("format"))
+        # mp4 uses a native-format-preferred selector; mkv uses the general selector.
+        self.assertIsNotNone(mkv_opts.get("format"))
+        self.assertIsNotNone(mp4_opts.get("format"))
         self.assertIsNone(mkv_opts.get("recodevideo"))
         self.assertEqual(mp4_opts.get("recodevideo"), "mp4")
 
     def test_mp4_target_forces_aac_when_probe_reports_opus(self):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = ("", "")
         with patch(
             "engine.job_queue._probe_media_profile",
             side_effect=[
@@ -132,15 +137,17 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
                     "final_audio_codec": "aac",
                 },
             ],
-        ), patch("engine.job_queue.subprocess.run") as mock_run, patch("engine.job_queue.os.replace"):
+        ), patch("engine.job_queue._probe_media_duration_seconds", return_value=None), \
+           patch("engine.job_queue.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+           patch("engine.job_queue.os.replace"):
             _path, profile = _enforce_video_codec_container_rules(
                 "/tmp/source.mp4",
                 target_container="mp4",
             )
 
         self.assertEqual(profile.get("final_audio_codec"), "aac")
-        self.assertEqual(mock_run.call_count, 1)
-        ffmpeg_args = mock_run.call_args[0][0]
+        self.assertEqual(mock_popen.call_count, 1)
+        ffmpeg_args = mock_popen.call_args[0][0]
         self.assertIn("-c:a", ffmpeg_args)
         self.assertIn("aac", ffmpeg_args)
         self.assertIn("-c:v", ffmpeg_args)
@@ -164,6 +171,14 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
         self.assertEqual(mock_run.call_count, 0)
 
     def test_mp4_target_retries_without_subtitles_on_ffmpeg_failure(self):
+        fail_proc = MagicMock()
+        fail_proc.returncode = 1
+        fail_proc.communicate.return_value = ("", "subtitle copy failed")
+
+        ok_proc = MagicMock()
+        ok_proc.returncode = 0
+        ok_proc.communicate.return_value = ("", "")
+
         with patch(
             "engine.job_queue._probe_media_profile",
             side_effect=[
@@ -178,22 +193,20 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
                     "final_audio_codec": "aac",
                 },
             ],
-        ), patch(
-            "engine.job_queue.subprocess.run",
-            side_effect=[
-                RuntimeError("subtitle copy failed"),
-                None,
-            ],
-        ) as mock_run, patch("engine.job_queue.os.replace"):
+        ), patch("engine.job_queue._probe_media_duration_seconds", return_value=None), \
+           patch(
+               "engine.job_queue.subprocess.Popen",
+               side_effect=[fail_proc, ok_proc],
+           ) as mock_popen, patch("engine.job_queue.os.replace"):
             _path, profile = _enforce_video_codec_container_rules(
                 "/tmp/source.mp4",
                 target_container="mp4",
             )
 
         self.assertEqual(profile.get("final_audio_codec"), "aac")
-        self.assertEqual(mock_run.call_count, 2)
-        first_args = mock_run.call_args_list[0][0][0]
-        second_args = mock_run.call_args_list[1][0][0]
+        self.assertEqual(mock_popen.call_count, 2)
+        first_args = mock_popen.call_args_list[0][0][0]
+        second_args = mock_popen.call_args_list[1][0][0]
         self.assertIn("-map", first_args)
         self.assertIn("0:s?", first_args)
         self.assertIn("-c:s", first_args)
@@ -201,6 +214,9 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
         self.assertIn("-sn", second_args)
 
     def test_mp4_target_transcodes_video_to_h264_when_probe_reports_vp9(self):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = ("", "")
         with patch(
             "engine.job_queue._probe_media_profile",
             side_effect=[
@@ -215,7 +231,9 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
                     "final_audio_codec": "aac",
                 },
             ],
-        ), patch("engine.job_queue.subprocess.run") as mock_run, patch("engine.job_queue.os.replace"):
+        ), patch("engine.job_queue._probe_media_duration_seconds", return_value=None), \
+           patch("engine.job_queue.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+           patch("engine.job_queue.os.replace"):
             _path, profile = _enforce_video_codec_container_rules(
                 "/tmp/source.mp4",
                 target_container="mp4",
@@ -223,6 +241,6 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
 
         self.assertEqual(profile.get("final_video_codec"), "h264")
         self.assertEqual(profile.get("final_audio_codec"), "aac")
-        ffmpeg_args = mock_run.call_args[0][0]
+        ffmpeg_args = mock_popen.call_args[0][0]
         self.assertIn("libx264", ffmpeg_args)
         self.assertIn("aac", ffmpeg_args)

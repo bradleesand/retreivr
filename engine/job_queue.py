@@ -6295,6 +6295,8 @@ def build_ytdlp_opts(context):
                 opts["format"] = _FORMAT_VIDEO
             if video_container_target in {"mp4", "mkv"}:
                 opts["merge_output_format"] = video_container_target
+            if video_container_target == "mp4":
+                opts["recodevideo"] = "mp4"
 
     # Only lock down format-related overrides when the target_format was actually applied
     # (audio codec in audio_mode, or video container preference in video mode).

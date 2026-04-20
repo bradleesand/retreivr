@@ -32,6 +32,39 @@ def _free_port() -> int:
 
 def _build_webui_test_app() -> FastAPI:
     app = FastAPI()
+    silent_data_uri = (
+        "data:audio/wav;base64,"
+        "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="
+    )
+
+    def _library_summary_payload(version: int = 1) -> dict[str, Any]:
+        artists = [
+            {"artist": "Artist One", "artist_key": "artist one", "album_count": 2 if version == 1 else 1, "track_count": 3 if version == 1 else 1, "artwork_url": ""},
+            {"artist": "Artist Two", "artist_key": "artist two", "album_count": 1, "track_count": 1, "artwork_url": ""},
+        ]
+        if version == 1:
+            albums = [
+                {"artist": "Artist One", "artist_key": "artist one", "album": "Alpha Album", "album_key": "alpha album", "track_count": 2, "artwork_url": ""},
+                {"artist": "Artist One", "artist_key": "artist one", "album": "Beta Album", "album_key": "beta album", "track_count": 1, "artwork_url": ""},
+                {"artist": "Artist Two", "artist_key": "artist two", "album": "Gamma Album", "album_key": "gamma album", "track_count": 1, "artwork_url": ""},
+            ]
+            tracks = [
+                {"id": "t1", "title": "Alpha Track 1", "artist": "Artist One", "artist_key": "artist one", "album": "Alpha Album", "album_key": "alpha album", "recording_mbid": "rec-alpha", "stream_url": silent_data_uri, "artwork_url": ""},
+                {"id": "t2", "title": "Alpha Track 2", "artist": "Artist One", "artist_key": "artist one", "album": "Alpha Album", "album_key": "alpha album", "recording_mbid": "rec-alpha-2", "stream_url": silent_data_uri, "artwork_url": ""},
+                {"id": "t3", "title": "Beta Track", "artist": "Artist One", "artist_key": "artist one", "album": "Beta Album", "album_key": "beta album", "recording_mbid": "rec-beta", "stream_url": silent_data_uri, "artwork_url": ""},
+                {"id": "t4", "title": "Gamma Track", "artist": "Artist Two", "artist_key": "artist two", "album": "Gamma Album", "album_key": "gamma album", "recording_mbid": "rec-gamma", "stream_url": silent_data_uri, "artwork_url": ""},
+            ]
+        else:
+            albums = [
+                {"artist": "Artist One", "artist_key": "artist one", "album": "Beta Album", "album_key": "beta album", "track_count": 1, "artwork_url": ""},
+                {"artist": "Artist Two", "artist_key": "artist two", "album": "Gamma Album", "album_key": "gamma album", "track_count": 1, "artwork_url": ""},
+            ]
+            tracks = [
+                {"id": "t3", "title": "Beta Track", "artist": "Artist One", "artist_key": "artist one", "album": "Beta Album", "album_key": "beta album", "recording_mbid": "rec-beta", "stream_url": silent_data_uri, "artwork_url": ""},
+                {"id": "t4", "title": "Gamma Track", "artist": "Artist Two", "artist_key": "artist two", "album": "Gamma Album", "album_key": "gamma album", "recording_mbid": "rec-gamma", "stream_url": silent_data_uri, "artwork_url": ""},
+            ]
+        return {"artists": artists, "albums": albums, "tracks": tracks}
+
     state: dict[str, Any] = {
         "request_id": "req-1",
         "item_id": "item-1",
@@ -40,7 +73,64 @@ def _build_webui_test_app() -> FastAPI:
         "run_id": "run-1",
         "request_status": "completed",
         "job_status": "",
+        "library_summary_version": 1,
+        "import_job_id": "imp-1",
+        "setup_preflight_conflict": True,
+        "config": {
+            "arr": {
+                "tmdb_api_key": "",
+                "vpn": {"enabled": False, "provider": "gluetun"},
+                "jellyfin": {"base_url": "", "api_key": ""},
+                "radarr": {"base_url": "", "api_key": ""},
+                "sonarr": {"base_url": "", "api_key": ""},
+                "readarr": {"base_url": "", "api_key": ""},
+                "prowlarr": {"base_url": "", "api_key": ""},
+                "bazarr": {"base_url": "", "api_key": ""},
+                "qbittorrent": {"base_url": "", "username": "", "password": ""},
+            },
+            "telegram": {"bot_token": "", "chat_id": ""},
+            "setup": {
+                "stack": {
+                    "enable_arr_stack": False,
+                    "enable_radarr": False,
+                    "enable_sonarr": False,
+                    "enable_readarr": False,
+                    "enable_prowlarr": False,
+                    "enable_bazarr": False,
+                    "enable_qbittorrent": False,
+                    "enable_vpn": False,
+                    "enable_jellyfin": False,
+                    "enable_hostctl": False,
+                    "env_path": ".env",
+                    "media_root": "./media",
+                    "movies_root": "./media/movies",
+                    "tv_root": "./media/tv",
+                    "downloads_root": "./downloads",
+                    "books_root": "./media/books",
+                },
+                "service_management": {"mode": "none", "apply_mode": "manual"},
+            },
+        },
     }
+
+    def _preflight_payload(stack: dict[str, Any] | None = None) -> dict[str, Any]:
+        current = stack or (((state.get("config") or {}).get("setup") or {}).get("stack") or {})
+        conflict = bool(state.get("setup_preflight_conflict")) and bool(current.get("enable_radarr")) is False
+        if conflict:
+            return {
+                "ok": False,
+                "conflicts": [{"type": "port_conflict", "message": "Host port 7878 is already in use.", "host_port": 7878}],
+                "warnings": [],
+                "fix_hints": ["Stop the process using port 7878 or remap Radarr host port."],
+                "checks": {"docker_compose": {"ok": True, "status": "ok"}, "compose_file": {"ok": True, "path": "docker/docker-compose.yml.example"}},
+            }
+        return {
+            "ok": True,
+            "conflicts": [],
+            "warnings": [],
+            "fix_hints": [],
+            "checks": {"docker_compose": {"ok": True, "status": "ok"}, "compose_file": {"ok": True, "path": "docker/docker-compose.yml.example"}},
+        }
 
     @app.get("/api/paths")
     def api_paths() -> dict[str, str]:
@@ -49,6 +139,83 @@ def _build_webui_test_app() -> FastAPI:
     @app.get("/api/version")
     def api_version() -> dict[str, str]:
         return {"app_version": "0.0.0-test"}
+
+    @app.get("/api/config")
+    def api_config_get() -> dict[str, Any]:
+        return dict(state["config"])
+
+    @app.put("/api/config")
+    def api_config_put(payload: dict[str, Any]) -> dict[str, Any]:
+        state["config"] = payload
+        return payload
+
+    @app.get("/api/setup/status")
+    def api_setup_status() -> dict[str, Any]:
+        cfg = state["config"]
+        stack = dict((((cfg.get("setup") or {}).get("stack")) or {}))
+        stack.setdefault("compose_profiles", [])
+        stack.setdefault("compose_command", "docker compose up -d")
+        stack.setdefault("restart_required", False)
+        return {
+            "modules": {
+                "core": {"status": "verified", "title": "Core Retreivr", "summary": "ok", "required": True, "complete": True},
+                "arr": {"status": "optional", "title": "ARR Stack", "summary": "optional", "required": False, "complete": False},
+                "storage": {"status": "verified", "title": "Storage", "summary": "ok", "required": True, "complete": True},
+            },
+            "service_management": dict((((cfg.get("setup") or {}).get("service_management")) or {"mode": "none", "apply_mode": "manual"})),
+            "managed_stack": {"mode": "managed", "selected_services": [], "services": {}, "phase": "idle", "phase_message": "", "last_error": ""},
+            "existing_stack": {"mode": "existing", "selected_services": [], "services": {}},
+            "stack": stack,
+            "preflight": _preflight_payload(stack),
+            "security": {"admin_pin_enabled": False, "admin_pin_session_minutes": 30, "session_valid": True},
+        }
+
+    @app.post("/api/setup/preflight")
+    def api_setup_preflight(payload: dict[str, Any]) -> dict[str, Any]:
+        stack = dict((payload.get("stack") if isinstance(payload.get("stack"), dict) else {}) or {})
+        return {"preflight": _preflight_payload(stack), "stack": stack}
+
+    @app.post("/api/setup/stack")
+    def api_setup_stack(payload: dict[str, Any]) -> dict[str, Any]:
+        cfg = state["config"]
+        setup = dict(cfg.get("setup") or {})
+        setup["stack"] = dict(payload or {})
+        cfg["setup"] = setup
+        state["config"] = cfg
+        return api_setup_status()
+
+    @app.post("/api/setup/managed/plan")
+    def api_setup_managed_plan(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "planned",
+            "managed_stack": {"mode": "managed"},
+            "stack": dict((((state["config"].get("setup") or {}).get("stack")) or {})),
+            "preflight": _preflight_payload(),
+        }
+
+    @app.post("/api/setup/existing/discover")
+    def api_setup_existing_discover(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "discovered", "existing_stack": {"mode": "existing", "selected_services": []}}
+
+    @app.post("/api/setup/managed/apply")
+    def api_setup_managed_apply() -> dict[str, Any]:
+        return {"status": "prepared", "compose_command": "docker compose up -d", "profiles": []}
+
+    @app.post("/api/setup/existing/connect")
+    def api_setup_existing_connect(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "connected", "existing_stack": {"mode": "existing", "selected_services": []}}
+
+    @app.post("/api/setup/apply-stack")
+    def api_setup_apply_stack() -> dict[str, Any]:
+        return {"status": "written", "env_path": ".env", "compose_command": "docker compose up -d", "profiles": [], "enabled_services": []}
+
+    @app.get("/api/services/health")
+    def api_services_health() -> dict[str, Any]:
+        return {"services": {"radarr": {"configured": False, "reachable": False, "status": "not_configured", "state": "unknown", "reason_code": "not_configured", "retry_hint": "Configure Radarr in Setup first."}}, "summary": {"connected": 0, "needs_attention": 0, "failed": 0, "unknown": 1}}
+
+    @app.post("/api/services/autoconfigure")
+    def api_services_autoconfigure() -> dict[str, Any]:
+        return {"status": "completed", "services": {}, "summary": {"connected": 0, "needs_attention": 0, "failed": 0}}
 
     @app.get("/api/status")
     def api_status(run_id: str | None = None) -> dict[str, Any]:
@@ -300,12 +467,111 @@ def _build_webui_test_app() -> FastAPI:
     @app.post("/api/import/playlist")
     async def api_import_playlist() -> dict[str, Any]:
         return {
-            "total_tracks": 4,
-            "resolved": 3,
-            "unresolved": 1,
-            "enqueued": 3,
-            "failed": 0,
+            "job_id": state["import_job_id"],
+            "status": {
+                "phase": "queued",
+                "message": "Queued",
+                "total_tracks": 4,
+                "processed_tracks": 0,
+                "resolved": 0,
+                "enqueued": 0,
+                "failed": 0,
+                "unresolved": 0,
+            },
         }
+
+    @app.get("/api/import/playlist/jobs/{job_id}")
+    async def api_import_playlist_job(job_id: str) -> dict[str, Any]:
+        return {
+            "job_id": job_id,
+            "status": {
+                "phase": "completed",
+                "message": "Completed",
+                "total_tracks": 4,
+                "processed_tracks": 4,
+                "resolved": 3,
+                "enqueued": 3,
+                "failed": 0,
+                "unresolved": 1,
+            },
+        }
+
+    @app.get("/api/player/library")
+    def api_player_library() -> dict[str, Any]:
+        summary = _library_summary_payload(state["library_summary_version"])
+        return {"items": summary["tracks"]}
+
+    @app.get("/api/player/library/summary")
+    def api_player_library_summary(limit: int = 2000) -> dict[str, Any]:
+        _ = limit
+        return {"summary": _library_summary_payload(state["library_summary_version"])}
+
+    @app.get("/api/player/stations")
+    def api_player_stations() -> dict[str, Any]:
+        return {"stations": []}
+
+    @app.get("/api/player/history")
+    def api_player_history() -> dict[str, Any]:
+        return {"history": []}
+
+    @app.get("/api/player/playlists")
+    def api_player_playlists() -> dict[str, Any]:
+        return {"playlists": []}
+
+    @app.get("/api/player/community-cache")
+    def api_player_community_cache() -> dict[str, Any]:
+        return {"items": []}
+
+    @app.get("/api/music/search")
+    def api_music_search(
+        artist: str = "",
+        album: str = "",
+        track: str = "",
+        mode: str = "auto",
+        offset: int = 0,
+        limit: int = 48,
+    ) -> dict[str, Any]:
+        _ = (artist, album, mode, offset, limit)
+        term = track or "Smoke Track"
+        return {
+            "artists": [],
+            "albums": [],
+            "tracks": [
+                {
+                    "track": term,
+                    "artist": "Artist One",
+                    "album": "Alpha Album",
+                    "duration_ms": 123000,
+                    "recording_mbid": "rec-alpha",
+                    "mb_release_id": "rel-alpha",
+                    "mb_release_group_id": "rg-alpha",
+                    "track_number": 1,
+                }
+            ],
+        }
+
+    @app.get("/resolve/recording/{recording_mbid}")
+    def api_resolve_recording(recording_mbid: str) -> dict[str, Any]:
+        return {
+            "recording_mbid": recording_mbid,
+            "selection": {"selected_url": "https://www.youtube.com/watch?v=stub123"},
+            "best_source": {"source": "youtube"},
+        }
+
+    @app.post("/api/music/preview")
+    def api_music_preview(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "preview_type": "video",
+            "source": "youtube",
+            "source_url": "https://www.youtube.com/watch?v=stub123",
+            "video_id": "stub123",
+            "title": "Smoke Track",
+        }
+
+    @app.post("/api/test/library-summary/version/{version}")
+    def api_set_library_version(version: int) -> dict[str, Any]:
+        state["library_summary_version"] = 2 if version >= 2 else 1
+        return {"ok": True, "version": state["library_summary_version"]}
 
     @app.get("/api/search/queue")
     def api_search_queue() -> dict[str, Any]:
@@ -491,6 +757,187 @@ def test_webui_music_direct_url_is_blocked_with_warning(webui_server: str, page)
     )
     page.wait_for_function(
         """() => !document.querySelector("#music-results-container .home-result-card")""",
+        timeout=10000,
+    )
+
+    assert not page_errors, f"Page JS errors detected: {page_errors}"
+    assert not console_errors, f"Console errors detected: {console_errors}"
+
+
+def test_webui_music_toolbar_import_button_autosubmits_from_file(
+    webui_server: str, page, tmp_path: Path
+) -> None:
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+    dialogs: list[str] = []
+
+    def on_console(msg) -> None:
+        if msg.type == "error":
+            console_errors.append(msg.text)
+
+    def on_dialog(dialog) -> None:
+        dialogs.append(dialog.message)
+        dialog.accept()
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda err: page_errors.append(str(err)))
+    page.on("dialog", on_dialog)
+
+    import_file = tmp_path / "music_import.m3u"
+    import_file.write_text("#EXTM3U\n#EXTINF:123,Artist One - Alpha Track 1\ntrack.mp3\n", encoding="utf-8")
+
+    page.goto(f"{webui_server}#music", wait_until="networkidle")
+    page.wait_for_selector("#music-toolbar-slot .music-import-toolbar-button", timeout=10000)
+    page.wait_for_function(
+        """() => {
+          const toolbarBtn = document.querySelector("#music-toolbar-slot .music-import-toolbar-button");
+          const groupedBtn = document.querySelector(".music-section-toggle .music-import-toolbar-button");
+          return !!toolbarBtn && !groupedBtn && /Import from File/i.test(toolbarBtn.textContent || "");
+        }""",
+        timeout=10000,
+    )
+
+    with page.expect_file_chooser() as fc_info:
+        page.click("#music-toolbar-slot .music-import-toolbar-button")
+    chooser = fc_info.value
+    chooser.set_files(str(import_file))
+
+    page.wait_for_function(
+        """() => {
+          const el = document.querySelector("#home-import-summary");
+          const text = (el && el.textContent) || "";
+          return text.includes("Total: 4")
+            && text.includes("Resolved: 3")
+            && text.includes("Enqueued: 3")
+            && text.includes("Unresolved: 1");
+        }""",
+        timeout=10000,
+    )
+    assert dialogs, "Expected confirmation dialog to be shown for playlist import."
+    assert not page_errors, f"Page JS errors detected: {page_errors}"
+    assert not console_errors, f"Console errors detected: {console_errors}"
+
+
+def test_webui_music_search_result_play_updates_player_state(webui_server: str, page) -> None:
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def on_console(msg) -> None:
+        if msg.type == "error":
+            console_errors.append(msg.text)
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda err: page_errors.append(str(err)))
+
+    page.goto(f"{webui_server}#music", wait_until="networkidle")
+    page.click('.music-app-nav[data-music-section="favorites"]')
+    page.wait_for_function(
+        """() => {
+          const favorites = document.querySelector("#music-player-favorites");
+          return !!favorites;
+        }""",
+        timeout=10000,
+    )
+    page.click('.music-app-nav[data-music-section="browse"]')
+    page.fill("#search-track", "Alpha Track 1")
+    page.click("#search-create-only")
+    page.wait_for_selector(".music-search-play-btn", timeout=10000)
+    page.click(".music-search-play-btn")
+    page.wait_for_function(
+        """() => {
+          const title = document.querySelector("#music-player-now-title")?.textContent || "";
+          const source = document.querySelector("#music-player-audio")?.getAttribute("src") || "";
+          return /Alpha Track 1/.test(title) && source.startsWith("data:audio/");
+        }""",
+        timeout=10000,
+    )
+
+    assert not page_errors, f"Page JS errors detected: {page_errors}"
+    assert not console_errors, f"Console errors detected: {console_errors}"
+
+
+def test_webui_music_library_filter_transition_and_refresh_resilience(webui_server: str, page) -> None:
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def on_console(msg) -> None:
+        if msg.type == "error":
+            console_errors.append(msg.text)
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda err: page_errors.append(str(err)))
+
+    page.goto(f"{webui_server}#music", wait_until="networkidle")
+    page.click('.music-app-nav[data-music-section="library"]')
+    page.wait_for_selector("#music-library-grid", timeout=10000)
+
+    page.click('#music-library-section [data-music-library-mode="artists"]')
+    page.wait_for_selector('#music-library-grid [data-library-type="artist"]', timeout=10000)
+    page.click('#music-library-grid [data-action="music-library-open-artist"]')
+    page.wait_for_selector('#music-library-grid [data-library-type="album"]', timeout=10000)
+    page.click('#music-library-grid [data-action="music-library-open-album"]')
+    page.wait_for_selector('#music-library-grid [data-library-type="track"]', timeout=10000)
+
+    response = requests.post(f"{webui_server}/api/test/library-summary/version/2", timeout=2)
+    assert response.status_code == 200
+
+    page.click("#music-library-refresh")
+    page.wait_for_function(
+        """() => {
+          const trackCards = document.querySelectorAll('#music-library-grid [data-library-type="track"]');
+          const empty = document.querySelector('#music-library-grid .home-results-empty');
+          return trackCards.length > 0 && (!empty || !/No tracks available/i.test(empty.textContent || ""));
+        }""",
+        timeout=10000,
+    )
+
+    assert not page_errors, f"Page JS errors detected: {page_errors}"
+    assert not console_errors, f"Console errors detected: {console_errors}"
+
+
+def test_webui_setup_wizard_preflight_conflict_disables_apply(webui_server: str, page) -> None:
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def on_console(msg) -> None:
+        if msg.type == "error":
+            console_errors.append(msg.text)
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda err: page_errors.append(str(err)))
+
+    page.goto(webui_server, wait_until="networkidle")
+
+    page.wait_for_function(
+        """() => {
+          const title = document.querySelector(".setup-wizard-title");
+          return !!title && /Where should Retreivr keep your files\\?/i.test(title.textContent || "");
+        }""",
+        timeout=10000,
+    )
+    page.click('[data-setup-nav="next"]')
+    page.click('[data-setup-choice="arr_setup_mode"][data-value="none"]')
+    page.click('[data-setup-choice="wants_tmdb"][data-value="false"]')
+    page.click('[data-setup-choice="enable_vpn"][data-value="false"]')
+    page.click('[data-setup-choice="wants_youtube"][data-value="false"]')
+    page.click('[data-setup-choice="wants_telegram"][data-value="false"]')
+    page.click('[data-setup-choice="enable_jellyfin"][data-value="false"]')
+    page.click('[data-setup-nav="next"]')
+
+    page.wait_for_function(
+        """() => {
+          const title = document.querySelector(".setup-wizard-title");
+          return !!title && /Preflight checks before apply/i.test(title.textContent || "");
+        }""",
+        timeout=10000,
+    )
+    page.click('[data-setup-action="run-preflight"]')
+    page.wait_for_function(
+        """() => {
+          const text = document.body.textContent || "";
+          const apply = document.querySelector('[data-setup-action="apply-env"]');
+          return /Blocking issues/i.test(text) && !!apply && apply.hasAttribute("disabled");
+        }""",
         timeout=10000,
     )
 

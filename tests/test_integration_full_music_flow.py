@@ -30,13 +30,18 @@ def isolated_runtime(tmp_path: Path, monkeypatch):
 
 
 @pytest.fixture()
-def api_module(monkeypatch):
-    monkeypatch.setattr(sys, "version_info", (3, 11, 0, "final", 0), raising=False)
-    monkeypatch.setattr(sys, "version", "3.11.9", raising=False)
+def api_module(monkeypatch, tmp_path):
+    import engine.core  # noqa: F401
     sys.modules.pop("api.main", None)
     module = importlib.import_module("api.main")
     module.app.router.on_startup.clear()
     module.app.router.on_shutdown.clear()
+    module.app.state.paths = SimpleNamespace(
+        db_path=str(tmp_path / "integration_music.sqlite"),
+        single_downloads_dir=str(tmp_path / "downloads"),
+    )
+    module.app.state.config_path = str(tmp_path / "config.json")
+    monkeypatch.setattr(module, "_read_config_or_404", lambda: {})
     return module
 
 
@@ -51,11 +56,17 @@ def test_integration_full_music_pipeline(
     api_client: TestClient,
     monkeypatch,
 ) -> None:
+    import engine.job_queue as _jq
+    monkeypatch.setattr(_jq, "ensure_mb_bound_music_track", lambda *a, **kw: None)
+
+    import db.downloaded_tracks as _dlt
+
     db_path = str(isolated_runtime["db_path"])
     music_root = isolated_runtime["music_root"]
+    from engine.job_queue import ensure_download_jobs_table
     conn = sqlite3.connect(db_path)
     try:
-        api_module.ensure_download_jobs_table(conn)
+        ensure_download_jobs_table(conn)
     finally:
         conn.close()
 
@@ -147,6 +158,8 @@ def test_integration_full_music_pipeline(
                     "release_date": canonical_metadata["date"],
                     "duration_ms": 210000,
                     "playlist_id": "integration_playlist",
+                    "recording_mbid": "mbid-track-123",
+                    "mb_release_id": "rel-123",
                 }
             )
             return "req-integration-1"
@@ -160,14 +173,12 @@ def test_integration_full_music_pipeline(
             "intent": "track",
             "artist": "The Artist",
             "track": "My Song",
-            "music_mode": True,
             "search_only": False,
         },
     )
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["request_id"] == "req-integration-1"
-    assert payload["music_mode"] is True
     assert isinstance(payload["music_candidates"], list)
 
     conn = sqlite3.connect(db_path)
@@ -240,7 +251,8 @@ def test_integration_full_music_pipeline(
     assert captured_tags["isrc"] == "USABC1234567"
     assert "spotify" not in json.dumps(captured_tags).lower()
 
-    api_module.record_download_history(
+    from engine.job_queue import record_download_history
+    record_download_history(
         db_path,
         claimed,
         str(output_file),

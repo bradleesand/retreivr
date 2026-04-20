@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 
 
 def _build_client(monkeypatch) -> tuple[TestClient, object]:
+    # Pre-load engine.core with real packages before any stubs are injected.
+    import engine.core  # noqa: F401
     monkeypatch.setattr(sys, "version_info", (3, 11, 0, "final", 0), raising=False)
     monkeypatch.setattr(sys, "version", "3.11.9", raising=False)
     if "google_auth_oauthlib" not in sys.modules:
@@ -37,6 +39,18 @@ def _build_client(monkeypatch) -> tuple[TestClient, object]:
         google_auth_exc_mod = types.ModuleType("google.auth.exceptions")
         google_auth_exc_mod.RefreshError = Exception
         sys.modules["google.auth.exceptions"] = google_auth_exc_mod
+    if "google.auth.transport" not in sys.modules:
+        sys.modules["google.auth.transport"] = types.ModuleType("google.auth.transport")
+    if "google.auth.transport.requests" not in sys.modules:
+        google_auth_transport_requests = types.ModuleType("google.auth.transport.requests")
+        google_auth_transport_requests.Request = object
+        sys.modules["google.auth.transport.requests"] = google_auth_transport_requests
+    if "google.oauth2" not in sys.modules:
+        sys.modules["google.oauth2"] = types.ModuleType("google.oauth2")
+    if "google.oauth2.credentials" not in sys.modules:
+        google_oauth2_credentials = types.ModuleType("google.oauth2.credentials")
+        google_oauth2_credentials.Credentials = object
+        sys.modules["google.oauth2.credentials"] = google_oauth2_credentials
     if "musicbrainzngs" not in sys.modules:
         sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
 

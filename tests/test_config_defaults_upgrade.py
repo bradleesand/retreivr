@@ -46,6 +46,7 @@ def _install_core_import_stubs() -> None:
     jq.build_download_job_payload = lambda *_a, **_k: {}
     jq.build_output_template = lambda *_a, **_k: {}
     jq.ensure_download_jobs_table = lambda *_a, **_k: None
+    jq.ensure_long_term_retry_table = lambda *_a, **_k: None
     jq.preview_direct_url = lambda *_a, **_k: {}
     jq.resolve_cookie_file = lambda *_a, **_k: None
     jq.resolve_media_intent = lambda *_a, **_k: None

@@ -5,25 +5,25 @@ from __future__ import annotations
 import sqlite3
 
 from db.migrations import ensure_downloaded_music_tracks_table
-from engine.paths import DB_PATH
+from engine.paths import get_db_path
 
 
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path or str(DB_PATH), check_same_thread=False, timeout=30)
+    conn = sqlite3.connect(db_path or str(get_db_path()), check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     ensure_downloaded_music_tracks_table(conn)
     return conn
 
 
-def has_downloaded_isrc(playlist_id: str, isrc: str) -> bool:
+def has_downloaded_isrc(playlist_id: str, isrc: str, *, db_path: str | None = None) -> bool:
     """Return True when an ISRC is already recorded for a playlist."""
     pid = (playlist_id or "").strip()
     track_isrc = (isrc or "").strip()
     if not pid or not track_isrc:
         return False
 
-    conn = _connect()
+    conn = _connect(db_path)
     try:
         cur = conn.cursor()
         cur.execute(
@@ -40,13 +40,13 @@ def has_downloaded_isrc(playlist_id: str, isrc: str) -> bool:
         conn.close()
 
 
-def has_downloaded_isrc_anywhere(isrc: str) -> bool:
+def has_downloaded_isrc_anywhere(isrc: str, *, db_path: str | None = None) -> bool:
     """Return True when an ISRC is already recorded in any playlist scope."""
     track_isrc = (isrc or "").strip()
     if not track_isrc:
         return False
 
-    conn = _connect()
+    conn = _connect(db_path)
     try:
         cur = conn.cursor()
         cur.execute(
@@ -63,7 +63,7 @@ def has_downloaded_isrc_anywhere(isrc: str) -> bool:
         conn.close()
 
 
-def record_downloaded_track(playlist_id: str, isrc: str, file_path: str) -> None:
+def record_downloaded_track(playlist_id: str, isrc: str, file_path: str, *, db_path: str | None = None) -> None:
     """Insert a downloaded track record for playlist/idempotency tracking."""
     pid = (playlist_id or "").strip()
     track_isrc = (isrc or "").strip()
@@ -75,7 +75,7 @@ def record_downloaded_track(playlist_id: str, isrc: str, file_path: str) -> None
     if not path:
         raise ValueError("file_path is required")
 
-    conn = _connect()
+    conn = _connect(db_path)
     try:
         cur = conn.cursor()
         cur.execute(

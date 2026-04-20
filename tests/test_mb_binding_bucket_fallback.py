@@ -92,6 +92,7 @@ def test_only_single_available_succeeds_when_correctness_passes():
         album=None,
         duration_ms=210000,
         country_preference="US",
+        allow_non_album_fallback=True,
     )
     assert selected is not None
     assert selected["mb_release_id"] == "rel-single"

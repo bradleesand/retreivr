@@ -827,10 +827,8 @@ def _enqueue_music_track_job(
             "audio_mode": media_type == "music",
         },
         canonical_id=canonical_id,
-        force_requeue=bool(force_requeue),
     )
-    force_requeue = bool(enqueue_payload.pop("force_requeue", False))
-    return queue_store.enqueue_job(**enqueue_payload, force_requeue=force_requeue)
+    return queue_store.enqueue_job(**enqueue_payload, force_requeue=bool(force_requeue))
 
 
 def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportResult:

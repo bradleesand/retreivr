@@ -10,17 +10,33 @@ from fastapi.testclient import TestClient
 
 
 def _build_client(monkeypatch) -> TestClient:
-    monkeypatch.setattr(sys, "version_info", (3, 11, 0, "final", 0), raising=False)
-    monkeypatch.setattr(sys, "version", "3.11.9", raising=False)
+    import engine.core  # noqa: F401
+    from types import SimpleNamespace
     sys.modules.pop("api.main", None)
     module = importlib.import_module("api.main")
     module.app.router.on_startup.clear()
     module.app.router.on_shutdown.clear()
+    module.app.state.config_path = "/tmp/retreivr_test_config.json"
+    module.app.state.paths = SimpleNamespace(db_path="/tmp/retreivr_test.db", single_downloads_dir="/tmp/downloads")
+    module.app.state.search_service = None
+    monkeypatch.setattr(module, "_read_config_or_404", lambda: {})
     return TestClient(module.app)
 
 
 def test_intent_execute_accepts_valid_spotify_album_intent(monkeypatch) -> None:
     client = _build_client(monkeypatch)
+
+    import importlib as _il
+    module = _il.import_module("api.main")
+
+    async def _fake_dispatch(*, intent_type, identifier, config, db, queue, spotify_client):
+        return {
+            "status": "accepted",
+            "intent_type": intent_type,
+            "identifier": identifier,
+        }
+
+    monkeypatch.setattr(module, "dispatch_intent", _fake_dispatch)
 
     response = client.post(
         "/api/intent/execute",

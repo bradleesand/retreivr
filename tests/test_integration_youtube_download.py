@@ -19,14 +19,14 @@ def api_module(monkeypatch, tmp_path: Path):
     downloads_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("RETREIVR_DB_PATH", str(db_path))
-    monkeypatch.setattr(sys, "version_info", (3, 11, 0, "final", 0), raising=False)
-    monkeypatch.setattr(sys, "version", "3.11.9", raising=False)
+    import engine.core  # noqa: F401
     sys.modules.pop("api.main", None)
     module = importlib.import_module("api.main")
     module.app.router.on_startup.clear()
     module.app.router.on_shutdown.clear()
     module.app.state.paths = SimpleNamespace(
         db_path=str(db_path),
+        single_downloads_dir=str(downloads_dir),
         temp_downloads_dir=str(tmp_path / "temp"),
         thumbs_dir=str(tmp_path / "thumbs"),
     )
@@ -88,6 +88,7 @@ def test_direct_youtube_download_naming_collision_and_history_persist(
         final_format_override=None,
         js_runtime=None,
         music_mode=None,
+        media_mode=None,
         run_source="api",
         skip_downtime=False,
         run_id_override=None,
@@ -124,7 +125,8 @@ def test_direct_youtube_download_naming_collision_and_history_persist(
             origin="manual",
             origin_id="manual",
         )
-        module.record_download_history(
+        from engine.job_queue import record_download_history
+        record_download_history(
             str(db_path),
             job,
             str(final_target),

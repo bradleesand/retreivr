@@ -29,6 +29,34 @@ class _FakeMusicBrainzService:
             ]
         }
 
+    def get_recording(self, recording_id, *, includes=None):
+        return {
+            "recording": {
+                "id": str(recording_id or ""),
+                "release-list": [{"id": "release-canonical-1", "date": "2021-01-01"}],
+            }
+        }
+
+    def get_release(self, release_id, *, includes=None):
+        return {
+            "release": {
+                "id": str(release_id or ""),
+                "title": "Album",
+                "date": "2021-01-01",
+                "status": "Official",
+                "country": "US",
+                "release-group": {"id": f"rg-{release_id}", "primary-type": "Album"},
+                "medium-list": [
+                    {
+                        "position": "1",
+                        "track-list": [
+                            {"position": "1", "recording": {"id": "mbid-canonical-1"}}
+                        ],
+                    }
+                ],
+            }
+        }
+
 
 class _FakeQueueStore:
     def __init__(self):
@@ -77,7 +105,7 @@ def test_import_enqueue_does_not_override_archive_paths() -> None:
         {
             "musicbrainz_service": _FakeMusicBrainzService(),
             "queue_store": queue_store,
-            "app_config": {"final_format": "mkv"},
+            "app_config": {"audio_final_format": "flac"},
             "base_dir": "/downloads",
             "job_payload_builder": _spy_job_payload_builder,
         },
@@ -94,6 +122,6 @@ def test_import_enqueue_does_not_override_archive_paths() -> None:
     assert enqueued["resolved_destination"] == "/downloads"
     output_template = enqueued["output_template"]
     assert output_template.get("output_dir") == "/downloads"
-    assert output_template.get("final_format") == "mkv"
+    assert output_template.get("final_format") == "flac"
     assert output_template.get("playlist_item_id") is None
     assert output_template.get("source_account") is None

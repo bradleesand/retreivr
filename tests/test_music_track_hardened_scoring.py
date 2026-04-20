@@ -1743,7 +1743,7 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         )
         original_lookup = self.se.community_cache.cached_lookup
         try:
-            self.se.community_cache.cached_lookup = lambda _mbid: {
+            self.se.community_cache.cached_lookup = lambda _mbid, **_kw: {
                 "video_id": "community12345",
                 "duration_ms": 200000,
                 "confidence": 0.98,
@@ -1809,7 +1809,7 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         )
         original_lookup = self.se.community_cache.cached_lookup
         try:
-            self.se.community_cache.cached_lookup = lambda _mbid: {
+            self.se.community_cache.cached_lookup = lambda _mbid, **_kw: {
                 "video_id": "community-mismatch",
                 "duration_ms": 320000,
                 "confidence": 0.93,
@@ -1834,7 +1834,7 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         service = self._service({"youtube_music": []})
         original_lookup = self.se.community_cache.cached_lookup
         try:
-            self.se.community_cache.cached_lookup = lambda _mbid: (_ for _ in ()).throw(RuntimeError("should-not-call"))
+            self.se.community_cache.cached_lookup = lambda _mbid, **_kw: (_ for _ in ()).throw(RuntimeError("should-not-call"))
             best = service.search_music_track_best_match(
                 "Artist",
                 "Song",

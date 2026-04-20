@@ -72,13 +72,35 @@ def test_music_probe_failure_does_not_block_download(tmp_path, monkeypatch) -> N
 
     calls = {"download": 0}
 
-    def _fake_subprocess_run(*args, **kwargs):
-        _ = args, kwargs
-        calls["download"] += 1
-        return SimpleNamespace(returncode=0, stderr="")
+    class _FakeStderr:
+        def readline(self):
+            return ""  # EOF immediately
+
+        def close(self):
+            pass
+
+    class _FakePopen:
+        returncode = 0
+
+        def __init__(self, cmd, **_kwargs):
+            _ = cmd
+            calls["download"] += 1
+            self.stderr = _FakeStderr()
+
+        def poll(self):
+            return 0  # already done
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
 
     monkeypatch.setattr(jq, "YoutubeDL", _FailProbeYDL)
-    monkeypatch.setattr(jq.subprocess, "run", _fake_subprocess_run)
+    monkeypatch.setattr(jq.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr(jq, "_select_download_output", lambda *_args, **_kwargs: str(fake_output))
 
     info, local_file = jq.download_with_ytdlp(

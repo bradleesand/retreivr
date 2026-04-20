@@ -21,7 +21,7 @@ from spotify.client import SpotifyPlaylistClient, get_playlist_items
 from spotify.diff import diff_playlist
 from spotify.oauth_store import SpotifyOAuthStore
 from spotify.resolve import resolve_spotify_track
-from engine.paths import DB_PATH
+from engine.paths import get_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -112,10 +112,10 @@ def _run_async(coro):
     return None
 
 
-def _load_downloaded_track_paths(playlist_id: str) -> list[str]:
+def _load_downloaded_track_paths(playlist_id: str, *, db_path: str | None = None) -> list[str]:
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=30)
+        conn = sqlite3.connect(str(db_path or get_db_path()), check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
@@ -140,14 +140,18 @@ def _load_downloaded_track_paths(playlist_id: str) -> list[str]:
             pass
 
 
-def _load_downloaded_track_paths_for_playlist_ids(playlist_ids: list[str]) -> list[str]:
+def _load_downloaded_track_paths_for_playlist_ids(
+    playlist_ids: list[str],
+    *,
+    db_path: str | None = None,
+) -> list[str]:
     cleaned = [str(pid).strip() for pid in playlist_ids if str(pid).strip()]
     if not cleaned:
         return []
 
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(_resolve_db_path(), check_same_thread=False, timeout=30)
+        conn = sqlite3.connect(str(db_path or get_db_path()), check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         placeholders = ", ".join(["?"] * len(cleaned))
@@ -199,7 +203,7 @@ def _resolve_db_path_from_runtime(db: Any) -> str:
         value = str(getattr(db, "db_path") or "").strip()
         if value:
             return value
-    return _resolve_db_path()
+    return str(get_db_path())
 
 
 def _is_spotify_downtime_active(config: dict[str, Any] | None) -> bool:
@@ -285,6 +289,9 @@ def _best_effort_rebuild_playlist_m3u(
 
 
 def _enqueue_added_track(queue: Any, item: dict[str, Any]) -> Any:
+    playlist_id = str((item or {}).get("playlist_id") or "").strip()
+    if not playlist_id:
+        raise ValueError("playlist_id is required in enqueue payload")
     if callable(queue):
         return queue(item)
     for method_name in ("enqueue", "put", "add", "enqueue_track"):
@@ -1059,7 +1066,7 @@ def playlist_watch_job(
     enqueue_errors: list[str] = []
     for item in added_items:
         try:
-            enqueue_result = _enqueue_added_track(queue, item)
+            enqueue_result = _enqueue_added_track(queue, {**item, "playlist_id": pid})
             enqueued_inc, skipped_inc = _classify_enqueue_result(enqueue_result)
             enqueued += enqueued_inc
             skipped += skipped_inc

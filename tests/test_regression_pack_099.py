@@ -59,7 +59,10 @@ def api_module(monkeypatch, tmp_path: Path):
     module.app.state.config_path = str(config_path)
     module.app.state.loaded_config = {}
     module.app.state.config = {}
-    module.app.state.status = module.get_status()
+    module.app.state.status = module.get_status(None)
+    module.app.state.running = False
+    module.app.state.state = "idle"
+    module.app.state.scheduler = None
     module.app.state.schedule_lock = threading.Lock()
     module.app.state.schedule_last_run = None
     module.app.state.schedule_next_run = None
@@ -217,23 +220,28 @@ def test_telegram_summary_content_includes_titles_for_scheduler_and_watcher(api_
         cur = conn.cursor()
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS download_jobs (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                file_path TEXT,
-                output_template TEXT,
-                url TEXT
-            )
-            """
-        )
-        cur.execute(
-            "INSERT OR REPLACE INTO download_jobs (id, status, file_path, output_template, url) VALUES (?, ?, ?, ?, ?)",
+            INSERT OR REPLACE INTO download_jobs (
+                id, origin, origin_id, media_type, media_intent, source,
+                url, status, attempts, max_attempts, created_at, updated_at,
+                trace_id, file_path, output_template
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             (
                 job_id,
+                "playlist",
+                "PL_REGRESSION",
+                "video",
+                "episode",
+                "playlist",
+                "https://www.youtube.com/watch?v=abc123xyz00",
                 "completed",
+                1,
+                3,
+                "2026-03-11T00:00:00+00:00",
+                "2026-03-11T00:00:04+00:00",
+                job_id,
                 None,
                 json.dumps({"track": "Regression Title"}),
-                "https://www.youtube.com/watch?v=abc123xyz00",
             ),
         )
         conn.commit()

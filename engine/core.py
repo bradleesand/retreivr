@@ -2156,3 +2156,87 @@ def run_archive(
         force_redownload=bool(force_redownload),
     )
     return status
+
+
+def download_with_ytdlp_native(url, temp_dir, *, paths=None, config=None, **kwargs):
+    """Minimal yt-dlp download using YoutubeDL with no advanced option overrides.
+
+    Returns the downloaded file path string on success, or None on failure.
+    Callers must not inject format/extractor overrides — this is the "pure" path.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    ytdlp_temp = str(getattr(paths, "ytdlp_temp_dir", temp_dir) or temp_dir)
+    opts = {
+        "outtmpl": f"{temp_dir}/%(id)s.%(ext)s",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "paths": {"temp": ytdlp_temp},
+    }
+    try:
+        with YoutubeDL(opts) as ydl:
+            rc = ydl.download([url])
+            if rc != 0:
+                return None
+        import glob as _glob
+        candidates = _glob.glob(f"{temp_dir}/*")
+        if candidates:
+            return candidates[0]
+        return None
+    except Exception:
+        logging.exception("download_with_ytdlp_native failed url=%s", url)
+        return None
+
+
+def download_with_ytdlp_hardened(url, temp_dir, *, paths=None, config=None, **kwargs):
+    """Fallback yt-dlp download with more permissive settings."""
+    cfg = config if isinstance(config, dict) else {}
+    opts = {
+        "outtmpl": f"{temp_dir}/%(id)s.%(ext)s",
+        "format": "bestvideo*+bestaudio/best",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "retries": 3,
+        "fragment_retries": 3,
+    }
+    try:
+        with YoutubeDL(opts) as ydl:
+            rc = ydl.download([url])
+            if rc != 0:
+                return None
+        import glob as _glob
+        candidates = _glob.glob(f"{temp_dir}/*")
+        if candidates:
+            return candidates[0]
+        return None
+    except Exception:
+        logging.exception("download_with_ytdlp_hardened failed url=%s", url)
+        return None
+
+
+def download_with_ytdlp_auto(url, temp_dir, *, paths=None, config=None, **kwargs):
+    """Try native download first; fall back to hardened on failure or exception."""
+    try:
+        result = download_with_ytdlp_native(url, temp_dir, paths=paths, config=config, **kwargs)
+        if result is not None:
+            return result
+    except Exception:
+        logging.exception("download_with_ytdlp_native raised, falling back to hardened url=%s", url)
+    return download_with_ytdlp_hardened(url, temp_dir, paths=paths, config=config, **kwargs)
+
+
+def _build_download_attempt_plan(mode: str) -> list:
+    """Return an ordered list of yt-dlp attempt configurations.
+
+    Each step is a dict with optional ``format`` and ``extractor_args`` keys.
+    Steps with ``extractor_args=None`` use the default extractor behaviour.
+    The list always includes a permissive "best" fallback as the last entry.
+    """
+    base_steps = [
+        {"format": None, "extractor_args": None},
+    ]
+    if mode == "strict":
+        base_steps.insert(0, {"format": "bestvideo+bestaudio/best", "extractor_args": {"youtube": {"skip": ["dash", "hls"]}}})
+    base_steps.append({"format": "bestaudio/best", "extractor_args": None})
+    return base_steps

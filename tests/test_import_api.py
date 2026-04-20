@@ -11,14 +11,17 @@ from fastapi.testclient import TestClient
 
 
 def _build_client(monkeypatch) -> TestClient:
-    monkeypatch.setattr(sys, "version_info", (3, 11, 0, "final", 0), raising=False)
-    monkeypatch.setattr(sys, "version", "3.11.9", raising=False)
+    import engine.core  # noqa: F401
+    import threading
     sys.modules.pop("api.main", None)
     module = importlib.import_module("api.main")
     module.app.router.on_startup.clear()
     module.app.router.on_shutdown.clear()
     module.app.state.worker_engine = SimpleNamespace(store=object())
-    module._read_config_or_404 = lambda: {}
+    module.app.state.paths = SimpleNamespace(db_path="/tmp/retreivr_test.db", single_downloads_dir="/tmp/downloads")
+    module.app.state.playlist_import_jobs = {}
+    module.app.state.playlist_import_jobs_lock = threading.Lock()
+    monkeypatch.setattr(module, "_read_config_or_404", lambda: {})
     return TestClient(module.app)
 
 
@@ -66,7 +69,7 @@ def test_import_api_empty_file(monkeypatch) -> None:
 def test_import_api_oversize_file(monkeypatch) -> None:
     client = _build_client(monkeypatch)
 
-    oversized = b"a" * (5 * 1024 * 1024 + 1)
+    oversized = b"a" * (10 * 1024 * 1024 + 1)
     response = client.post(
         "/api/import/playlist",
         files={"file": ("sample.csv", oversized, "text/csv")},

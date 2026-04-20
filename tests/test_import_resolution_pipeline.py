@@ -175,6 +175,7 @@ def _spy_job_payload_builder(*, config, **kwargs):
         "output_template": output_template,
         "resolved_destination": output_template.get("output_dir"),
         "canonical_id": kwargs.get("canonical_id"),
+        "force_requeue": bool(kwargs.get("force_requeue")),
     }
 
 
@@ -524,14 +525,12 @@ def test_import_pipeline_skips_enqueue_when_canonical_job_already_exists() -> No
         mb_release_id="release-skip-1",
         disc_number=1,
     )
-    queue_store.existing_by_canonical_id[canonical_id] = type(
-        "ExistingJob",
-        (),
-        {
-            "status": "completed",
-            "file_path": "/downloads/Music/Fleetwood Mac/Album (2011)/01 - Dreams.m4a",
-        },
-    )()
+    queue_store.duplicate_classifications[canonical_id] = {
+        "job_id": "existing-job-skip",
+        "status": "completed",
+        "classification": "completed_valid",
+        "stale": False,
+    }
     intents = [
         TrackIntent(
             artist="Fleetwood Mac",

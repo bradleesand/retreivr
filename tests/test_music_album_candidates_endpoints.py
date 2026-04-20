@@ -10,8 +10,9 @@ from fastapi.testclient import TestClient
 
 
 def _build_client(monkeypatch) -> TestClient:
+    import engine.core  # noqa: F401
     monkeypatch.setattr(sys, "version_info", (3, 11, 0, "final", 0), raising=False)
-    monkeypatch.setattr(sys, "version", "3.11.9", raising=False)
+    monkeypatch.setattr(sys, "version", "3.11.9 (main, Jan  1 2024, 00:00:00) [Clang 14.0.0]", raising=False)
     sys.modules.pop("api.main", None)
     module = importlib.import_module("api.main")
     module.app.router.on_startup.clear()

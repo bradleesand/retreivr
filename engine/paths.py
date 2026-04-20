@@ -37,7 +37,14 @@ CONFIG_DIR = Path(os.environ.get("RETREIVR_CONFIG_DIR", _DEFAULTS["config"])).re
 DOWNLOADS_DIR = Path(os.environ.get("RETREIVR_DOWNLOADS_DIR", _DEFAULTS["downloads"])).resolve()
 LOG_DIR = Path(os.environ.get("RETREIVR_LOG_DIR", _DEFAULTS["logs"])).resolve()
 TOKENS_DIR = Path(os.environ.get("RETREIVR_TOKENS_DIR", _DEFAULTS["tokens"])).resolve()
-DB_PATH = Path(os.environ.get("RETREIVR_DB_PATH", DATA_DIR / "database" / "db.sqlite")).resolve()
+
+
+def get_db_path() -> Path:
+    return Path(os.environ.get("RETREIVR_DB_PATH", DATA_DIR / "database" / "db.sqlite")).resolve()
+
+
+# Backward-compatible constant for legacy call sites.
+DB_PATH = get_db_path()
 
 
 @dataclass(frozen=True)
@@ -90,7 +97,7 @@ def resolve_dir(path, base_dir):
 
 
 def build_engine_paths():
-    db_path = DB_PATH
+    db_path = get_db_path()
     temp_downloads_dir = DATA_DIR / "temp_downloads"
     review_queue_dir = DATA_DIR / "review_queue"
     review_queue_files_dir = review_queue_dir / "files"
