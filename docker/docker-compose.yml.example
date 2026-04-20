@@ -39,6 +39,7 @@ services:
       - ./logs:/logs
       - ./tokens:/tokens
       - ${RETREIVR_MEDIA_ROOT:-./media}:/media
+      - ${RETREIVR_HOSTFS_ROOT:-/}:/hostfs:ro
     restart: unless-stopped
     networks:
       - retreivr
@@ -54,6 +55,7 @@ services:
     volumes:
       - ./:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${RETREIVR_HOSTFS_ROOT:-/}:/hostfs:ro
     restart: unless-stopped
     networks:
       - retreivr

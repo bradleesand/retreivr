@@ -211,10 +211,8 @@ const previewState = {
   durationText: "",
 };
 const BROWSE_DEFAULTS = {
-  composeDir: "",
   configDir: "",
   homeDir: "",
-  hostBrowseStart: "",
   libraryExportsRoot: "",
   mediaRoot: "",
   tokensDir: "",
@@ -7680,10 +7678,8 @@ async function refreshVersion() {
 async function loadPaths() {
   try {
     const data = await fetchJson("/api/paths");
-    BROWSE_DEFAULTS.composeDir = data.compose_dir || "";
     BROWSE_DEFAULTS.configDir = data.config_dir || "";
     BROWSE_DEFAULTS.homeDir = data.home_dir || "";
-    BROWSE_DEFAULTS.hostBrowseStart = data.host_browse_start || "";
     BROWSE_DEFAULTS.libraryExportsRoot = data.browse_roots?.library_exports || "";
     BROWSE_DEFAULTS.mediaRoot = data.downloads_dir || "";
     BROWSE_DEFAULTS.tokensDir = data.tokens_dir || "";
@@ -19408,12 +19404,7 @@ function bindEvents() {
           const targetInput = setupWizard.querySelector(selector);
           if (targetInput) {
             const currentValue = (state.setupWizard?.draft?.[key] || "").trim();
-            let start = "";
-            if (currentValue.startsWith("/")) {
-              start = currentValue.replace(/^\//, "");
-            } else {
-              start = BROWSE_DEFAULTS.hostBrowseStart || "";
-            }
+            const start = currentValue.startsWith("/") ? currentValue.replace(/^\//, "") : "";
             openBrowser(targetInput, spec.root, spec.mode, spec.ext, start);
           }
         }

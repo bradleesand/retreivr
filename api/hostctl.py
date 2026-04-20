@@ -59,11 +59,16 @@ def _run_compose(payload: dict | None, extra_args: list[str]) -> dict:
 def _browse_root() -> Path:
     """
     Root directory exposed for host filesystem browsing.
-    Defaults to / so all drives are reachable for Docker volume mapping.
-    Override with RETREIVR_BROWSE_ROOT in the .env file if you want a narrower scope.
+    Prefers /hostfs (the RETREIVR_HOSTFS_ROOT volume mount) when present.
+    Override with RETREIVR_BROWSE_ROOT in the .env file for a narrower scope.
     """
     raw = os.environ.get("RETREIVR_BROWSE_ROOT", "").strip()
-    return Path(raw).expanduser().resolve() if raw else Path("/")
+    if raw:
+        return Path(raw).expanduser().resolve()
+    hostfs = Path("/hostfs")
+    if hostfs.is_dir():
+        return hostfs
+    return Path("/")
 
 
 def _resolve_browse_path(rel_path: str, root: Path) -> tuple[str, str]:
