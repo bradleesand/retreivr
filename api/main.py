@@ -3384,6 +3384,7 @@ def _browse_root_map():
         "downloads": os.path.realpath(DOWNLOADS_DIR),
         "config": os.path.realpath(CONFIG_DIR),
         "tokens": os.path.realpath(TOKENS_DIR),
+        "host": "/",
     }
     library_exports_dir = "/library-exports"
     if os.path.isdir(library_exports_dir):
@@ -7396,12 +7397,14 @@ async def api_update_ytdlp():
 
 @app.get("/api/paths")
 async def api_paths():
+    import pathlib
     return {
         "config_dir": CONFIG_DIR,
         "data_dir": DATA_DIR,
         "downloads_dir": DOWNLOADS_DIR,
         "log_dir": LOG_DIR,
         "tokens_dir": TOKENS_DIR,
+        "home_dir": str(pathlib.Path.home()),
         "browse_roots": app.state.browse_roots,
     }
 

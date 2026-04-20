@@ -212,6 +212,7 @@ const previewState = {
 };
 const BROWSE_DEFAULTS = {
   configDir: "",
+  homeDir: "",
   libraryExportsRoot: "",
   mediaRoot: "",
   tokensDir: "",
@@ -3028,42 +3029,42 @@ function renderSetupWizard() {
         <label class="field full">
           <span>App settings file</span>
           <div class="row path-picker">
-            <input data-setup-input="env_path" type="text" value="${escapeAttr(draft.env_path || ".env")}">
+            <input data-setup-input="env_path" data-browser-absolute="1" type="text" value="${escapeAttr(draft.env_path || ".env")}">
             <button type="button" class="button ghost small" data-setup-browse="env_path">Browse</button>
           </div>
         </label>
         <label class="field full">
           <span>Main media folder</span>
           <div class="row path-picker">
-            <input data-setup-input="media_root" type="text" value="${escapeAttr(draft.media_root || "./media")}">
+            <input data-setup-input="media_root" data-browser-absolute="1" type="text" value="${escapeAttr(draft.media_root || "./media")}">
             <button type="button" class="button ghost small" data-setup-browse="media_root">Browse</button>
           </div>
         </label>
         <label class="field full">
           <span>Movies folder</span>
           <div class="row path-picker">
-            <input data-setup-input="movies_root" type="text" value="${escapeAttr(draft.movies_root || "./media/movies")}">
+            <input data-setup-input="movies_root" data-browser-absolute="1" type="text" value="${escapeAttr(draft.movies_root || "./media/movies")}">
             <button type="button" class="button ghost small" data-setup-browse="movies_root">Browse</button>
           </div>
         </label>
         <label class="field full">
           <span>TV folder</span>
           <div class="row path-picker">
-            <input data-setup-input="tv_root" type="text" value="${escapeAttr(draft.tv_root || "./media/tv")}">
+            <input data-setup-input="tv_root" data-browser-absolute="1" type="text" value="${escapeAttr(draft.tv_root || "./media/tv")}">
             <button type="button" class="button ghost small" data-setup-browse="tv_root">Browse</button>
           </div>
         </label>
         <label class="field full">
           <span>Downloads folder</span>
           <div class="row path-picker">
-            <input data-setup-input="downloads_root" type="text" value="${escapeAttr(draft.downloads_root || "./downloads")}">
+            <input data-setup-input="downloads_root" data-browser-absolute="1" type="text" value="${escapeAttr(draft.downloads_root || "./downloads")}">
             <button type="button" class="button ghost small" data-setup-browse="downloads_root">Browse</button>
           </div>
         </label>
         <label class="field full">
           <span>Books folder</span>
           <div class="row path-picker">
-            <input data-setup-input="books_root" type="text" value="${escapeAttr(draft.books_root || "./media/books")}">
+            <input data-setup-input="books_root" data-browser-absolute="1" type="text" value="${escapeAttr(draft.books_root || "./media/books")}">
             <button type="button" class="button ghost small" data-setup-browse="books_root">Browse</button>
           </div>
         </label>
@@ -6350,6 +6351,9 @@ function getBrowseRootBase(rootKey) {
   if (rootKey === "config") {
     return BROWSE_DEFAULTS.configDir || "";
   }
+  if (rootKey === "host") {
+    return "/";
+  }
   if (rootKey === "tokens") {
     return BROWSE_DEFAULTS.tokensDir || "";
   }
@@ -6362,6 +6366,7 @@ function getBrowseRootBase(rootKey) {
 
 function getBrowseRootLabel(rootKey) {
   if (rootKey === "downloads") return "Downloads";
+  if (rootKey === "host") return "Host Filesystem";
   if (rootKey === "library_exports") return "Library Exports";
   if (rootKey === "config") return "Config";
   if (rootKey === "tokens") return "Tokens";
@@ -6369,7 +6374,7 @@ function getBrowseRootLabel(rootKey) {
 }
 
 function availableBrowserRootsForMode(mode = "dir") {
-  const ordered = ["downloads", "library_exports", "config", "tokens"];
+  const ordered = ["host", "downloads", "library_exports", "config", "tokens"];
   const roots = BROWSE_DEFAULTS.roots || {};
   const result = [];
   ordered.forEach((rootKey) => {
@@ -7674,6 +7679,7 @@ async function loadPaths() {
   try {
     const data = await fetchJson("/api/paths");
     BROWSE_DEFAULTS.configDir = data.config_dir || "";
+    BROWSE_DEFAULTS.homeDir = data.home_dir || "";
     BROWSE_DEFAULTS.libraryExportsRoot = data.browse_roots?.library_exports || "";
     BROWSE_DEFAULTS.mediaRoot = data.downloads_dir || "";
     BROWSE_DEFAULTS.tokensDir = data.tokens_dir || "";
@@ -7818,6 +7824,7 @@ function applyBrowserSelection() {
     const rel = browserState.path ? browserState.path : ".";
     const targetId = browserState.target.id;
     browserState.target.value = useAbsolutePath ? browserState.currentAbs : rel;
+    browserState.target.dispatchEvent(new Event("change", { bubbles: true }));
     console.info("Directory selected", { root: browserState.root, path: useAbsolutePath ? browserState.currentAbs : rel });
     closeBrowser();
     if (targetId === "home-destination") {
@@ -7830,6 +7837,7 @@ function applyBrowserSelection() {
   if (browserState.selected) {
     const targetId = browserState.target.id;
     browserState.target.value = browserState.selected;
+    browserState.target.dispatchEvent(new Event("change", { bubbles: true }));
     console.info("File selected", { root: browserState.root, path: browserState.selected });
     closeBrowser();
     if (targetId === "home-destination") {
@@ -19383,19 +19391,25 @@ function bindEvents() {
           return;
         }
         const browseSpec = {
-          env_path: { root: "config", mode: "file", ext: "" },
-          media_root: { root: "downloads", mode: "dir", ext: "" },
-          movies_root: { root: "downloads", mode: "dir", ext: "" },
-          tv_root: { root: "downloads", mode: "dir", ext: "" },
-          downloads_root: { root: "downloads", mode: "dir", ext: "" },
-          books_root: { root: "downloads", mode: "dir", ext: "" },
+          env_path: { root: "host", mode: "file", ext: "" },
+          media_root: { root: "host", mode: "dir", ext: "" },
+          movies_root: { root: "host", mode: "dir", ext: "" },
+          tv_root: { root: "host", mode: "dir", ext: "" },
+          downloads_root: { root: "host", mode: "dir", ext: "" },
+          books_root: { root: "host", mode: "dir", ext: "" },
         };
         const spec = browseSpec[key];
         if (spec) {
           const selector = `[data-setup-input="${key}"]`;
           const targetInput = setupWizard.querySelector(selector);
           if (targetInput) {
-            const start = resolveBrowseStart(spec.root, state.setupWizard?.draft?.[key] || "");
+            const currentValue = (state.setupWizard?.draft?.[key] || "").trim();
+            let start = "";
+            if (currentValue.startsWith("/")) {
+              start = currentValue.replace(/^\//, "");
+            } else if (BROWSE_DEFAULTS.homeDir) {
+              start = BROWSE_DEFAULTS.homeDir.replace(/^\//, "");
+            }
             openBrowser(targetInput, spec.root, spec.mode, spec.ext, start);
           }
         }
