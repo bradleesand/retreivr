@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Retreivr canonical compose example
 #
 # Default behavior:
@@ -18,7 +16,7 @@ version: "3.9"
 
 services:
   retreivr:
-    image: ghcr.io/sudoStacks/retreivr:latest
+    image: ghcr.io/sudostacks/retreivr:latest
     container_name: retreivr
     ports:
       - "8090:8000"
@@ -45,7 +43,7 @@ services:
       - retreivr
 
   retreivr-hostctl:
-    image: ghcr.io/sudoStacks/retreivr:latest
+    image: ghcr.io/sudostacks/retreivr:latest
     container_name: retreivr-hostctl
     profiles: ["hostctl"]
     environment:
