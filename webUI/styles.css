@@ -2699,6 +2699,15 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
   max-width: 100%;
 }
 
+.music-results-toolbar-import-only .music-results-toolbar-actions {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.music-import-toolbar-button {
+  white-space: nowrap;
+}
+
 .music-results-size-control,
 .music-results-sort-control {
   display: inline-flex;
@@ -4658,6 +4667,9 @@ body.home-page .home-footer-brand .sudostacks-logo {
   gap: var(--settings-layout-gap);
   align-items: start;
   width: 100%;
+  min-height: 0;
+  height: calc(100vh - 168px);
+  overflow: hidden;
 }
 
 #config-panel .settings-header-actions {
@@ -4680,9 +4692,11 @@ body.home-page .home-footer-brand .sudostacks-logo {
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
-  position: sticky;
-  top: 86px;
-  min-height: calc(100vh - 104px);
+  position: static;
+  top: auto;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
   padding: 0 14px 0 16px;
   border: 0;
   border-right: 1px solid rgba(148, 163, 184, 0.14);
@@ -4722,8 +4736,13 @@ body.home-page .home-footer-brand .sudostacks-logo {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  overflow: visible;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
   scrollbar-width: auto;
+  padding-right: 4px;
 }
 
 #config-panel .settings-nav::-webkit-scrollbar {
@@ -4836,7 +4855,19 @@ body.home-page .home-footer-brand .sudostacks-logo {
   width: auto;
   max-width: none;
   align-self: stretch;
-  padding-right: 10px;
+  padding-right: 12px;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+#config-panel .settings-paths-card {
+  max-width: 920px;
+}
+
+#config-panel .settings-paths-grid {
+  margin-top: 8px;
 }
 
 #config-panel .settings-stack {
@@ -5164,6 +5195,8 @@ body.home-page .home-footer-brand .sudostacks-logo {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    height: auto;
+    overflow: visible;
   }
 
   #config-panel .settings-sidebar {
@@ -5174,12 +5207,16 @@ body.home-page .home-footer-brand .sudostacks-logo {
     position: static;
     top: auto;
     padding: 10px;
+    overflow: visible;
+    height: auto;
   }
 
   #config-panel .settings-main {
     flex: 1 1 auto;
     width: 100%;
     max-width: 100%;
+    height: auto;
+    overflow: visible;
   }
 
   #config-panel .settings-header-actions {
@@ -5191,6 +5228,7 @@ body.home-page .home-footer-brand .sudostacks-logo {
     flex-direction: row;
     flex-wrap: nowrap;
     overflow-x: auto;
+    overflow-y: hidden;
     padding-bottom: 2px;
   }
 
@@ -8154,6 +8192,18 @@ body.home-page .home-search-actions {
   grid-template-columns: 84px minmax(0, 1fr);
   align-items: center;
   gap: 12px;
+}
+
+.music-player-favorite-card.music-player-browser-card-rich {
+  grid-template-columns: minmax(112px, 132px) minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.music-player-favorite-card .music-player-browser-card-art {
+  width: 100%;
+  max-width: 132px;
+  height: auto;
+  aspect-ratio: 1 / 1;
 }
 
 .music-player-browser-card-art {

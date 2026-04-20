@@ -1105,6 +1105,7 @@
           <nav id="settings-nav" class="settings-nav" aria-label="Settings sections">
             <a class="settings-nav-link" href="#settings-all" data-settings-link="all">All Settings</a>
             <a class="settings-nav-link" href="#settings-guided-setup" data-settings-link="guided-setup">Guided Setup</a>
+            <a class="settings-nav-link" href="#settings-paths" data-settings-link="paths">Retreivr Paths</a>
             <a class="settings-nav-link active" href="#settings-core" data-settings-link="core">General</a>
             <a class="settings-nav-link" href="#settings-connections-hub" data-settings-link="connections-hub">Connections</a>
             <a class="settings-nav-link" href="#settings-automation" data-settings-link="automation">Automation</a>
@@ -1127,6 +1128,7 @@
             <select id="settings-section-select">
               <option value="settings-all">All Settings</option>
               <option value="settings-guided-setup">Guided Setup</option>
+              <option value="settings-paths">Retreivr Paths</option>
               <option value="settings-core">General</option>
               <option value="settings-connections-hub">Connections</option>
               <option value="settings-automation">Automation</option>
@@ -1151,6 +1153,62 @@
             <section id="settings-guided-setup" class="settings-section" data-settings-section="guided-setup">
               <div class="settings-section-heading">Guided Setup</div>
               <div id="settings-setup-slot" class="settings-embedded-slot"></div>
+            </section>
+            <section id="settings-paths" class="settings-section" data-settings-section="paths">
+              <div class="settings-section-heading">Retreivr Paths</div>
+              <div class="group settings-paths-card">
+                <div class="group-title">Managed Docker Path Mappings</div>
+                <div class="notice">Set where Retreivr maps media/download paths in the managed stack. Changes apply after you run the generated compose restart command.</div>
+                <div class="setup-stack-paths settings-paths-grid">
+                  <label class="field full">
+                    <span>Env file</span>
+                    <div class="row path-picker">
+                      <input id="cfg-stack-env-path" type="text" placeholder=".env">
+                      <button id="browse-cfg-stack-env-path" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                  <label class="field full">
+                    <span>Media root</span>
+                    <div class="row path-picker">
+                      <input id="cfg-stack-media-root" type="text" placeholder="./media">
+                      <button id="browse-cfg-stack-media-root" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                  <label class="field full">
+                    <span>Movies root</span>
+                    <div class="row path-picker">
+                      <input id="cfg-stack-movies-root" type="text" placeholder="./media/movies">
+                      <button id="browse-cfg-stack-movies-root" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                  <label class="field full">
+                    <span>TV root</span>
+                    <div class="row path-picker">
+                      <input id="cfg-stack-tv-root" type="text" placeholder="./media/tv">
+                      <button id="browse-cfg-stack-tv-root" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                  <label class="field full">
+                    <span>Downloads root</span>
+                    <div class="row path-picker">
+                      <input id="cfg-stack-downloads-root" type="text" placeholder="./downloads">
+                      <button id="browse-cfg-stack-downloads-root" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                  <label class="field full">
+                    <span>Books root</span>
+                    <div class="row path-picker">
+                      <input id="cfg-stack-books-root" type="text" placeholder="./media/books">
+                      <button id="browse-cfg-stack-books-root" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                </div>
+                <div class="row">
+                  <button id="cfg-stack-paths-save" class="button primary" type="button">Save Path Mappings</button>
+                  <button id="cfg-stack-paths-reset" class="button ghost" type="button">Reset to Defaults</button>
+                </div>
+                <div id="cfg-stack-paths-message" class="notice" role="status"></div>
+              </div>
             </section>
             <section id="settings-connections-hub" class="settings-section" data-settings-section="connections-hub">
               <div class="settings-section-heading">Connections</div>

@@ -18,7 +18,7 @@ version: "3.9"
 
 services:
   retreivr:
-    image: ghcr.io/sudoStacks/retreivr:v0.9.21
+    image: ghcr.io/sudoStacks/retreivr:latest
     container_name: retreivr
     ports:
       - "8090:8000"
@@ -44,7 +44,7 @@ services:
       - retreivr
 
   retreivr-hostctl:
-    image: ghcr.io/sudoStacks/retreivr:v0.9.21
+    image: ghcr.io/sudoStacks/retreivr:latest
     container_name: retreivr-hostctl
     profiles: ["hostctl"]
     environment:

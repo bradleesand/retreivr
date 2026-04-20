@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
+import socket
+import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -40,6 +43,32 @@ MANAGED_INTERNAL_URLS = {
     "gluetun": "http://gluetun:8000/v1/publicip/ip",
     "jellyfin": "http://jellyfin:8096",
 }
+
+PROFILE_HOST_PORTS = {
+    "arr": [
+        {"service": "radarr", "host_port": 7878, "container_port": 7878},
+        {"service": "sonarr", "host_port": 8989, "container_port": 8989},
+        {"service": "readarr", "host_port": 8787, "container_port": 8787},
+        {"service": "prowlarr", "host_port": 9696, "container_port": 9696},
+    ],
+    "subtitles": [
+        {"service": "bazarr", "host_port": 6767, "container_port": 6767},
+    ],
+    "jellyfin": [
+        {"service": "jellyfin", "host_port": 8096, "container_port": 8096},
+    ],
+    "vpn": [
+        {"service": "gluetun", "host_port": 8080, "container_port": 8080},
+    ],
+}
+
+COMPOSE_FILE_CANDIDATES = (
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+    "docker/docker-compose.yml.example",
+)
 
 
 def _trimmed(value: Any) -> str:
@@ -218,6 +247,217 @@ def normalize_existing_stack_payload(payload: dict[str, Any] | None = None) -> d
             "password": _trimmed(service_payload.get("password")),
         }
     return normalized
+
+
+def _detect_status_reason(status: str, *, configured: bool, has_auth: bool = True) -> str:
+    normalized = _trimmed(status).lower()
+    if not configured:
+        return "not_configured"
+    if normalized in {"reachable", "ok", "connected"}:
+        return "reachable"
+    if normalized.startswith("http_"):
+        if normalized in {"http_401", "http_403"}:
+            return "unauthorized" if has_auth else "credentials_missing"
+        if normalized == "http_404":
+            return "endpoint_not_found"
+        return "http_error"
+    if normalized in {"timeout", "readtimeout", "connecttimeout"}:
+        return "timeout"
+    if normalized in {"connectionerror", "newconnectionerror"}:
+        return "connection_error"
+    if normalized in {"sslerror"}:
+        return "tls_error"
+    if not has_auth:
+        return "credentials_missing"
+    return "unreachable"
+
+
+def _retry_hint_from_reason(reason_code: str, service_name: str) -> str:
+    reason = _trimmed(reason_code).lower()
+    if reason == "not_configured":
+        return f"Configure {service_name} in Setup first."
+    if reason in {"credentials_missing", "unauthorized"}:
+        return f"Verify {service_name} credentials (API key or login) and retry."
+    if reason in {"connection_error", "timeout", "unreachable", "tls_error"}:
+        return f"Confirm {service_name} base URL/network reachability and retry."
+    if reason == "endpoint_not_found":
+        return f"Check {service_name} base URL path and app version."
+    if reason == "http_error":
+        return f"Inspect {service_name} response details and retry."
+    return "Retry after reviewing connection settings."
+
+
+def _service_state(*, configured: bool, reachable: bool, reason_code: str) -> str:
+    if not configured:
+        return "unknown"
+    if reachable:
+        return "connected"
+    if reason_code in {"credentials_missing", "unauthorized", "not_configured"}:
+        return "needs_attention"
+    return "failed"
+
+
+def _service_status_payload(
+    service_name: str,
+    *,
+    configured: bool,
+    reachable: bool,
+    status: str,
+    has_auth: bool = True,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    reason_code = _detect_status_reason(status, configured=configured, has_auth=has_auth)
+    payload = {
+        "configured": bool(configured),
+        "reachable": bool(reachable),
+        "status": _trimmed(status) or ("reachable" if reachable else "not_configured"),
+        "reason_code": reason_code,
+        "state": _service_state(configured=configured, reachable=reachable, reason_code=reason_code),
+        "retry_hint": _retry_hint_from_reason(reason_code, service_name),
+    }
+    if isinstance(extras, dict):
+        payload.update(extras)
+    return payload
+
+
+def _is_local_port_available(port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("0.0.0.0", int(port)))
+    except OSError:
+        return False
+    finally:
+        sock.close()
+    return True
+
+
+def _resolve_compose_file(project_dir: Path) -> Path | None:
+    for rel in COMPOSE_FILE_CANDIDATES:
+        candidate = (project_dir / rel).resolve()
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _docker_compose_available() -> tuple[bool, str]:
+    docker_bin = shutil.which("docker")
+    if not docker_bin:
+        return False, "docker_not_found"
+    try:
+        proc = subprocess.run(
+            [docker_bin, "compose", "version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=6,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"docker_compose_check_failed:{exc.__class__.__name__}"
+    if proc.returncode != 0:
+        return False, "docker_compose_unavailable"
+    return True, "ok"
+
+
+def build_stack_preflight(
+    config: dict[str, Any],
+    stack: dict[str, Any],
+    *,
+    project_dir: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    root = Path(project_dir).expanduser().resolve() if project_dir else _repo_root_from_env()
+    profiles = derive_profiles(stack)
+    checks: dict[str, Any] = {
+        "project_dir": str(root),
+        "profiles": profiles,
+        "required_host_ports": [],
+        "docker_compose": {"ok": True, "status": "ok"},
+        "compose_file": {"ok": True, "path": "", "status": "found"},
+    }
+    conflicts: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    fix_hints: list[str] = []
+    fatal = False
+
+    if not root.exists() or not root.is_dir():
+        fatal = True
+        conflicts.append(
+            {
+                "type": "project_dir_invalid",
+                "severity": "fatal",
+                "project_dir": str(root),
+                "message": "Project directory is missing or not a directory.",
+            }
+        )
+        fix_hints.append("Set RETREIVR_WORKSPACE to a valid project directory before applying setup.")
+
+    compose_ok, compose_status = _docker_compose_available()
+    checks["docker_compose"] = {"ok": compose_ok, "status": compose_status}
+    if not compose_ok:
+        fatal = True
+        conflicts.append(
+            {
+                "type": "docker_compose_unavailable",
+                "severity": "fatal",
+                "message": compose_status,
+            }
+        )
+        fix_hints.append("Install Docker Desktop or Docker Engine with Compose plugin support.")
+
+    compose_file = _resolve_compose_file(root) if root.exists() else None
+    if compose_file is not None:
+        checks["compose_file"] = {"ok": True, "path": str(compose_file), "status": "found"}
+    else:
+        checks["compose_file"] = {"ok": False, "path": "", "status": "missing"}
+        warnings.append("No compose file was found in expected locations.")
+        fix_hints.append("Create docker-compose.yml or use docker/docker-compose.yml.example with `docker compose -f ... up -d`.")
+
+    seen_ports: set[int] = set()
+    required_ports: list[dict[str, Any]] = []
+    for profile in profiles:
+        for item in PROFILE_HOST_PORTS.get(profile, []):
+            host_port = int(item["host_port"])
+            if host_port in seen_ports:
+                continue
+            seen_ports.add(host_port)
+            required_ports.append(
+                {
+                    "profile": profile,
+                    "service": item["service"],
+                    "host_port": host_port,
+                    "container_port": int(item["container_port"]),
+                }
+            )
+            if not _is_local_port_available(host_port):
+                fatal = True
+                conflicts.append(
+                    {
+                        "type": "port_conflict",
+                        "severity": "fatal",
+                        "profile": profile,
+                        "service": item["service"],
+                        "host_port": host_port,
+                        "container_port": int(item["container_port"]),
+                        "message": f"Host port {host_port} is already in use.",
+                    }
+                )
+    checks["required_host_ports"] = required_ports
+    if any(item.get("type") == "port_conflict" for item in conflicts):
+        fix_hints.append("Stop the process using the conflicting host port(s), or remap ports in compose before apply.")
+
+    if stack.get("enable_hostctl") and "hostctl" not in profiles:
+        warnings.append("Hostctl is enabled in stack settings but hostctl profile is not active.")
+        fix_hints.append("Enable the `hostctl` profile for direct management mode.")
+
+    return {
+        "ok": not fatal,
+        "fatal": fatal,
+        "checks": checks,
+        "conflicts": conflicts,
+        "warnings": warnings,
+        "fix_hints": list(dict.fromkeys(fix_hints)),
+    }
+
 
 def build_compose_command(stack: dict[str, Any]) -> str:
     profiles = derive_profiles(stack)
@@ -734,6 +974,24 @@ def auto_configure_services(config: dict[str, Any]) -> dict[str, Any]:
     arr_cfg = config.get("arr") if isinstance(config.get("arr"), dict) else {}
     results: dict[str, Any] = {}
 
+    def _normalize_autoconfigure_result(service_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload or {})
+        status = _trimmed(normalized.get("status")).lower() or "unknown"
+        reason_code = _trimmed(normalized.get("reason_code")).lower()
+        if not reason_code:
+            if status in {"configured", "updated", "created", "connected"}:
+                reason_code = "ok"
+            elif status in {"not_configured", "skipped"}:
+                reason_code = "not_configured"
+            elif status == "needs_attention":
+                reason_code = "action_required"
+            else:
+                reason_code = "unknown"
+        normalized["reason_code"] = reason_code
+        normalized["state"] = "connected" if reason_code == "ok" else ("needs_attention" if status in {"needs_attention", "not_configured", "skipped"} else "failed")
+        normalized["retry_hint"] = _trimmed(normalized.get("retry_hint")) or _retry_hint_from_reason(reason_code, service_name)
+        return normalized
+
     qb_cfg = arr_cfg.get("qbittorrent") if isinstance(arr_cfg.get("qbittorrent"), dict) else {}
     try:
         if _trimmed(qb_cfg.get("base_url")) and _trimmed(qb_cfg.get("username")) and _trimmed(qb_cfg.get("password")):
@@ -771,7 +1029,7 @@ def auto_configure_services(config: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         results["prowlarr"] = {"status": "needs_attention", "message": str(exc)}
 
-    return results
+    return {name: _normalize_autoconfigure_result(name, payload if isinstance(payload, dict) else {}) for name, payload in results.items()}
 
 
 def build_setup_status(config: dict[str, Any]) -> dict[str, Any]:
@@ -882,7 +1140,12 @@ def build_connections_status(config: dict[str, Any]) -> dict[str, Any]:
         base_url = _trimmed(service_cfg.get("base_url")).rstrip("/")
         api_key = _trimmed(service_cfg.get("api_key"))
         if not base_url:
-            result[service_name] = {"configured": False, "reachable": False, "status": "not_configured"}
+            result[service_name] = _service_status_payload(
+                service_name,
+                configured=False,
+                reachable=False,
+                status="not_configured",
+            )
             continue
         headers = {"X-Api-Key": api_key} if api_key else {}
         reachable, message = _probe_json(f"{base_url}/api/{_service_api_version(service_name)}/{endpoint}", headers=headers)
@@ -892,30 +1155,61 @@ def build_connections_status(config: dict[str, Any]) -> dict[str, Any]:
             "readarr": str(stack.get("books_root") or "./media/books"),
             "prowlarr": "",
         }.get(service_name, "")
-        result[service_name] = {"configured": True, "reachable": reachable, "status": message, "base_url": base_url, "target_path": target_path}
+        result[service_name] = _service_status_payload(
+            service_name,
+            configured=True,
+            reachable=reachable,
+            status=message,
+            has_auth=bool(api_key),
+            extras={"base_url": base_url, "target_path": target_path},
+        )
     bazarr_cfg = arr_cfg.get("bazarr") if isinstance(arr_cfg.get("bazarr"), dict) else {}
     bazarr_base = _trimmed(bazarr_cfg.get("base_url")).rstrip("/")
     if bazarr_base:
         headers = {"X-Api-Key": _trimmed(bazarr_cfg.get("api_key"))} if _trimmed(bazarr_cfg.get("api_key")) else {}
         reachable, message = _probe_json(f"{bazarr_base}/api/system/status", headers=headers)
-        result["bazarr"] = {"configured": True, "reachable": reachable, "status": message, "base_url": bazarr_base, "target_path": ""}
+        result["bazarr"] = _service_status_payload(
+            "bazarr",
+            configured=True,
+            reachable=reachable,
+            status=message,
+            has_auth=bool(_trimmed(bazarr_cfg.get("api_key"))),
+            extras={"base_url": bazarr_base, "target_path": ""},
+        )
     else:
-        result["bazarr"] = {"configured": False, "reachable": False, "status": "not_configured"}
+        result["bazarr"] = _service_status_payload("bazarr", configured=False, reachable=False, status="not_configured")
     qb_cfg = arr_cfg.get("qbittorrent") if isinstance(arr_cfg.get("qbittorrent"), dict) else {}
     qb_base = _trimmed(qb_cfg.get("base_url")).rstrip("/")
     if qb_base:
         reachable, message = _probe_json(f"{qb_base}/api/v2/app/version")
-        result["qbittorrent"] = {"configured": True, "reachable": reachable, "status": message, "base_url": qb_base, "download_root": _trimmed(qb_cfg.get("download_dir")) or str(stack.get("downloads_root") or "./downloads")}
+        result["qbittorrent"] = _service_status_payload(
+            "qbittorrent",
+            configured=True,
+            reachable=reachable,
+            status=message,
+            has_auth=bool(_trimmed(qb_cfg.get("username")) and _trimmed(qb_cfg.get("password"))),
+            extras={
+                "base_url": qb_base,
+                "download_root": _trimmed(qb_cfg.get("download_dir")) or str(stack.get("downloads_root") or "./downloads"),
+            },
+        )
     else:
-        result["qbittorrent"] = {"configured": False, "reachable": False, "status": "not_configured"}
+        result["qbittorrent"] = _service_status_payload("qbittorrent", configured=False, reachable=False, status="not_configured")
     jelly_cfg = arr_cfg.get("jellyfin") if isinstance(arr_cfg.get("jellyfin"), dict) else {}
     jelly_base = _trimmed(jelly_cfg.get("base_url")).rstrip("/")
     if jelly_base:
         headers = {"X-Emby-Token": _trimmed(jelly_cfg.get("api_key"))} if _trimmed(jelly_cfg.get("api_key")) else {}
         reachable, message = _probe_json(f"{jelly_base}/System/Info/Public", headers=headers)
-        result["jellyfin"] = {"configured": True, "reachable": reachable, "status": message, "base_url": jelly_base, "target_path": str(stack.get("media_root") or "./media")}
+        result["jellyfin"] = _service_status_payload(
+            "jellyfin",
+            configured=True,
+            reachable=reachable,
+            status=message,
+            has_auth=bool(_trimmed(jelly_cfg.get("api_key"))),
+            extras={"base_url": jelly_base, "target_path": str(stack.get("media_root") or "./media")},
+        )
     else:
-        result["jellyfin"] = {"configured": False, "reachable": False, "status": "not_configured"}
+        result["jellyfin"] = _service_status_payload("jellyfin", configured=False, reachable=False, status="not_configured")
     vpn_cfg = arr_cfg.get("vpn") if isinstance(arr_cfg.get("vpn"), dict) else {}
     control_url = _trimmed(vpn_cfg.get("control_url"))
     expected_routes = {
@@ -929,42 +1223,56 @@ def build_connections_status(config: dict[str, Any]) -> dict[str, Any]:
             if response.ok:
                 body = response.text.strip()
                 result["vpn"] = {
-                    "configured": True,
-                    "reachable": True,
-                    "status": "reachable",
-                    "base_url": control_url,
-                    "provider": _trimmed(vpn_cfg.get("provider")) or "gluetun",
-                    "external_ip": body[:128] if body else "",
-                    "kill_switch_expected": bool(expected_routes.get("qbittorrent")),
-                    "expected_routes": expected_routes,
+                    **_service_status_payload(
+                        "vpn",
+                        configured=True,
+                        reachable=True,
+                        status="reachable",
+                        extras={
+                            "base_url": control_url,
+                            "provider": _trimmed(vpn_cfg.get("provider")) or "gluetun",
+                            "external_ip": body[:128] if body else "",
+                            "kill_switch_expected": bool(expected_routes.get("qbittorrent")),
+                            "expected_routes": expected_routes,
+                        },
+                    )
                 }
             else:
-                result["vpn"] = {
-                    "configured": True,
-                    "reachable": False,
-                    "status": f"http_{response.status_code}",
+                result["vpn"] = _service_status_payload(
+                    "vpn",
+                    configured=True,
+                    reachable=False,
+                    status=f"http_{response.status_code}",
+                    extras={
+                        "base_url": control_url,
+                        "provider": _trimmed(vpn_cfg.get("provider")) or "gluetun",
+                        "kill_switch_expected": bool(expected_routes.get("qbittorrent")),
+                        "expected_routes": expected_routes,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            result["vpn"] = _service_status_payload(
+                "vpn",
+                configured=True,
+                reachable=False,
+                status=exc.__class__.__name__,
+                extras={
                     "base_url": control_url,
                     "provider": _trimmed(vpn_cfg.get("provider")) or "gluetun",
                     "kill_switch_expected": bool(expected_routes.get("qbittorrent")),
                     "expected_routes": expected_routes,
-                }
-        except Exception as exc:  # noqa: BLE001
-            result["vpn"] = {
-                "configured": True,
-                "reachable": False,
-                "status": exc.__class__.__name__,
-                "base_url": control_url,
+                },
+            )
+    else:
+        result["vpn"] = _service_status_payload(
+            "vpn",
+            configured=bool(vpn_cfg.get("enabled")),
+            reachable=False,
+            status="not_configured",
+            extras={
                 "provider": _trimmed(vpn_cfg.get("provider")) or "gluetun",
                 "kill_switch_expected": bool(expected_routes.get("qbittorrent")),
                 "expected_routes": expected_routes,
-            }
-    else:
-        result["vpn"] = {
-            "configured": bool(vpn_cfg.get("enabled")),
-            "reachable": False,
-            "status": "not_configured",
-            "provider": _trimmed(vpn_cfg.get("provider")) or "gluetun",
-            "kill_switch_expected": bool(expected_routes.get("qbittorrent")),
-            "expected_routes": expected_routes,
-        }
+            },
+        )
     return result
