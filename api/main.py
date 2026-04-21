@@ -3436,10 +3436,11 @@ def _list_browse_entries(base, directory, mode, ext, limit=None):
     entries = []
     with os.scandir(directory) as it:
         for entry in it:
-            if entry.name.startswith("."):
-                continue
             is_dir = entry.is_dir(follow_symlinks=False)
             is_file = entry.is_file(follow_symlinks=False)
+            # Always hide hidden directories; show hidden files so dotfiles like .env are selectable
+            if entry.name.startswith(".") and (mode == "dir" or is_dir):
+                continue
             if mode == "dir":
                 if not is_dir:
                     continue
