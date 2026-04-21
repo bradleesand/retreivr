@@ -184,6 +184,7 @@ const browserState = {
   target: null,
   renderToken: 0,
   limit: 500,
+  showHidden: false,
 };
 const oauthState = {
   open: false,
@@ -7691,7 +7692,7 @@ async function loadPaths() {
   }
 }
 
-function openBrowser(target, root, mode = "dir", ext = "", startPath = "") {
+function openBrowser(target, root, mode = "dir", ext = "", startPath = "", showHidden = false) {
   browserState.open = true;
   browserState.root = root;
   browserState.mode = mode;
@@ -7700,6 +7701,7 @@ function openBrowser(target, root, mode = "dir", ext = "", startPath = "") {
   browserState.currentAbs = "";
   browserState.selected = "";
   browserState.target = target;
+  browserState.showHidden = showHidden;
   updateBrowserRootSelect();
   updatePollingState();
   $("#browser-modal").classList.remove("hidden");
@@ -7727,6 +7729,9 @@ async function refreshBrowser(path, allowFallback = true) {
   }
   if (browserState.limit) {
     params.set("limit", String(browserState.limit));
+  }
+  if (browserState.showHidden) {
+    params.set("show_hidden", "true");
   }
 
   const list = $("#browser-list");
@@ -19393,7 +19398,7 @@ function bindEvents() {
           return;
         }
         const browseSpec = {
-          env_path: { root: "host", mode: "file", ext: "" },
+          env_path: { root: "host", mode: "file", ext: "", showHidden: true },
           media_root: { root: "host", mode: "dir", ext: "" },
           movies_root: { root: "host", mode: "dir", ext: "" },
           tv_root: { root: "host", mode: "dir", ext: "" },
@@ -19409,7 +19414,7 @@ function bindEvents() {
             const start = currentValue.startsWith("/")
               ? currentValue.replace(/^\//, "")
               : (BROWSE_DEFAULTS.hostBrowseStart || "");
-            openBrowser(targetInput, spec.root, spec.mode, spec.ext, start);
+            openBrowser(targetInput, spec.root, spec.mode, spec.ext, start, !!spec.showHidden);
           }
         }
       }

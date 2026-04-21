@@ -3432,14 +3432,13 @@ def _hostfs_to_host_path(container_path: str) -> str:
     return container_path
 
 
-def _list_browse_entries(base, directory, mode, ext, limit=None):
+def _list_browse_entries(base, directory, mode, ext, limit=None, show_hidden=False):
     entries = []
     with os.scandir(directory) as it:
         for entry in it:
             is_dir = entry.is_dir(follow_symlinks=False)
             is_file = entry.is_file(follow_symlinks=False)
-            # Always hide hidden directories; show hidden files so dotfiles like .env are selectable
-            if entry.name.startswith(".") and (mode == "dir" or is_dir):
+            if entry.name.startswith(".") and not (show_hidden and is_file):
                 continue
             if mode == "dir":
                 if not is_dir:
@@ -12524,6 +12523,7 @@ async def api_browse(
     mode: str = Query("dir", description="dir or file"),
     ext: str = Query("", description="Optional file extension filter, e.g. .json"),
     limit: int | None = Query(None, ge=1, le=5000, description="Optional max entries"),
+    show_hidden: bool = Query(False, description="Include hidden files (dotfiles)"),
 ):
     root = (root or "").strip().lower()
     roots = app.state.browse_roots
@@ -12557,7 +12557,7 @@ async def api_browse(
             parent = ""
 
     try:
-        entries = _list_browse_entries(base, target, mode, ext, limit=limit)
+        entries = _list_browse_entries(base, target, mode, ext, limit=limit, show_hidden=show_hidden)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read directory: {exc}") from exc
 
