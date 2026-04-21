@@ -3424,6 +3424,14 @@ def _resolve_browse_path(root_base, rel_path):
     return normalized, abs_path
 
 
+def _hostfs_to_host_path(container_path: str) -> str:
+    """Translate a /hostfs/... container path back to the real host path."""
+    hostfs_root = os.environ.get("RETREIVR_HOSTFS_ROOT", "/Users").rstrip("/")
+    if container_path.startswith("/hostfs"):
+        return hostfs_root + container_path[len("/hostfs"):]
+    return container_path
+
+
 def _list_browse_entries(base, directory, mode, ext, limit=None):
     entries = []
     with os.scandir(directory) as it:
@@ -12551,6 +12559,11 @@ async def api_browse(
         entries = _list_browse_entries(base, target, mode, ext, limit=limit)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read directory: {exc}") from exc
+
+    if root == "host":
+        target = _hostfs_to_host_path(target)
+        for entry in entries:
+            entry["abs_path"] = _hostfs_to_host_path(entry["abs_path"])
 
     return {
         "root": root,
