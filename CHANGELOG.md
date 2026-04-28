@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented here.
 
+## Unreleased
+
+### Added
+- `replace_in_metadata` is now allowlisted in `yt_dlp_opts`, letting users pass yt-dlp's metadata regex-substitution post-processor option through config to strip noise from titles (e.g. remaster or channel-name suffixes) without affecting download behavior.
+
 ## v0.9.20 — Community Cache Publish Reset Endpoint Fix
 
 ### High-Level
