@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented here.
 
+## Unreleased
+
+### Added
+- `replace_in_metadata` is now allowlisted in `yt_dlp_opts`, letting users pass yt-dlp's metadata regex-substitution post-processor option through config to strip noise from titles (e.g. remaster or channel-name suffixes) without affecting download behavior.
+
 ## v1.0.0 — ARR Stack, Movies & TV, and Music Player Milestone
 
 ### High-Level
@@ -40,7 +45,6 @@ Retreivr 1.0.0 is the first major release and the biggest product expansion so f
 - Music player failure handling now marks unresolved queue items, skips forward where possible, and uses non-blocking notices instead of hard-stop playback failures.
 - Artist/album/player interactions and browse-card click handling were tightened after the expanded Music and Movies/TV UI work.
 - Test/runtime artifact paths were hardened so test runs do not recreate tracked `/data` or `/tests` artifacts.
-
 
 ## v0.9.20 — Community Cache Publish Reset Endpoint Fix
 
