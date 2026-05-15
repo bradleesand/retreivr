@@ -901,6 +901,8 @@ def resolve_best_mb_pair(
             release_year = _extract_release_year(release_date)
             release_group_id = str(release_group.get("id") or "").strip() or None
             country = str(release.get("country") or release_item.get("country") or "").strip().upper() or None
+            media_list = release.get("medium-list", []) if isinstance(release.get("medium-list"), list) else []
+            disc_total = len([medium for medium in media_list if isinstance(medium, dict)]) or None
 
             _, _, matched_track = _resolve_track_context(release_payload, recording_mbid)
             recording_disambiguation = str(recording_data.get("disambiguation") or recording.get("disambiguation") or "").strip() or None
@@ -1105,6 +1107,7 @@ def resolve_best_mb_pair(
                 "release_date": release_date or release_year,
                 "track_number": int(track_number),
                 "disc_number": int(disc_number),
+                "disc_total": int(disc_total) if disc_total else None,
                 "duration_ms": recording_duration_ms,
                 "country": country,
                 "release_year": int(release_year) if release_year and release_year.isdigit() else 9999,
@@ -1299,6 +1302,7 @@ def resolve_best_mb_pair(
         "release_date": selected.get("release_date"),
         "track_number": selected.get("track_number"),
         "disc_number": selected.get("disc_number"),
+        "disc_total": selected.get("disc_total"),
         "duration_ms": selected.get("duration_ms"),
         "mb_recording_title": selected.get("mb_recording_title"),
         "track_disambiguation": selected.get("track_disambiguation"),

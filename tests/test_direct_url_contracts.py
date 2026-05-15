@@ -91,11 +91,10 @@ def test_client_direct_url_video_mode_does_not_coerce_audio_on_audio_override(
     assert captured.get("media_type") == "video"
     assert captured.get("media_intent") == "episode"
     assert captured.get("final_format") == "mkv"
-    assert result["filename"].startswith("VID-Video Title__Channel Name.")
-    assert result["filename"].endswith(".mkv")
+    assert result["filename"] == "Video Title.mkv"
 
 
-def test_server_direct_url_video_mode_uses_video_template_and_container_policy(
+def test_server_direct_url_video_mode_uses_clean_title_and_container_policy(
     api_module, monkeypatch, tmp_path: Path
 ) -> None:
     module = api_module
@@ -146,8 +145,7 @@ def test_server_direct_url_video_mode_uses_video_template_and_container_policy(
 
     files = [p.name for p in destination.glob("*") if p.is_file()]
     assert len(files) == 1
-    assert files[0].startswith("VID-Video Title__Channel Name.")
-    assert files[0].endswith(".mkv")
+    assert files[0] == "Video Title.mkv"
 
 
 def test_client_direct_url_music_mode_returns_client_delivery(api_module, monkeypatch) -> None:
@@ -276,7 +274,7 @@ def test_server_direct_url_music_mode_enforces_mb_metadata_and_music_path(
     assert len(files) == 1
     assert files[0].startswith("Canonical Artist/Canonical Album (2010)/")
     assert "/Disc 1/" not in files[0]
-    assert files[0].endswith("01 - Canonical Track.mp3")
+    assert files[0].endswith("Canonical Track.mp3")
 
 
 def test_server_direct_url_music_mode_fails_when_mb_binding_incomplete(
@@ -373,8 +371,7 @@ def test_server_direct_url_relative_destination_resolves_within_downloads_root(
     target_dir = Path(module.app.state.paths.single_downloads_dir) / "Singles"
     files = [p.name for p in target_dir.glob("*") if p.is_file()]
     assert len(files) == 1
-    assert files[0].startswith("VID-Video Title__Channel Name.")
-    assert files[0].endswith(".mkv")
+    assert files[0] == "Video Title.mkv"
 
 
 def test_server_direct_url_default_destination_uses_downloads_root(
@@ -420,8 +417,7 @@ def test_server_direct_url_default_destination_uses_downloads_root(
     target_dir = Path(module.app.state.paths.single_downloads_dir)
     files = [p.name for p in target_dir.glob("*") if p.is_file()]
     assert len(files) == 1
-    assert files[0].startswith("VID-Video Title__Channel Name.")
-    assert files[0].endswith(".mkv")
+    assert files[0] == "Video Title.mkv"
 
 
 def test_server_direct_url_absolute_destination_within_downloads_root_is_allowed(
@@ -467,8 +463,7 @@ def test_server_direct_url_absolute_destination_within_downloads_root_is_allowed
 
     files = [p.name for p in absolute_target.glob("*") if p.is_file()]
     assert len(files) == 1
-    assert files[0].startswith("VID-Video Title__Channel Name.")
-    assert files[0].endswith(".mkv")
+    assert files[0] == "Video Title.mkv"
 
 
 def test_server_direct_url_destination_escape_is_rejected(

@@ -154,6 +154,8 @@ from engine.arr_services import (
     test_sonarr_connection,
 )
 from engine.music_player import (
+    AUDIO_EXTENSIONS,
+    IMAGE_EXTENSIONS,
     advance_station,
     add_history_entry,
     add_playlist_item,
@@ -173,6 +175,8 @@ from engine.music_player import (
     playlist_items,
     prime_station,
     reorder_playlist_items,
+    is_local_player_path_allowed,
+    resolve_local_player_file,
     scan_local_library,
     remove_playlist_item,
     start_station,
@@ -11509,38 +11513,23 @@ async def api_player_history_add(payload: dict = Body(...)):
 
 @app.get("/api/player/stream/local")
 async def api_player_stream_local(path: str = Query(...)):
-    requested = Path(path).expanduser()
-    if not requested.exists() or not requested.is_file():
-        raise HTTPException(status_code=404, detail={"error": "file_not_found"})
-    music_roots = [root.resolve() for root in (Path(item) for item in [requested.parent] if item)]
-    allowed_roots = []
     cfg = _current_loaded_config()
-    music_cfg = cfg.get("music") if isinstance(cfg.get("music"), dict) else {}
-    library_path = str(music_cfg.get("library_path") or "").strip()
-    if library_path:
-        allowed_roots.append(Path(library_path).expanduser().resolve())
-    allowed_roots.append((Path("/downloads") / str(cfg.get("home_music_download_folder") or cfg.get("music_download_folder") or "Music")).resolve())
-    resolved = requested.resolve()
-    if not any(str(resolved).startswith(str(root)) for root in allowed_roots if root):
+    if not is_local_player_path_allowed(cfg, path, allowed_extensions=AUDIO_EXTENSIONS):
         raise HTTPException(status_code=403, detail={"error": "path_not_allowed"})
+    resolved = resolve_local_player_file(cfg, path, allowed_extensions=AUDIO_EXTENSIONS)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail={"error": "file_not_found"})
     return FileResponse(resolved)
 
 
 @app.get("/api/player/art/local")
 async def api_player_art_local(path: str = Query(...)):
-    requested = Path(path).expanduser()
-    if not requested.exists() or not requested.is_file():
-        raise HTTPException(status_code=404, detail={"error": "file_not_found"})
     cfg = _current_loaded_config()
-    allowed_roots = []
-    music_cfg = cfg.get("music") if isinstance(cfg.get("music"), dict) else {}
-    library_path = str(music_cfg.get("library_path") or "").strip()
-    if library_path:
-        allowed_roots.append(Path(library_path).expanduser().resolve())
-    allowed_roots.append((Path("/downloads") / str(cfg.get("home_music_download_folder") or cfg.get("music_download_folder") or "Music")).resolve())
-    resolved = requested.resolve()
-    if not any(str(resolved).startswith(str(root)) for root in allowed_roots if root):
+    if not is_local_player_path_allowed(cfg, path, allowed_extensions=IMAGE_EXTENSIONS):
         raise HTTPException(status_code=403, detail={"error": "path_not_allowed"})
+    resolved = resolve_local_player_file(cfg, path, allowed_extensions=IMAGE_EXTENSIONS)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail={"error": "file_not_found"})
     return FileResponse(
         resolved,
         media_type=mimetypes.guess_type(str(resolved))[0] or "image/jpeg",

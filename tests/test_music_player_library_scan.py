@@ -95,3 +95,59 @@ def test_scan_local_library_falls_back_to_path_when_tags_unavailable(tmp_path: P
     assert item["album"] == "Fallback Album"
     assert item["title"] == "02 - Song"
     assert item["recording_mbid"] is None
+
+
+def test_local_player_path_check_rejects_sibling_prefix_path(tmp_path: Path, monkeypatch) -> None:
+    music_player = _load_music_player_module()
+    root = tmp_path / "Music"
+    sibling = tmp_path / "Music2"
+    root.mkdir()
+    sibling.mkdir()
+    outside_track = sibling / "outside.mp3"
+    outside_track.write_bytes(b"audio")
+
+    monkeypatch.setattr(music_player, "_music_roots", lambda _config: [root])
+
+    assert music_player.is_local_player_path_allowed(
+        {},
+        outside_track,
+        allowed_extensions=music_player.AUDIO_EXTENSIONS,
+    ) is False
+
+
+def test_scan_local_library_skips_symlink_that_resolves_outside_root(tmp_path: Path, monkeypatch) -> None:
+    music_player = _load_music_player_module()
+    root = tmp_path / "Music"
+    outside = tmp_path / "Outside"
+    root.mkdir()
+    outside.mkdir()
+    outside_track = outside / "escaped.mp3"
+    outside_track.write_bytes(b"audio")
+    symlink_track = root / "escaped.mp3"
+    try:
+        symlink_track.symlink_to(outside_track)
+    except OSError:
+        return
+
+    monkeypatch.setattr(music_player, "_music_roots", lambda _config: [root])
+    monkeypatch.setattr(music_player, "MutagenFile", lambda _path, easy=False: None)
+
+    assert music_player.scan_local_library({}, limit=10) == []
+
+
+def test_resolve_local_player_file_allows_real_file_under_root(tmp_path: Path, monkeypatch) -> None:
+    music_player = _load_music_player_module()
+    root = tmp_path / "Music"
+    track = root / "Artist" / "Album" / "Song.mp3"
+    track.parent.mkdir(parents=True)
+    track.write_bytes(b"audio")
+
+    monkeypatch.setattr(music_player, "_music_roots", lambda _config: [root])
+
+    resolved = music_player.resolve_local_player_file(
+        {},
+        track,
+        allowed_extensions=music_player.AUDIO_EXTENSIONS,
+    )
+
+    assert resolved == track.resolve()

@@ -60,12 +60,12 @@ def test_video_filename_omits_id_and_upload_date() -> None:
         None,
         False,
     )
-    assert name == "Example Track - Artist Channel.mp4"
+    assert name == "Example Track.mp4"
     assert "abc12345" not in name
     assert "20240131" not in name
 
 
-def test_template_id_and_date_tokens_are_blank() -> None:
+def test_video_template_is_ignored_for_clean_title_only_filename() -> None:
     name = build_output_filename(
         {"title": "Song", "channel": "Artist", "upload_date": "20240131"},
         "vid123",
@@ -73,7 +73,7 @@ def test_template_id_and_date_tokens_are_blank() -> None:
         "%(title)s__%(id)s__%(upload_date)s.%(ext)s",
         False,
     )
-    assert name == "Song____.webm"
+    assert name == "Song.webm"
     assert "vid123" not in name
     assert "20240131" not in name
 
@@ -88,7 +88,7 @@ def test_collision_path_appends_counter(tmp_path) -> None:
     assert resolved == str(tmp_path / "Track (3).mp3")
 
 
-def test_template_with_blank_tokens_falls_back_to_pretty_filename() -> None:
+def test_video_template_with_blank_tokens_still_uses_clean_title_only_filename() -> None:
     name = build_output_filename(
         {"title": "Example Track", "channel": "Artist Channel", "upload_date": ""},
         "abc12345",
@@ -96,7 +96,7 @@ def test_template_with_blank_tokens_falls_back_to_pretty_filename() -> None:
         "%(title)s - %(uploader)s - %(upload_date)s.%(ext)s",
         False,
     )
-    assert name == "Example Track - Artist Channel.mp4"
+    assert name == "Example Track.mp4"
 
 
 def test_hydrate_meta_from_output_template_and_local_filename() -> None:

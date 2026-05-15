@@ -755,6 +755,7 @@ def _enqueue_music_track_job(
     release_date: str | None,
     track_number: int | None,
     disc_number: int | None,
+    disc_total: int | None,
     duration_ms: int | None,
     track_aliases: list[str] | None = None,
     track_disambiguation: str | None = None,
@@ -780,6 +781,7 @@ def _enqueue_music_track_job(
         "release_date": release_date,
         "track_number": track_number,
         "disc_number": disc_number,
+        "disc_total": disc_total,
         "duration_ms": duration_ms,
         "recording_mbid": recording_mbid,
         "mb_recording_id": recording_mbid,
@@ -814,6 +816,7 @@ def _enqueue_music_track_job(
             "source_index": source_index,
             "track_number": track_number,
             "disc_number": disc_number,
+            "disc_total": disc_total,
             "release_date": release_date,
             "duration_ms": duration_ms,
             "recording_mbid": recording_mbid,
@@ -828,7 +831,8 @@ def _enqueue_music_track_job(
         },
         canonical_id=canonical_id,
     )
-    return queue_store.enqueue_job(**enqueue_payload, force_requeue=bool(force_requeue))
+    enqueue_payload["force_requeue"] = bool(force_requeue)
+    return queue_store.enqueue_job(**enqueue_payload)
 
 
 def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportResult:
@@ -1353,6 +1357,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 release_date = _extract_release_year(release_date_raw) or release_date_raw
                 track_number = _safe_int(selected_pair.get("track_number")) or _safe_int(entry.get("track_number"))
                 disc_number = _safe_int(selected_pair.get("disc_number")) or _safe_int(entry.get("disc_number")) or 1
+                disc_total = _safe_int(selected_pair.get("disc_total"))
                 resolved_duration_ms = _safe_int(selected_pair.get("duration_ms")) or _safe_int(entry.get("duration_ms"))
                 selected_track_aliases = selected_pair.get("track_aliases")
                 normalized_aliases = [str(value).strip() for value in selected_track_aliases or [] if str(value or "").strip()]
@@ -1417,6 +1422,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     release_date=release_date,
                     track_number=track_number,
                     disc_number=disc_number,
+                    disc_total=disc_total,
                     duration_ms=resolved_duration_ms,
                     track_aliases=normalized_aliases,
                     track_disambiguation=selected_track_disambiguation,

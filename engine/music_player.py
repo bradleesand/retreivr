@@ -143,11 +143,68 @@ def _music_roots(config: dict[str, Any]) -> list[Path]:
     return roots
 
 
-def _find_album_art(album_dir: Path, cache: dict[str, str | None]) -> str | None:
+def _resolved_music_roots(config: dict[str, Any]) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for root in _music_roots(config):
+        try:
+            resolved = root.expanduser().resolve()
+        except Exception:
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots
+
+
+def _is_path_under_root(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def is_local_player_path_allowed(
+    config: dict[str, Any],
+    path: str | Path,
+    *,
+    allowed_extensions: set[str] | None = None,
+) -> bool:
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except Exception:
+        return False
+    if allowed_extensions is not None and resolved.suffix.lower() not in allowed_extensions:
+        return False
+    return any(_is_path_under_root(resolved, root) for root in _resolved_music_roots(config))
+
+
+def resolve_local_player_file(
+    config: dict[str, Any],
+    path: str | Path,
+    *,
+    allowed_extensions: set[str] | None = None,
+) -> Path | None:
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except Exception:
+        return None
+    if not is_local_player_path_allowed(config, resolved, allowed_extensions=allowed_extensions):
+        return None
+    if not resolved.exists() or not resolved.is_file():
+        return None
+    return resolved
+
+
+def _find_album_art(album_dir: Path, cache: dict[str, str | None], roots: list[Path] | None = None) -> str | None:
     key = str(album_dir.resolve())
     if key in cache:
         return cache[key]
     found: str | None = None
+    allowed_roots = list(roots or [])
     for candidate_dir in (album_dir, album_dir.parent):
         try:
             entries = [entry for entry in candidate_dir.iterdir() if entry.is_file() and entry.suffix.lower() in IMAGE_EXTENSIONS]
@@ -161,7 +218,10 @@ def _find_album_art(album_dir: Path, cache: dict[str, str | None]) -> str | None
                     else:
                         fallback.append(entry)
                 chosen = (preferred or fallback)[0]
-                found = str(chosen.resolve())
+                resolved = chosen.resolve()
+                if allowed_roots and not any(_is_path_under_root(resolved, root) for root in allowed_roots):
+                    continue
+                found = str(resolved)
                 break
         except Exception:
             continue
@@ -235,7 +295,7 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
     artwork_cache: dict[str, str | None] = {}
-    for root in _music_roots(config):
+    for root in _resolved_music_roots(config):
         try:
             if not root.exists():
                 continue
@@ -244,11 +304,14 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
                     return items
                 if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS:
                     continue
-                resolved = str(path.resolve())
+                resolved_path = path.resolve()
+                if not _is_path_under_root(resolved_path, root):
+                    continue
+                resolved = str(resolved_path)
                 if resolved in seen:
                     continue
                 seen.add(resolved)
-                tag_data = _read_local_music_tags(path)
+                tag_data = _read_local_music_tags(resolved_path)
                 artist = (
                     str(tag_data.get("album_artist") or "").strip()
                     or str(tag_data.get("artist") or "").strip()
@@ -256,8 +319,8 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
                 )
                 album = str(tag_data.get("album") or "").strip() or path.parent.name
                 title = str(tag_data.get("title") or "").strip() or path.stem
-                stat = path.stat()
-                artwork_local_path = _find_album_art(path.parent, artwork_cache)
+                stat = resolved_path.stat()
+                artwork_local_path = _find_album_art(resolved_path.parent, artwork_cache, [root])
                 items.append(
                     {
                         "id": resolved,

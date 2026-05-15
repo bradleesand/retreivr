@@ -67,7 +67,7 @@ def normalize_music_metadata(metadata: CanonicalMetadata) -> CanonicalMetadata:
     track_num = _normalize_positive_int(metadata.track_num, default=1)
     disc_num = _normalize_positive_int(metadata.disc_num, default=1)
 
-    return CanonicalMetadata(
+    normalized = CanonicalMetadata(
         title=title,
         artist=artist,
         album=album,
@@ -81,6 +81,10 @@ def normalize_music_metadata(metadata: CanonicalMetadata) -> CanonicalMetadata:
         artwork=artwork,
         lyrics=lyrics,
     )
+    disc_total = _normalize_positive_int(getattr(metadata, "disc_total", None), default=0)
+    if disc_total > 0:
+        normalized.disc_total = disc_total  # type: ignore[attr-defined]
+    return normalized
 
 
 def clean_title(title: str) -> str:

@@ -5180,6 +5180,9 @@ def _release_fields_from_template(output_template, canonical):
     disc_number = _normalize_positive_int(
         _extract_release_value(output_template, canonical, "disc_number", "disc", "disc_num")
     )
+    disc_total = _normalize_positive_int(
+        _extract_release_value(output_template, canonical, "disc_total")
+    )
     mb_release_id = _extract_release_value(output_template, canonical, "mb_release_id", "release_id")
     mb_release_group_id = _extract_release_value(
         output_template,
@@ -5192,6 +5195,7 @@ def _release_fields_from_template(output_template, canonical):
         "release_date": release_date,
         "track_number": track_number,
         "disc_number": disc_number,
+        "disc_total": disc_total,
         "mb_release_id": mb_release_id,
         "mb_release_group_id": mb_release_group_id,
     }
@@ -5313,10 +5317,12 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
 
     track_number = None
     disc_number = None
+    disc_total = None
     matched_track = {}
     media = selected_release_data.get("medium-list", [])
     if not isinstance(media, list):
         media = []
+    disc_total = len([medium for medium in media if isinstance(medium, dict)]) or None
     for medium in media:
         if not isinstance(medium, dict):
             continue
@@ -5367,6 +5373,7 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
         "release_date": year_only,
         "track_number": track_number,
         "disc_number": disc_number,
+        "disc_total": disc_total,
         "mb_release_id": selected_release,
         "mb_release_group_id": selected_release_group_id,
         "track_aliases": title_aliases,
@@ -5381,6 +5388,7 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
         release_group_mbid=selected_release_group_id,
         track_number=track_number,
         disc_number=disc_number,
+        disc_total=disc_total,
         release_date=year_only,
     )
     return enriched
@@ -5427,6 +5435,7 @@ def _ensure_release_enriched(job):
             "release_date",
             "track_number",
             "disc_number",
+            "disc_total",
             "mb_release_id",
             "mb_release_group_id",
             "track_aliases",
@@ -7662,9 +7671,8 @@ def sanitize_for_filesystem(name, maxlen=180):
 
 def pretty_filename(title, channel, upload_date):
     safe_title = sanitize_for_filesystem(title or "")
-    safe_channel = sanitize_for_filesystem(channel or "")
-    if safe_channel:
-        return f"{safe_title} - {safe_channel}".strip(" -")
+    _ = channel
+    _ = upload_date
     return safe_title or "media"
 
 
@@ -7735,7 +7743,8 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None, require_
     _ = template
     _ = fallback_id
 
-    track_label = f"{track_number} - {track or 'media'}.{ext}"
+    _ = track_number
+    track_label = f"{track or 'media'}.{ext}"
     return build_music_relative_layout(
         album_artist=album_artist,
         album_folder=album_folder,
@@ -7754,23 +7763,9 @@ def build_output_filename(meta, fallback_id, ext, template, audio_mode, *, enfor
             fallback_id=fallback_id,
             require_release_metadata=bool(enforce_music_contract),
         )
-    if template:
-        try:
-            rendered = template % {
-                "title": sanitize_for_filesystem(meta.get("title") or fallback_id),
-                "uploader": sanitize_for_filesystem(meta.get("channel") or ""),
-                "upload_date": "",
-                "ext": ext,
-                "id": "",
-            }
-            if rendered:
-                # Guard against template artifacts when optional fields are blank
-                # (e.g. "<id> - - .mp4" or "Title - Channel - .mp4").
-                if re.search(r"\s-\s-", rendered) or re.search(r"\s-\s*\.[A-Za-z0-9]+$", rendered):
-                    return f"{pretty_filename(meta.get('title') or fallback_id, meta.get('channel'), meta.get('upload_date'))}.{ext}"
-                return rendered
-        except Exception:
-            pass
+    # Final video filenames are title-only by convention. yt-dlp may still use
+    # IDs in temporary filenames, but the retained artifact is renamed here.
+    _ = template
     return f"{pretty_filename(meta.get('title') or fallback_id, meta.get('channel'), meta.get('upload_date'))}.{ext}"
 
 

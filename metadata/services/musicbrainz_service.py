@@ -617,6 +617,7 @@ class MusicBrainzService:
         release_artist = _canonical_artist_from_credit(release_payload.get("artist-credit"))
         album_title = release_payload.get("title")
         release_date = release_payload.get("date")
+        disc_total = len([disc for disc in media if isinstance(disc, dict)]) or None
         tracks = []
         for disc in media:
             if not isinstance(disc, dict):
@@ -636,6 +637,7 @@ class MusicBrainzService:
                         "recording_mbid": recording.get("id"),
                         "track_number": self._safe_int(track.get("position"), default=0) or None,
                         "disc_number": disc_number,
+                        "disc_total": disc_total,
                         "artist": track_artist,
                         "album": album_title,
                         "release_date": release_date,

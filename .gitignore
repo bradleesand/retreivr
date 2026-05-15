@@ -8,3 +8,10 @@
 .vscode/
 _project_management/
 .local-rebuild-dev.sh
+
+# Runtime artifacts must not be produced or tracked from test runs.
+/data/
+/tests/data/
+/tests/run_summaries/
+/tests/tmp/
+/tests/.tmp/

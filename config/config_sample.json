@@ -62,14 +62,19 @@
       "fallback_only": true
     }
   },
-  "filename_template": "%(title)s - %(uploader)s - %(upload_date)s.%(ext)s",
-  "music_filename_template": "%(artist)s/%(album)s/%(track_number)s - %(track)s.%(ext)s",
+  "filename_template": "%(title)s.%(ext)s",
+  "music_filename_template": "%(artist)s/%(album)s/%(track)s.%(ext)s",
   "music_metadata": {
     "enabled": true,
     "confidence_threshold": 70,
     "use_acoustid": false,
     "acoustid_api_key": "",
     "embed_artwork": true,
+    "artwork_cache": {
+      "enabled": true,
+      "cache_dir": "",
+      "max_size_mb": 256
+    },
     "allow_overwrite_tags": true,
     "max_artwork_size_px": 1500,
     "rate_limit_seconds": 1.5,

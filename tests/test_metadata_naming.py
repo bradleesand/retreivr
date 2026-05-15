@@ -7,14 +7,14 @@ def test_sanitize_component_strips_unsafe_chars_and_trailing_dot_space() -> None
     assert sanitize_component('  A<>:"/\\|?*rtist.  ') == "Artist"
 
 
-def test_build_track_filename_zero_pads_track_number() -> None:
+def test_build_track_filename_uses_clean_title_only() -> None:
     filename = build_track_filename({"title": "Song", "track_num": 7, "ext": "mp3"})
-    assert filename == "07 - Song.mp3"
+    assert filename == "Song.mp3"
 
 
-def test_build_track_filename_missing_track_number_defaults_to_00() -> None:
+def test_build_track_filename_ignores_missing_track_number() -> None:
     filename = build_track_filename({"title": "Song", "track_num": None, "ext": "flac"})
-    assert filename == "00 - Song.flac"
+    assert filename == "Song.flac"
 
 
 def test_build_album_directory_missing_album_and_year_fields() -> None:
