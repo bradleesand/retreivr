@@ -91,6 +91,37 @@ def test_repair_music_library_tags_dry_run_falls_back_to_clean_filename(tmp_path
         dry_run=True,
     )
 
-    assert result["repaired"] == 1
+    assert result["repaired"] == 0
+    assert result["items"][0]["reason"] == "missing_canonical_mbid"
     assert result["items"][0]["new_title"] == "Filename Title"
-    assert result["items"][0]["dry_run"] is True
+
+
+def test_repair_music_library_tags_queues_noncanonical_files_for_review(tmp_path: Path, monkeypatch) -> None:
+    music_root = tmp_path / "Music"
+    track = music_root / "Artist" / "Album" / "03 - Unknown Canonical.mp3"
+    track.parent.mkdir(parents=True)
+    track.write_bytes(b"audio")
+    db_path = tmp_path / "db.sqlite"
+
+    monkeypatch.setattr("metadata.tag_repair.read_music_tags", lambda _path: {"title": "Unknown Canonical"})
+
+    result = repair_music_library_tags(
+        {"music": {"library_path": str(music_root)}},
+        db_path=db_path,
+        dry_run=True,
+        queue_review=True,
+    )
+
+    assert result["review_queued"] == 1
+    assert result["items"][0]["status"] == "review_queued"
+    assert result["items"][0]["reason"] == "missing_canonical_mbid"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT media_intent, file_path, track FROM review_queue_items").fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row[0] == "music_tag_repair_review"
+    assert row[1] == str(track)
+    assert row[2] == "Unknown Canonical"

@@ -7592,21 +7592,33 @@ async function runMusicLibraryTagRepair({ dryRun = true } = {}) {
   renderMusicLibrarySection();
   setMediaLibraryNotice(messageEl, dryRun ? "Scanning music tags..." : "Repairing music tags...", false);
   try {
-    const payload = await fetchJson(`/api/player/library/repair-tags?limit=5000&dry_run=${dryRun ? "true" : "false"}`, {
+    const payload = await fetchJson(`/api/player/library/repair-tags?limit=5000&dry_run=${dryRun ? "true" : "false"}&queue_review=true`, {
       method: "POST",
     });
     state.musicLibraryRepairLast = { ...(payload || {}), applied: !dryRun };
     const repaired = Number(payload?.repaired || 0) || 0;
     const scanned = Number(payload?.scanned || 0) || 0;
     const failed = Number(payload?.failed || 0) || 0;
+    const reviewQueued = Number(payload?.review_queued || 0) || 0;
     if (dryRun) {
       const message = repaired
         ? `Tag scan found ${repaired} repairable files out of ${scanned} scanned.`
         : `Tag scan completed: ${scanned} files scanned, no title repairs needed.`;
-      setMediaLibraryNotice(messageEl, failed ? `${message} ${failed} files could not be checked.` : message, failed ? { kind: "warning" } : false);
+      const reviewMessage = reviewQueued ? ` ${reviewQueued} non-canonical files were sent to Review Queue.` : "";
+      setMediaLibraryNotice(
+        messageEl,
+        `${message}${reviewMessage}${failed ? ` ${failed} files could not be checked.` : ""}`,
+        failed || reviewQueued ? { kind: failed ? "warning" : "info" } : false
+      );
+      if (reviewQueued) {
+        await refreshReviewQueue();
+      }
     } else {
       await loadMusicLibrarySection({ force: true });
-      setMediaLibraryNotice(messageEl, `Tag repair completed: ${repaired} files repaired${failed ? `, ${failed} failed` : ""}.`, {
+      if (reviewQueued) {
+        await refreshReviewQueue();
+      }
+      setMediaLibraryNotice(messageEl, `Tag repair completed: ${repaired} files repaired${reviewQueued ? `, ${reviewQueued} sent to review` : ""}${failed ? `, ${failed} failed` : ""}.`, {
         kind: failed ? "warning" : "success",
         toast: true,
         scope: "music-library",

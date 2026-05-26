@@ -10494,7 +10494,11 @@ async def api_review_queue_preview(item_id: str, request: Request):
     if not file_path or not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="Preview file not found")
     allowed_roots = [app.state.paths.review_queue_dir, DOWNLOADS_DIR]
-    if not _path_allowed(file_path, allowed_roots):
+    is_tag_repair = str(item.get("media_intent") or "") == "music_tag_repair_review"
+    if not _path_allowed(file_path, allowed_roots) and not (
+        is_tag_repair
+        and is_local_player_path_allowed(_current_loaded_config(), file_path, allowed_extensions=AUDIO_EXTENSIONS)
+    ):
         raise HTTPException(status_code=403, detail="Preview path not allowed")
     return build_media_file_response(
         request,
@@ -11266,9 +11270,16 @@ async def api_player_library_summary(limit: int = Query(1000, ge=1, le=5000)):
 async def api_player_library_repair_tags(
     limit: int = Query(500, ge=1, le=5000),
     dry_run: bool = Query(True),
+    queue_review: bool = Query(False),
 ):
     cfg = _current_loaded_config()
-    result = repair_music_library_tags(cfg, db_path=app.state.paths.db_path, limit=limit, dry_run=dry_run)
+    result = repair_music_library_tags(
+        cfg,
+        db_path=app.state.paths.db_path,
+        limit=limit,
+        dry_run=dry_run,
+        queue_review=queue_review,
+    )
     return safe_json(result)
 
 

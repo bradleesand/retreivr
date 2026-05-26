@@ -19,10 +19,11 @@ def repair_music_library_tags(
     db_path: str | Path | None = None,
     limit: int = 500,
     dry_run: bool = True,
+    queue_review: bool = False,
 ) -> dict[str, Any]:
     """Scan configured music roots and repair missing or filename-polluted titles."""
     roots = _music_roots(config)
-    scanned = repaired = skipped = failed = 0
+    scanned = repaired = skipped = failed = review_queued = 0
     items: list[dict[str, Any]] = []
     for root in roots:
         if not root.exists():
@@ -34,24 +35,27 @@ def repair_music_library_tags(
                     "repaired": repaired,
                     "skipped": skipped,
                     "failed": failed,
+                    "review_queued": review_queued,
                     "items": items,
                 }
             if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS:
                 continue
             scanned += 1
-            result = _repair_one(path, root=root, db_path=db_path, dry_run=dry_run)
+            result = _repair_one(path, root=root, db_path=db_path, dry_run=dry_run, queue_review=queue_review)
             items.append(result)
             status = result.get("status")
             if status == "repaired":
                 repaired += 1
+            elif status == "review_queued":
+                review_queued += 1
             elif status == "failed":
                 failed += 1
             else:
                 skipped += 1
-    return {"scanned": scanned, "repaired": repaired, "skipped": skipped, "failed": failed, "items": items}
+    return {"scanned": scanned, "repaired": repaired, "skipped": skipped, "failed": failed, "review_queued": review_queued, "items": items}
 
 
-def _repair_one(path: Path, *, root: Path, db_path: str | Path | None, dry_run: bool) -> dict[str, Any]:
+def _repair_one(path: Path, *, root: Path, db_path: str | Path | None, dry_run: bool, queue_review: bool) -> dict[str, Any]:
     try:
         resolved = path.resolve()
         if not _is_under_root(resolved, root.resolve()):
@@ -60,10 +64,13 @@ def _repair_one(path: Path, *, root: Path, db_path: str | Path | None, dry_run: 
         current_title = str(existing.get("title") or "").strip()
         clean_current_title = clean_display_title(current_title)
         needs_title = not current_title or current_title != clean_current_title
-        if not needs_title:
-            return {"path": str(resolved), "status": "skipped", "reason": "title_ok"}
-
         metadata = _lookup_retreivr_metadata(db_path, resolved, existing) if db_path else None
+        has_canonical_anchor = bool(
+            str(existing.get("recording_id") or "").strip()
+            or str((metadata or {}).get("recording_id") or "").strip()
+        )
+        if not needs_title and has_canonical_anchor:
+            return {"path": str(resolved), "status": "skipped", "reason": "title_ok"}
         fallback_title = clean_display_title(path.stem)
         title = clean_display_title((metadata or {}).get("title") or fallback_title)
         if not title:
@@ -80,6 +87,26 @@ def _repair_one(path: Path, *, root: Path, db_path: str | Path | None, dry_run: 
             "mb_release_id": (metadata or {}).get("mb_release_id") or existing.get("mb_release_id"),
             "mb_release_group_id": (metadata or {}).get("mb_release_group_id") or existing.get("mb_release_group_id"),
         }
+        if not has_canonical_anchor:
+            if queue_review and db_path:
+                item = _queue_tag_repair_review(db_path, resolved, existing, tags, reason="missing_canonical_mbid")
+                return {
+                    "path": str(resolved),
+                    "status": "review_queued",
+                    "reason": "missing_canonical_mbid",
+                    "review_item_id": item.get("id"),
+                    "old_title": current_title or None,
+                    "new_title": title,
+                }
+            return {
+                "path": str(resolved),
+                "status": "skipped",
+                "reason": "missing_canonical_mbid",
+                "old_title": current_title or None,
+                "new_title": title,
+            }
+        if not needs_title:
+            return {"path": str(resolved), "status": "skipped", "reason": "title_ok"}
         if not dry_run:
             apply_tags(str(resolved), tags, artwork=None, allow_overwrite=True, dry_run=False)
         return {
@@ -93,6 +120,25 @@ def _repair_one(path: Path, *, root: Path, db_path: str | Path | None, dry_run: 
         }
     except Exception as exc:
         return {"path": str(path), "status": "failed", "reason": str(exc)}
+
+
+def _queue_tag_repair_review(
+    db_path: str | Path,
+    path: Path,
+    existing_tags: dict[str, Any],
+    proposed_tags: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    from library.review_queue import record_tag_repair_review_item
+
+    return record_tag_repair_review_item(
+        str(db_path),
+        str(path),
+        existing_tags=existing_tags,
+        proposed_tags=proposed_tags,
+        reason=reason,
+    )
 
 
 def _music_roots(config: dict[str, Any]) -> list[Path]:
