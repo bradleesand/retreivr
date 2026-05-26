@@ -45,6 +45,7 @@ _DEFAULT_MUSIC_FAILURES_RETENTION_MAX_AGE_DAYS = 30
 _DEFAULT_IMPORT_DURATION_DELTA_MS = 30000
 _DEFAULT_IMPORT_CORRECTNESS_FLOOR = 57.0
 _DEFAULT_IMPORT_PROGRESS_INTERVAL = 100
+_STALE_IMPORT_BATCH_PHASES = {"queued", "parsing", "resolving", "enqueueing", "finalizing"}
 logger = logging.getLogger(__name__)
 
 
@@ -364,6 +365,37 @@ def list_recent_import_batches(db_path: str | None, *, limit: int = 5) -> list[d
             payload["selected_bucket_counts"] = _decode_json_object(payload.pop("selected_bucket_counts_json", None))
             rows.append(payload)
         return rows
+    finally:
+        conn.close()
+
+
+def mark_stale_import_batches_abandoned(db_path: str | None) -> int:
+    conn = _with_import_conn(db_path)
+    if conn is None:
+        return 0
+    try:
+        now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE import_batches
+            SET
+                phase='failed',
+                current_phase_detail='abandoned_after_restart',
+                finished_at=?,
+                failed_count=CASE
+                    WHEN failed_count > 0 THEN failed_count
+                    WHEN total_tracks > processed_tracks THEN total_tracks - processed_tracks
+                    ELSE failed_count
+                END
+            WHERE finished_at IS NULL
+              AND LOWER(COALESCE(phase, '')) IN ({})
+            """.format(",".join("?" for _ in _STALE_IMPORT_BATCH_PHASES)),
+            (now_iso, *sorted(_STALE_IMPORT_BATCH_PHASES)),
+        )
+        changed = int(cur.rowcount or 0)
+        conn.commit()
+        return changed
     finally:
         conn.close()
 
@@ -981,28 +1013,35 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
             selected_bucket_counts=dict(selected_bucket_counts),
         )
 
-    def _emit_progress(*, phase: str, processed_tracks: int, current_phase_detail: str | None = None) -> None:
+    def _emit_progress(
+        *,
+        phase: str,
+        processed_tracks: int,
+        current_phase_detail: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         if processed_tracks == total_tracks or processed_tracks == 0 or (processed_tracks % _DEFAULT_IMPORT_PROGRESS_INTERVAL) == 0:
             _persist_batch_state(phase=phase, current_phase_detail=current_phase_detail)
         if not callable(progress_callback):
             return
         try:
-            progress_callback(
-                {
-                    "total_tracks": int(total_tracks),
-                    "processed_tracks": int(processed_tracks),
-                    "resolved_count": int(resolved_count),
-                    "unresolved_count": int(unresolved_count),
-                    "enqueued_count": int(enqueued_count),
-                    "duplicate_skipped_count": int(duplicate_skipped_count),
-                    "failed_count": int(failed_count),
-                    "phase": str(phase or "resolving"),
-                    "current_phase_detail": current_phase_detail,
-                    "top_rejection_reasons": dict(top_rejection_reasons.most_common(5)),
-                    "selected_bucket_counts": dict(selected_bucket_counts),
-                    "batch_id": import_batch_id,
-                }
-            )
+            payload = {
+                "total_tracks": int(total_tracks),
+                "processed_tracks": int(processed_tracks),
+                "resolved_count": int(resolved_count),
+                "unresolved_count": int(unresolved_count),
+                "enqueued_count": int(enqueued_count),
+                "duplicate_skipped_count": int(duplicate_skipped_count),
+                "failed_count": int(failed_count),
+                "phase": str(phase or "resolving"),
+                "current_phase_detail": current_phase_detail,
+                "top_rejection_reasons": dict(top_rejection_reasons.most_common(5)),
+                "selected_bucket_counts": dict(selected_bucket_counts),
+                "batch_id": import_batch_id,
+            }
+            if isinstance(extra, dict):
+                payload.update(extra)
+            progress_callback(payload)
         except Exception:
             logger.exception("import_progress_callback_failed")
 
@@ -1178,6 +1217,8 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
         results: dict[tuple[str, str, str], dict[str, Any] | None] = {}
         clusters: dict[tuple[str, str], Counter[str]] = {}
         unresolved_buckets: list[list[dict[str, Any]]] = []
+        submitted_tracks = 0
+        resolved_tracks = 0
         with ThreadPoolExecutor(max_workers=min(mb_binding_workers, max(1, len(buckets)))) as pool:
             for bucket in buckets:
                 exemplar = bucket[0]
@@ -1187,6 +1228,19 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 context_hint = context_resolver(exemplar) if callable(context_resolver) else None
                 future = pool.submit(_resolve_intent, exemplar, context_hint=context_hint)
                 pending[future] = (_entry_dedupe_key(exemplar), bucket)
+                submitted_tracks += len(bucket)
+
+            if submitted_tracks > 0:
+                _emit_progress(
+                    phase="resolving",
+                    processed_tracks=processed_tracks,
+                    current_phase_detail=phase_detail,
+                    extra={
+                        "resolution_processed_tracks": 0,
+                        "resolution_total_tracks": int(submitted_tracks),
+                        "message": f"Resolving metadata 0 / {submitted_tracks}...",
+                    },
+                )
 
             for future in as_completed(pending):
                 dedupe_key, bucket = pending[future]
@@ -1216,6 +1270,17 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     unresolved_buckets.append(bucket)
                     failure_reasons = list((pair or {}).get("_failure_reasons") or [])
                     top_rejection_reasons.update(reason for reason in failure_reasons if reason)
+                resolved_tracks += len(bucket)
+                _emit_progress(
+                    phase="resolving",
+                    processed_tracks=processed_tracks,
+                    current_phase_detail=phase_detail,
+                    extra={
+                        "resolution_processed_tracks": int(resolved_tracks),
+                        "resolution_total_tracks": int(submitted_tracks),
+                        "message": f"Resolving metadata {resolved_tracks} / {submitted_tracks}...",
+                    },
+                )
         return results, clusters, unresolved_buckets
 
     phase_1_results, cluster_counts, unresolved_buckets = _resolve_phase(

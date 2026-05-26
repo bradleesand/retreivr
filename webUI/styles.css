@@ -5191,6 +5191,17 @@ body.home-page .home-footer-brand .sudostacks-logo {
     --settings-main-inline-size: 100%;
   }
 
+  #config-panel .grid.two {
+    grid-template-columns: minmax(280px, 1fr);
+  }
+
+  #config-panel .scheduler-controls {
+    grid-template-columns: repeat(2, minmax(220px, max-content));
+    justify-content: start;
+  }
+}
+
+@media (max-width: 760px) {
   #config-panel .settings-layout {
     display: flex;
     flex-direction: column;
@@ -5248,15 +5259,6 @@ body.home-page .home-footer-brand .sudostacks-logo {
     left: 0;
     right: auto;
     min-width: min(320px, 100%);
-  }
-
-  #config-panel .grid.two {
-    grid-template-columns: minmax(280px, 1fr);
-  }
-
-  #config-panel .scheduler-controls {
-    grid-template-columns: repeat(2, minmax(220px, max-content));
-    justify-content: start;
   }
 }
 

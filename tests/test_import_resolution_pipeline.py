@@ -55,6 +55,7 @@ assert _SPEC and _SPEC.loader
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 process_imported_tracks = _MODULE.process_imported_tracks
+mark_stale_import_batches_abandoned = _MODULE.mark_stale_import_batches_abandoned
 
 
 class FakeMusicBrainzService:
@@ -489,14 +490,61 @@ def test_import_pipeline_progress_callback_reports_completed_work_units() -> Non
     assert snapshots
     assert snapshots[0]["phase"] == "resolving"
     assert snapshots[0]["processed_tracks"] == 0
-    assert snapshots[1]["processed_tracks"] == 1
-    assert snapshots[2]["processed_tracks"] == 2
+    resolution_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.get("phase") == "resolving" and snapshot.get("resolution_total_tracks")
+    ]
+    assert resolution_snapshots
+    assert any(
+        snapshot["resolution_total_tracks"] == 2
+        and snapshot["resolution_processed_tracks"] == 2
+        for snapshot in resolution_snapshots
+    )
+    enqueue_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.get("phase") == "enqueueing"
+    ]
+    assert enqueue_snapshots[0]["processed_tracks"] == 1
+    assert enqueue_snapshots[1]["processed_tracks"] == 2
     assert snapshots[-1]["phase"] == "finalizing"
     assert snapshots[-1]["processed_tracks"] == 2
     assert snapshots[-1]["resolved_count"] == result.resolved_count
     assert snapshots[-1]["unresolved_count"] == result.unresolved_count
     assert snapshots[-1]["enqueued_count"] == result.enqueued_count
     assert snapshots[-1]["failed_count"] == result.failed_count
+
+
+def test_import_pipeline_marks_stale_batches_abandoned(tmp_path) -> None:
+    db_path = tmp_path / "imports.sqlite"
+    import_id = "stale-import-1"
+    _MODULE._persist_import_batch(
+        db_path=str(db_path),
+        batch_id=import_id,
+        source_format="apple_xml",
+        phase="resolving",
+        current_phase_detail="phase_1_initial_resolution",
+        started_at="2026-05-26T15:11:30+00:00",
+        finished_at=None,
+        total_tracks=119,
+        processed_tracks=0,
+        resolved_count=0,
+        unresolved_count=0,
+        enqueued_count=0,
+        duplicate_skipped_count=0,
+        failed_count=0,
+        top_rejection_reasons={},
+        selected_bucket_counts={},
+    )
+
+    assert mark_stale_import_batches_abandoned(str(db_path)) == 1
+    summary = _MODULE.get_import_batch_summary(str(db_path), import_id)
+
+    assert summary["phase"] == "failed"
+    assert summary["current_phase_detail"] == "abandoned_after_restart"
+    assert summary["finished_at"]
+    assert summary["failed_count"] == 119
 
 
 def test_import_pipeline_skips_enqueue_when_canonical_job_already_exists() -> None:

@@ -223,6 +223,7 @@ from metadata.importers.dispatcher import import_playlist as import_playlist_fil
 from engine.import_pipeline import (
     get_import_batch_summary,
     list_recent_import_batches,
+    mark_stale_import_batches_abandoned,
     process_imported_tracks,
 )
 from engine.import_m3u_builder import write_import_m3u_from_batch
@@ -1088,6 +1089,7 @@ def _run_playlist_import_job(
         runtime_config = _read_config_or_404()
 
         def _progress(snapshot: dict) -> None:
+            progress_message = str(snapshot.get("message") or "").strip() or "Resolving tracks and enqueueing jobs..."
             _update_playlist_import_job(
                 job_id,
                 phase=snapshot.get("phase") or "resolving",
@@ -1102,7 +1104,9 @@ def _run_playlist_import_job(
                 top_rejection_reasons=snapshot.get("top_rejection_reasons") or {},
                 selected_bucket_counts=snapshot.get("selected_bucket_counts") or {},
                 batch_id=snapshot.get("batch_id"),
-                message="Resolving tracks and enqueueing jobs...",
+                resolution_processed_tracks=int(snapshot.get("resolution_processed_tracks") or 0),
+                resolution_total_tracks=int(snapshot.get("resolution_total_tracks") or 0),
+                message=progress_message,
             )
 
         result = process_imported_tracks(
@@ -3218,6 +3222,12 @@ async def startup():
     app.state.playlist_import_jobs = {}
     app.state.playlist_import_jobs_lock = threading.Lock()
     app.state.playlist_import_active_count = 0
+    try:
+        abandoned_imports = mark_stale_import_batches_abandoned(app.state.paths.db_path)
+        if abandoned_imports:
+            logging.warning("Marked %s stale playlist import batch(es) abandoned after startup", abandoned_imports)
+    except Exception:
+        logging.exception("Failed to mark stale playlist import batches abandoned")
     app.state.music_cover_art_cache = {}
     app.state.music_genre_artist_cache = {}
     threading.Thread(

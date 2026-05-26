@@ -7988,13 +7988,22 @@ function renderPlaylistImportStatus(status) {
     phaseLower === "queued" ||
     phaseLower === "parsing" ||
     phaseLower === "resolving" ||
+    phaseLower === "enqueueing" ||
     phaseLower === "finalizing";
   const total = Number.isFinite(Number(safe.total_tracks)) ? Number(safe.total_tracks) : 0;
   const processed = Number.isFinite(Number(safe.processed_tracks)) ? Number(safe.processed_tracks) : 0;
+  const resolutionTotal = Number.isFinite(Number(safe.resolution_total_tracks)) ? Number(safe.resolution_total_tracks) : 0;
+  const resolutionProcessed = Number.isFinite(Number(safe.resolution_processed_tracks)) ? Number(safe.resolution_processed_tracks) : 0;
   const resolved = Number.isFinite(Number(safe.resolved)) ? Number(safe.resolved) : 0;
   const enqueued = Number.isFinite(Number(safe.enqueued)) ? Number(safe.enqueued) : 0;
   const failed = Number.isFinite(Number(safe.failed)) ? Number(safe.failed) : 0;
-  const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((processed / total) * 100))) : 0;
+  const visibleProcessed = phaseLower === "resolving" && processed === 0 && resolutionTotal > 0
+    ? resolutionProcessed
+    : processed;
+  const visibleTotal = phaseLower === "resolving" && processed === 0 && resolutionTotal > 0
+    ? resolutionTotal
+    : total;
+  const percent = visibleTotal > 0 ? Math.max(0, Math.min(100, Math.round((visibleProcessed / visibleTotal) * 100))) : 0;
   const stateEl = $("#import-progress-state");
   if (stateEl) {
     stateEl.textContent = phase;
@@ -8005,7 +8014,7 @@ function renderPlaylistImportStatus(status) {
   }
   const processedEl = $("#import-progress-processed");
   if (processedEl) {
-    processedEl.textContent = `${processed} / ${total}`;
+    processedEl.textContent = `${visibleProcessed} / ${visibleTotal}`;
   }
   const resolvedEl = $("#import-progress-resolved");
   if (resolvedEl) {
@@ -8060,6 +8069,7 @@ async function pollPlaylistImportStatus() {
       phase === "queued" ||
       phase === "parsing" ||
       phase === "resolving" ||
+      phase === "enqueueing" ||
       phase === "finalizing";
     state.playlistImportInProgress = active;
     setPlaylistImportControlsEnabled(!active);
@@ -8310,6 +8320,12 @@ async function refreshStatus() {
     let importTotal = Number.isFinite(Number(importCurrent.total_tracks))
       ? Number(importCurrent.total_tracks)
       : 0;
+    const importResolutionProcessed = Number.isFinite(Number(importCurrent.resolution_processed_tracks))
+      ? Number(importCurrent.resolution_processed_tracks)
+      : 0;
+    const importResolutionTotal = Number.isFinite(Number(importCurrent.resolution_total_tracks))
+      ? Number(importCurrent.resolution_total_tracks)
+      : 0;
     let importEnqueued = Number.isFinite(Number(importCurrent.enqueued))
       ? Number(importCurrent.enqueued)
       : 0;
@@ -8323,6 +8339,12 @@ async function refreshStatus() {
       ? Number(importCurrent.resolved)
       : 0;
     let importStateText = importCurrent.state || (importActive ? "running" : "idle");
+    const importPhaseText = String(importCurrent.phase || importCurrent.state || "").toLowerCase();
+    if (importPhaseText === "resolving" && importProcessed === 0 && importResolutionTotal > 0) {
+      importProcessed = importResolutionProcessed;
+      importTotal = importResolutionTotal;
+      importStateText = "resolving";
+    }
     let importPercent = importTotal > 0
       ? Math.max(0, Math.min(100, Math.round((importProcessed / importTotal) * 100)))
       : 0;
