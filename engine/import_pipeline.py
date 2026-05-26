@@ -100,6 +100,9 @@ def ensure_import_batch_tables(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             batch_id TEXT NOT NULL,
             source_index INTEGER NOT NULL,
+            item_state TEXT,
+            source_resolution_state TEXT,
+            resolution_attempts INTEGER NOT NULL DEFAULT 0,
             artist TEXT,
             title TEXT,
             album TEXT,
@@ -122,10 +125,21 @@ def ensure_import_batch_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    existing_columns = {
+        str(row[1])
+        for row in cur.execute("PRAGMA table_info(import_batch_items)").fetchall()
+    }
+    if "item_state" not in existing_columns:
+        cur.execute("ALTER TABLE import_batch_items ADD COLUMN item_state TEXT")
+    if "source_resolution_state" not in existing_columns:
+        cur.execute("ALTER TABLE import_batch_items ADD COLUMN source_resolution_state TEXT")
+    if "resolution_attempts" not in existing_columns:
+        cur.execute("ALTER TABLE import_batch_items ADD COLUMN resolution_attempts INTEGER NOT NULL DEFAULT 0")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_import_batches_started_at ON import_batches (started_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_import_batches_phase ON import_batches (phase)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_import_batch_items_batch ON import_batch_items (batch_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_import_batch_items_outcome ON import_batch_items (outcome)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_import_batch_items_state ON import_batch_items (item_state)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_import_batch_items_job ON import_batch_items (linked_job_id)")
     conn.commit()
 
@@ -220,6 +234,9 @@ def _persist_import_batch_item(
     album_artist: str | None,
     input_metadata: dict[str, Any],
     outcome: str,
+    item_state: str | None,
+    source_resolution_state: str | None,
+    resolution_attempts: int | None,
     canonical_id: str | None,
     linked_job_id: str | None,
     linked_job_status: str | None,
@@ -240,12 +257,16 @@ def _persist_import_batch_item(
         cur.execute(
             """
             INSERT INTO import_batch_items (
-                batch_id, source_index, artist, title, album, album_artist, input_metadata_json,
+                batch_id, source_index, item_state, source_resolution_state, resolution_attempts,
+                artist, title, album, album_artist, input_metadata_json,
                 outcome, canonical_id, linked_job_id, linked_job_status, recording_mbid,
                 mb_release_id, mb_release_group_id, rejection_category, scoring_breakdown_json,
                 selected_bucket, failure_reasons_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(batch_id, source_index) DO UPDATE SET
+                item_state=excluded.item_state,
+                source_resolution_state=excluded.source_resolution_state,
+                resolution_attempts=excluded.resolution_attempts,
                 artist=excluded.artist,
                 title=excluded.title,
                 album=excluded.album,
@@ -267,6 +288,9 @@ def _persist_import_batch_item(
             (
                 batch_id,
                 int(source_index),
+                item_state,
+                source_resolution_state,
+                int(resolution_attempts or 0),
                 artist,
                 title,
                 album,
@@ -1120,6 +1144,9 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
         entry: dict[str, Any],
         *,
         outcome: str,
+        item_state: str | None = None,
+        source_resolution_state: str | None = None,
+        resolution_attempts: int | None = None,
         canonical_id: str | None,
         linked_job_id: str | None,
         linked_job_status: str | None,
@@ -1152,6 +1179,9 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 "query": entry.get("query"),
             },
             outcome=outcome,
+            item_state=item_state or outcome,
+            source_resolution_state=source_resolution_state or "not_started",
+            resolution_attempts=resolution_attempts,
             canonical_id=canonical_id,
             linked_job_id=linked_job_id,
             linked_job_status=linked_job_status,
@@ -1202,10 +1232,226 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
             }
         )
 
+    for entry in entries:
+        _record_item(
+            entry,
+            outcome="pending_metadata_resolution",
+            item_state="pending_metadata_resolution",
+            source_resolution_state="not_started",
+            canonical_id=None,
+            linked_job_id=None,
+            linked_job_status=None,
+            recording_mbid=None,
+            mb_release_id=None,
+            mb_release_group_id=None,
+            rejection_category=None,
+            scoring_breakdown=None,
+            selected_bucket=None,
+            failure_reasons=None,
+        )
+
     dedupe_buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for entry in entries:
         key = _entry_dedupe_key(entry)
         dedupe_buckets.setdefault(key, []).append(entry)
+
+    processed_resolution_keys: set[tuple[str, str, str]] = set()
+
+    def _handle_resolved_bucket(bucket: list[dict[str, Any]], selected_pair: dict[str, Any]) -> None:
+        nonlocal resolved_count
+        nonlocal unresolved_count
+        nonlocal enqueued_count
+        nonlocal duplicate_skipped_count
+        nonlocal failed_count
+        nonlocal processed_tracks
+
+        selected_pair = selected_pair if isinstance(selected_pair, dict) else {}
+        selected_pair_error = str(selected_pair.get("_error") or "").strip()
+        for entry in bucket:
+            query = str(entry["query"] or "").strip()
+            artist = entry["artist"]
+            title = str(entry["title"] or "").strip() or query
+            album = entry["album"]
+            try:
+                if selected_pair_error:
+                    failed_count += 1
+                    _record_failure(
+                        artist=artist,
+                        track=title,
+                        reasons=["import_exception", selected_pair_error],
+                        recording_mbid_attempted=None,
+                        last_query=query,
+                    )
+                    _record_item(
+                        entry,
+                        outcome="failed_exception",
+                        item_state="failed",
+                        source_resolution_state="not_started",
+                        resolution_attempts=1,
+                        canonical_id=None,
+                        linked_job_id=None,
+                        linked_job_status=None,
+                        recording_mbid=None,
+                        mb_release_id=None,
+                        mb_release_group_id=None,
+                        rejection_category="import_exception",
+                        scoring_breakdown=None,
+                        selected_bucket=None,
+                        failure_reasons=["import_exception", selected_pair_error],
+                    )
+                    processed_tracks += 1
+                    _emit_progress(phase="resolving", processed_tracks=processed_tracks, current_phase_detail="metadata_resolved_streaming")
+                    continue
+
+                recording_mbid = str(selected_pair.get("recording_mbid") or "").strip()
+                if not recording_mbid:
+                    return
+
+                release_mbid = str(selected_pair.get("mb_release_id") or "").strip() or None
+                release_group_mbid = str(selected_pair.get("mb_release_group_id") or "").strip() or None
+                canonical_artist = artist or str(selected_pair.get("matched_artist") or "").strip()
+                canonical_title = title
+                canonical_album = str(selected_pair.get("album") or album or "").strip() or None
+                release_date_raw = str(selected_pair.get("release_date") or entry.get("release_date") or "").strip() or None
+                release_date = _extract_release_year(release_date_raw) or release_date_raw
+                track_number = _safe_int(selected_pair.get("track_number")) or _safe_int(entry.get("track_number"))
+                disc_number = _safe_int(selected_pair.get("disc_number")) or _safe_int(entry.get("disc_number")) or 1
+                disc_total = _safe_int(selected_pair.get("disc_total"))
+                resolved_duration_ms = _safe_int(selected_pair.get("duration_ms")) or _safe_int(entry.get("duration_ms"))
+                normalized_aliases = [
+                    str(value).strip()
+                    for value in (selected_pair.get("track_aliases") or [])
+                    if str(value or "").strip()
+                ]
+                selected_track_disambiguation = str(selected_pair.get("track_disambiguation") or "").strip() or None
+                selected_recording_title = str(selected_pair.get("mb_recording_title") or "").strip() or None
+                normalized_mb_youtube_urls = [
+                    str(value).strip()
+                    for value in (selected_pair.get("mb_youtube_urls") or [])
+                    if str(value or "").strip()
+                ]
+                selected_bucket = str(selected_pair.get("selected_bucket") or "").strip() or None
+                scoring_breakdown = selected_pair.get("scoring_breakdown")
+                canonical_id = build_music_track_canonical_id(
+                    canonical_artist,
+                    canonical_album,
+                    track_number,
+                    canonical_title,
+                    recording_mbid=recording_mbid,
+                    mb_release_id=release_mbid,
+                    mb_release_group_id=release_group_mbid,
+                    disc_number=disc_number,
+                )
+                duplicate = _classify_duplicate(canonical_id, placeholder_url=f"musicbrainz://recording/{recording_mbid}")
+                force_requeue = bool(duplicate and str(duplicate.get("classification") or "").startswith("stale_"))
+                if duplicate and str(duplicate.get("classification") or "") in {"completed_valid", "active_existing"}:
+                    duplicate_skipped_count += 1
+                    resolved_count += 1
+                    resolved_mbids.append(recording_mbid)
+                    _record_item(
+                        entry,
+                        outcome="resolved_duplicate_existing",
+                        item_state="duplicate",
+                        source_resolution_state="skipped_existing",
+                        resolution_attempts=1,
+                        canonical_id=canonical_id,
+                        linked_job_id=str(duplicate.get("job_id") or "").strip() or None,
+                        linked_job_status=str(duplicate.get("status") or "").strip() or None,
+                        recording_mbid=recording_mbid,
+                        mb_release_id=release_mbid,
+                        mb_release_group_id=release_group_mbid,
+                        rejection_category=None,
+                        scoring_breakdown=scoring_breakdown,
+                        selected_bucket=selected_bucket,
+                        failure_reasons=None,
+                    )
+                    processed_tracks += 1
+                    _emit_progress(phase="resolving", processed_tracks=processed_tracks, current_phase_detail="metadata_resolved_streaming")
+                    continue
+
+                job_id, created, enqueue_reason = _enqueue_music_track_job(
+                    queue_store,
+                    job_payload_builder,
+                    runtime_config=runtime_config,
+                    base_dir=base_dir,
+                    destination=destination,
+                    final_format_override=final_format_override,
+                    import_batch_id=import_batch_id,
+                    source_index=int(entry["idx"]) - 1,
+                    recording_mbid=recording_mbid,
+                    release_mbid=release_mbid,
+                    release_group_mbid=release_group_mbid,
+                    artist=canonical_artist,
+                    title=canonical_title,
+                    album=canonical_album,
+                    release_date=release_date,
+                    track_number=track_number,
+                    disc_number=disc_number,
+                    disc_total=disc_total,
+                    duration_ms=resolved_duration_ms,
+                    track_aliases=normalized_aliases,
+                    track_disambiguation=selected_track_disambiguation,
+                    mb_recording_title=selected_recording_title,
+                    mb_youtube_urls=normalized_mb_youtube_urls,
+                    media_mode=media_mode,
+                    force_requeue=force_requeue,
+                )
+                resolved_count += 1
+                resolved_mbids.append(recording_mbid)
+                linked_job_status = str(duplicate.get("status") or "").strip() or None if duplicate else None
+                if created:
+                    enqueued_count += 1
+                elif enqueue_reason == "duplicate":
+                    duplicate_skipped_count += 1
+                _record_item(
+                    entry,
+                    outcome=(
+                        "resolved_duplicate_stale"
+                        if force_requeue
+                        else ("resolved_and_enqueued" if created else "resolved_duplicate_existing")
+                    ),
+                    item_state="queued_for_download" if created or force_requeue else "duplicate",
+                    source_resolution_state="queued_for_source_resolution",
+                    resolution_attempts=1,
+                    canonical_id=canonical_id,
+                    linked_job_id=str(job_id or "").strip() or None,
+                    linked_job_status=linked_job_status or ("queued" if created else None),
+                    recording_mbid=recording_mbid,
+                    mb_release_id=release_mbid,
+                    mb_release_group_id=release_group_mbid,
+                    rejection_category=None,
+                    scoring_breakdown=scoring_breakdown,
+                    selected_bucket=selected_bucket,
+                    failure_reasons=None,
+                )
+            except Exception as exc:
+                failed_count += 1
+                _record_failure(
+                    artist=artist,
+                    track=title,
+                    reasons=["import_exception", str(exc)],
+                    recording_mbid_attempted=None,
+                    last_query=query,
+                )
+                _record_item(
+                    entry,
+                    outcome="failed_exception",
+                    item_state="failed",
+                    source_resolution_state="not_started",
+                    resolution_attempts=1,
+                    canonical_id=None,
+                    linked_job_id=None,
+                    linked_job_status=None,
+                    recording_mbid=None,
+                    mb_release_id=None,
+                    mb_release_group_id=None,
+                    rejection_category="import_exception",
+                    scoring_breakdown=None,
+                    selected_bucket=None,
+                    failure_reasons=["import_exception", str(exc)],
+                )
+            processed_tracks += 1
+            _emit_progress(phase="resolving", processed_tracks=processed_tracks, current_phase_detail="metadata_resolved_streaming")
 
     def _resolve_phase(
         buckets: list[list[dict[str, Any]]],
@@ -1266,6 +1512,11 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     selected_bucket = str(pair.get("selected_bucket") or "").strip()
                     if selected_bucket:
                         selected_bucket_counts[selected_bucket] += len(bucket)
+                    _handle_resolved_bucket(bucket, pair)
+                    processed_resolution_keys.add(dedupe_key)
+                elif pair and pair.get("_error"):
+                    _handle_resolved_bucket(bucket, pair)
+                    processed_resolution_keys.add(dedupe_key)
                 else:
                     unresolved_buckets.append(bucket)
                     failure_reasons = list((pair or {}).get("_failure_reasons") or [])
@@ -1319,6 +1570,8 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     _persist_batch_state(phase="enqueueing", current_phase_detail="queueing_resolved_tracks")
     for bucket in dedupe_buckets.values():
         exemplar = bucket[0]
+        if _entry_dedupe_key(exemplar) in processed_resolution_keys:
+            continue
         selected_pair = resolution_results.get(_entry_dedupe_key(exemplar))
         selected_pair = selected_pair if isinstance(selected_pair, dict) else None
         selected_pair_error = str(selected_pair.get("_error") or "").strip() if selected_pair else ""

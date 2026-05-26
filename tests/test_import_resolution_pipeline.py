@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sqlite3
 import sys
 
 from metadata.importers.base import TrackIntent
@@ -316,6 +317,71 @@ def test_import_pipeline_uses_single_batch_id_for_all_enqueued_items() -> None:
     assert second == result.import_batch_id
 
 
+def test_import_pipeline_persists_items_as_resolve_queue_and_enqueues_streaming(tmp_path) -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {"recording-list": [{"id": "mbid-stream-1", "title": "One", "ext:score": "96", "release-list": [{"id": "release-stream-1"}]}]},
+            {"recording-list": []},
+        ]
+    )
+    queue_store = FakeQueueStore()
+    queue_store.db_path = str(tmp_path / "queue.sqlite")
+    snapshots: list[dict] = []
+
+    result = process_imported_tracks(
+        [
+            TrackIntent(artist="Artist", title="One", album="Album", raw_line="", source_format="apple_xml"),
+            TrackIntent(artist="Artist", title="Missing", album="Album", raw_line="", source_format="apple_xml"),
+        ],
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+            "progress_callback": lambda snapshot: snapshots.append(dict(snapshot)),
+        },
+    )
+
+    assert result.resolved_count == 1
+    assert result.enqueued_count == 1
+    assert result.unresolved_count == 1
+    assert any(
+        snapshot.get("phase") == "resolving"
+        and snapshot.get("enqueued_count") == 1
+        for snapshot in snapshots
+    )
+
+    conn = sqlite3.connect(queue_store.db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT source_index, item_state, source_resolution_state, outcome
+            FROM import_batch_items
+            WHERE batch_id=?
+            ORDER BY source_index
+            """,
+            (result.import_batch_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [dict(row) for row in rows] == [
+        {
+            "source_index": 1,
+            "item_state": "queued_for_download",
+            "source_resolution_state": "queued_for_source_resolution",
+            "outcome": "resolved_and_enqueued",
+        },
+        {
+            "source_index": 2,
+            "item_state": "unresolved_no_candidate",
+            "source_resolution_state": "not_started",
+            "outcome": "unresolved_no_candidate",
+        },
+    ]
+
+
 def test_import_pipeline_dedupes_exact_track_lookup_before_mb_binding() -> None:
     mb = FakeMusicBrainzService(
         [
@@ -506,8 +572,13 @@ def test_import_pipeline_progress_callback_reports_completed_work_units() -> Non
         for snapshot in snapshots
         if snapshot.get("phase") == "enqueueing"
     ]
-    assert enqueue_snapshots[0]["processed_tracks"] == 1
-    assert enqueue_snapshots[1]["processed_tracks"] == 2
+    assert enqueue_snapshots[-1]["processed_tracks"] == 2
+    assert any(
+        snapshot.get("phase") == "resolving"
+        and snapshot.get("current_phase_detail") == "metadata_resolved_streaming"
+        and snapshot.get("enqueued_count") == 1
+        for snapshot in snapshots
+    )
     assert snapshots[-1]["phase"] == "finalizing"
     assert snapshots[-1]["processed_tracks"] == 2
     assert snapshots[-1]["resolved_count"] == result.resolved_count
