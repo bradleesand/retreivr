@@ -5225,15 +5225,17 @@ body.home-page .home-footer-brand .sudostacks-logo {
   }
 
   #config-panel .settings-nav {
-    flex-direction: row;
+    flex-direction: column;
     flex-wrap: nowrap;
-    overflow-x: auto;
-    overflow-y: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding-right: 4px;
     padding-bottom: 2px;
   }
 
   #config-panel .settings-nav-link {
-    white-space: nowrap;
+    width: 100%;
+    white-space: normal;
     flex: 0 0 auto;
   }
 
