@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import importlib
 import sys
+import tempfile
 import types
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,39 +14,45 @@ from fastapi.testclient import TestClient
 
 
 def _build_client(monkeypatch) -> TestClient:
+    # Pre-load engine.core with real packages before stubs are injected.
+    import engine.core  # noqa: F401
     monkeypatch.setattr(sys, "version_info", (3, 11, 0, "final", 0), raising=False)
-    monkeypatch.setattr(sys, "version", "3.11.9", raising=False)
-    if "google_auth_oauthlib" not in sys.modules:
-        google_auth_oauthlib = types.ModuleType("google_auth_oauthlib")
-        sys.modules["google_auth_oauthlib"] = google_auth_oauthlib
-    if "google_auth_oauthlib.flow" not in sys.modules:
-        flow_mod = types.ModuleType("google_auth_oauthlib.flow")
-        flow_mod.InstalledAppFlow = object
-        sys.modules["google_auth_oauthlib.flow"] = flow_mod
-    if "googleapiclient" not in sys.modules:
-        googleapiclient = types.ModuleType("googleapiclient")
-        sys.modules["googleapiclient"] = googleapiclient
-    if "googleapiclient.errors" not in sys.modules:
-        errors_mod = types.ModuleType("googleapiclient.errors")
-        errors_mod.HttpError = Exception
-        sys.modules["googleapiclient.errors"] = errors_mod
-    if "google" not in sys.modules:
-        google_mod = types.ModuleType("google")
-        sys.modules["google"] = google_mod
-    if "google.auth" not in sys.modules:
-        google_auth_mod = types.ModuleType("google.auth")
-        sys.modules["google.auth"] = google_auth_mod
-    if "google.auth.exceptions" not in sys.modules:
-        google_auth_exc_mod = types.ModuleType("google.auth.exceptions")
-        google_auth_exc_mod.RefreshError = Exception
-        sys.modules["google.auth.exceptions"] = google_auth_exc_mod
-    if "musicbrainzngs" not in sys.modules:
-        sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
+    monkeypatch.setattr(sys, "version", "3.11.9 (main, Jan  1 2024, 00:00:00) [Clang 14.0.0]", raising=False)
+    for _key, _val in [
+        ("google_auth_oauthlib", None),
+        ("google_auth_oauthlib.flow", {"InstalledAppFlow": object}),
+        ("googleapiclient", None),
+        ("googleapiclient.errors", {"HttpError": Exception}),
+        ("google", None),
+        ("google.auth", None),
+        ("google.auth.exceptions", {"RefreshError": Exception}),
+        ("google.auth.transport", None),
+        ("google.auth.transport.requests", {"Request": object}),
+        ("google.oauth2", None),
+        ("google.oauth2.credentials", {"Credentials": object}),
+        ("musicbrainzngs", None),
+    ]:
+        if _key not in sys.modules:
+            _mod = types.ModuleType(_key)
+            if _val:
+                for _attr, _obj in _val.items():
+                    setattr(_mod, _attr, _obj)
+            sys.modules[_key] = _mod
 
     sys.modules.pop("api.main", None)
     module = importlib.import_module("api.main")
     module.app.router.on_startup.clear()
     module.app.router.on_shutdown.clear()
+
+    tmp_dir = tempfile.mkdtemp()
+    db_path = str(Path(tmp_dir) / "test.sqlite")
+    module.app.state.paths = SimpleNamespace(
+        db_path=db_path,
+        single_downloads_dir=tmp_dir,
+        temp_downloads_dir=tmp_dir,
+        ytdlp_temp_dir=tmp_dir,
+    )
+
     return TestClient(module.app)
 
 

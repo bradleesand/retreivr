@@ -24,12 +24,12 @@ def build_music_relative_layout(
     """Build the canonical relative music layout from normalized components."""
     safe_album_artist = sanitize_for_filesystem(album_artist or "") or "Unknown Artist"
     safe_album_folder = sanitize_for_filesystem(album_folder or "") or "Unknown Album"
-    safe_track_label = str(track_label or "").strip() or "00 - media"
+    safe_track_label = str(track_label or "").strip() or "media"
     safe_disc_number = int(disc_number) if isinstance(disc_number, int) and disc_number > 0 else 1
     safe_disc_total = int(disc_total) if isinstance(disc_total, int) and disc_total > 0 else None
 
     segments = [safe_album_artist, safe_album_folder]
-    include_disc_folder = bool((safe_disc_total and safe_disc_total > 1) or safe_disc_number > 1)
+    include_disc_folder = bool(safe_disc_total and safe_disc_total > 1)
     if include_disc_folder:
         segments.append(f"Disc {safe_disc_number}")
     segments.append(safe_track_label)
@@ -62,7 +62,7 @@ def build_music_path(root: Path, metadata: CanonicalMetadata, ext: str) -> Path:
       {album_artist}/
         {album} ({year})/
           [Disc {disc_num}/ only when multi-disc]
-            {track_num:02d} - {title}.{ext}
+            {title}.{ext}
     """
     album_artist = sanitize_for_filesystem(metadata.album_artist or metadata.artist or "Unknown Artist")
     album_folder = build_album_directory(metadata)

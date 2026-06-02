@@ -1,3 +1,4 @@
+import db.downloaded_tracks
 from db.downloaded_tracks import has_downloaded_isrc, record_downloaded_track
 
 
@@ -26,4 +27,3 @@ def test_has_downloaded_isrc_false_for_other_playlist_or_isrc(tmp_path, monkeypa
 
     assert has_downloaded_isrc("playlist-b", "USABC1234567") is False
     assert has_downloaded_isrc("playlist-a", "USZZZ9999999") is False
-

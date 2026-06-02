@@ -41,7 +41,7 @@ class WatcherBehaviorTests(unittest.IsolatedAsyncioTestCase):
             now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
             yt_clients = {"acc": object()}
 
-            await api_main._poll_single_playlist({}, now, policy, pl, watch, yt_clients)
+            await api_main._poll_single_playlist({}, now, policy, pl, watch, yt_clients, {})
 
             state = api_main._read_watch_state(self.db_path)
             entry = state["PL123"]
@@ -74,7 +74,7 @@ class WatcherBehaviorTests(unittest.IsolatedAsyncioTestCase):
             now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
             yt_clients = {"acc": object()}
 
-            await api_main._poll_single_playlist({}, now, policy, pl, watch, yt_clients)
+            await api_main._poll_single_playlist({}, now, policy, pl, watch, yt_clients, {})
 
             with sqlite3.connect(self.db_path) as conn:
                 cur = conn.cursor()

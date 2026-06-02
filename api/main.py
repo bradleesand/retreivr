@@ -19,15 +19,18 @@ import concurrent.futures
 import importlib
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
 import sqlite3
 import subprocess
 import shutil
+import secrets
 import tempfile
 import threading
 import time
@@ -44,7 +47,7 @@ from typing import Any, Optional
 
 import anyio
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.errors import HttpError
@@ -56,6 +59,7 @@ from apscheduler.triggers.date import DateTrigger
 from google.auth.exceptions import RefreshError
 from yt_dlp import YoutubeDL
 
+from api.intent_queue import IntentQueueAdapter
 from engine.job_queue import (
     DownloadJobStore,
     DownloadWorkerEngine,
@@ -79,9 +83,9 @@ from engine.job_queue import (
     _normalize_audio_format,
     _normalize_format,
 )
-from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
+from engine.json_utils import json_sanity_check, safe_json, safe_json_dump, safe_json_dumps
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
-from engine.musicbrainz_binding import resolve_best_mb_pair, search_music_metadata
+from engine.musicbrainz_binding import resolve_best_mb_pair, search_artists_by_genre, search_music_metadata
 from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
 from engine.search_adapters import YouTubeAdapter
 import engine.community_cache as community_cache
@@ -89,7 +93,9 @@ from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
 )
+from engine.download_defaults import resolve_effective_download_settings
 from metadata.services.musicbrainz_service import get_musicbrainz_service
+from metadata.tag_repair import repair_music_library_tags
 
 from engine.core import (
     EngineStatus,
@@ -130,12 +136,82 @@ from engine.paths import (
     resolve_dir,
 )
 from engine.runtime import get_runtime_info
+from engine.arr_services import (
+    ArrServiceError,
+    add_movie_to_radarr,
+    build_arr_editorial_response,
+    add_series_to_sonarr,
+    build_arr_genre_browse_response,
+    build_movie_search_response,
+    build_tv_search_response,
+    get_arr_editorial_shelves,
+    get_arr_editorial_sources,
+    get_bulk_status,
+    get_tmdb_genres,
+    get_tmdb_cast,
+    get_tmdb_person_titles,
+    get_tmdb_trailer,
+    test_radarr_connection,
+    test_sonarr_connection,
+)
+from engine.music_player import (
+    AUDIO_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    advance_station,
+    add_history_entry,
+    add_playlist_item,
+    build_station_queue,
+    configure_search_db_path,
+    create_playlist,
+    create_station,
+    delete_history_entry,
+    delete_playlist,
+    delete_station,
+    ensure_music_player_tables,
+    get_station_detail,
+    list_history,
+    list_cached_matches,
+    list_playlists,
+    list_stations,
+    playlist_items,
+    prime_station,
+    reorder_playlist_items,
+    is_local_player_path_allowed,
+    resolve_local_player_file,
+    scan_local_library,
+    remove_playlist_item,
+    start_station,
+    STATION_TOTAL_TARGET,
+    summarize_library,
+)
+from engine.stack_setup import (
+    _probe_json,
+    _qbit_login_session,
+    _qbit_request,
+    auto_configure_services,
+    apply_managed_service_defaults,
+    build_stack_apply_summary,
+    build_stack_preflight,
+    build_compose_command,
+    build_connections_status,
+    build_existing_status,
+    build_managed_status,
+    build_setup_status,
+    discover_managed_service_keys,
+    discover_local_service_keys,
+    managed_env_values,
+    normalize_existing_stack_payload,
+    normalize_managed_plan,
+    normalize_stack_config,
+    write_managed_env_block,
+)
 from input.intent_router import IntentType, detect_intent
 from api.intent_dispatcher import execute_intent as dispatch_intent
 from spotify.oauth_client import SPOTIFY_TOKEN_URL, build_auth_url
 from spotify.client import SpotifyPlaylistClient
 from spotify.oauth_store import SpotifyOAuthStore, SpotifyOAuthToken
 from db.playlist_snapshots import PlaylistSnapshotStore
+from db.saved_titles import SavedTitleStore
 from scheduler.jobs.spotify_playlist_watch import (
     normalize_spotify_playlist_identifier,
     playlist_watch_job,
@@ -148,6 +224,7 @@ from metadata.importers.dispatcher import import_playlist as import_playlist_fil
 from engine.import_pipeline import (
     get_import_batch_summary,
     list_recent_import_batches,
+    mark_stale_import_batches_abandoned,
     process_imported_tracks,
 )
 from engine.import_m3u_builder import write_import_m3u_from_batch
@@ -161,7 +238,9 @@ from library.review_queue import (
 )
 from engine.community_publish_worker import (
     CommunityPublishWorker,
+    append_publish_proposal_to_outbox,
     apply_community_publish_defaults,
+    normalize_community_publish_source,
     summarize_publish_runtime,
     community_publish_worker_enabled,
 )
@@ -200,6 +279,7 @@ USER_PLAYLISTS_JOB_ID = "spotify_user_playlists_watch"
 SPOTIFY_PLAYLISTS_WATCH_JOB_ID = "spotify_playlists_watch"
 COMMUNITY_PUBLISH_JOB_ID = "community_cache_publish"
 RESOLUTION_CACHE_SYNC_JOB_ID = "resolution_cache_sync"
+LONG_TERM_RETRY_JOB_ID = "music_long_term_retry"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
 WATCHER_BATCH_MAX_WAIT_SECONDS = 300
@@ -208,10 +288,32 @@ WATCHER_SUMMARY_WAIT_SECONDS = 900
 WATCHER_SUMMARY_POLL_SECONDS = 2
 COVER_ART_CACHE_TTL_SECONDS = 3600
 COVER_ART_NEGATIVE_CACHE_TTL_SECONDS = 120
+MUSIC_GENRE_ARTIST_CACHE_TTL_SECONDS = 60 * 60 * 12
+MUSIC_GENRE_MAX_ALIAS_SEARCHES = 2
+MUSIC_GENRE_FALLBACK_CANDIDATE_POOL = 18
+LISTENBRAINZ_ARTIST_POPULARITY_CACHE_TTL_SECONDS = 60 * 60 * 24 * 14
+LISTENBRAINZ_BASE_URL = "https://api.listenbrainz.org/1"
+LISTENBRAINZ_REQUEST_TIMEOUT_SECONDS = 2.5
+LISTENBRAINZ_MAX_RERANK_CANDIDATES = 12
+STARTUP_MUSIC_GENRE_PREWARM_LIMIT = 12
+STARTUP_MUSIC_GENRE_PREWARM_TARGETS = [
+    "Pop",
+    "Rock",
+    "Hip Hop",
+    "Electronic",
+    "Country",
+    "Indie",
+    "Alternative",
+    "R&B",
+]
 DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
 DEFAULT_SAVED_ALBUMS_SYNC_INTERVAL_MINUTES = 30
 DEFAULT_USER_PLAYLISTS_SYNC_INTERVAL_MINUTES = 30
 DEFAULT_SPOTIFY_PLAYLISTS_SYNC_INTERVAL_MINUTES = 15
+ADMIN_PIN_HEADER = "X-Retreivr-Admin-Token"
+_ADMIN_PIN_ITERATIONS = 200_000
+_ADMIN_PIN_SESSIONS: dict[str, datetime] = {}
+_ADMIN_PIN_SESSIONS_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 OAUTH_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 OAUTH_SESSION_TTL = timedelta(minutes=15)
@@ -229,6 +331,22 @@ GHCR_TOKEN_URL = "https://ghcr.io/token"
 GHCR_TAGS_URL_TEMPLATE = "https://ghcr.io/v2/{repo}/tags/list"
 GITHUB_RELEASES_LATEST_URL = "https://api.github.com/repos/sudoStacks/retreivr/releases/latest"
 _SEMVER_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$", re.IGNORECASE)
+
+_MUSIC_GENRE_ALIAS_MAP = {
+    "rock": ["rock", "alternative rock", "hard rock", "classic rock", "pop rock", "indie rock"],
+    "pop": ["pop", "dance-pop", "synth-pop", "electropop", "teen pop"],
+    "hip hop": ["hip hop", "hip-hop", "rap", "trap", "conscious hip hop", "southern hip hop"],
+    "jazz": ["jazz", "smooth jazz", "vocal jazz", "jazz fusion", "bebop"],
+    "electronic": ["electronic", "electronica", "edm", "house", "techno", "ambient", "downtempo", "trance"],
+    "metal": ["metal", "heavy metal", "thrash metal", "death metal", "black metal", "metalcore"],
+    "country": ["country", "contemporary country", "alt-country", "country pop", "americana"],
+    "folk": ["folk", "indie folk", "folk rock", "singer-songwriter", "acoustic folk"],
+    "r&b": ["r&b", "rnb", "rhythm and blues", "neo soul", "contemporary r&b", "soul"],
+    "classical": ["classical", "orchestral", "opera", "chamber music", "instrumental classical"],
+    "christian": ["contemporary christian", "ccm", "christian", "christian pop", "christian rock", "worship"],
+    "contemporary christian": ["contemporary christian", "ccm", "christian", "christian pop", "christian rock", "worship"],
+    "indie": ["indie", "indie pop", "indie rock", "alternative", "lo-fi", "dream pop"],
+}
 
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
 MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024
@@ -293,6 +411,27 @@ def _log_transition(event: str, **fields) -> None:
 
 def _mb_service():
     return get_musicbrainz_service()
+
+
+# Guardrail: api/main.py should not call musicbrainzngs request functions directly.
+# Route raw library calls through these wrappers so the shared service always sets the
+# required MusicBrainz user-agent first.
+def _mb_search_release_groups_raw(*, query: str, limit: int) -> dict[str, Any]:
+    mb = _mb_service()
+    mb._ensure_initialized()  # noqa: SLF001
+    return musicbrainzngs.search_release_groups(query=query, limit=limit)
+
+
+def _mb_get_release_by_id_raw(release_mbid: str, *, includes: list[str]) -> dict[str, Any]:
+    mb = _mb_service()
+    mb._ensure_initialized()  # noqa: SLF001
+    return musicbrainzngs.get_release_by_id(release_mbid, includes=includes)
+
+
+def _mb_get_release_group_by_id_raw(release_group_mbid: str, *, includes: list[str]) -> dict[str, Any]:
+    mb = _mb_service()
+    mb._ensure_initialized()  # noqa: SLF001
+    return musicbrainzngs.get_release_group_by_id(release_group_mbid, includes=includes)
 
 
 def _extract_mb_youtube_urls(entity: dict) -> list[str]:
@@ -505,20 +644,21 @@ def _resolve_music_preview_candidate(
                 )
                 if isinstance(community_record, dict):
                     source = str(community_record.get("source") or "").strip().lower()
-                    video_id = str(community_record.get("video_id") or "").strip()
-                    source_url = _normalize_preview_source_url(
-                        source,
-                        community_record.get("candidate_url"),
-                        video_id,
-                    )
-                    if source and source_url:
-                        return {
-                            "source": source,
-                            "source_url": source_url,
-                            "title": track or "Preview",
-                            "resolved_via": "community_cache",
-                            "video_id": video_id or None,
-                        }
+                    if source in {"youtube", "youtube_music"}:
+                        video_id = str(community_record.get("video_id") or "").strip()
+                        source_url = _normalize_preview_source_url(
+                            source,
+                            community_record.get("candidate_url"),
+                            video_id,
+                        )
+                        if source and source_url:
+                            return {
+                                "source": source,
+                                "source_url": source_url,
+                                "title": track or "Preview",
+                                "resolved_via": "community_cache",
+                                "video_id": video_id or None,
+                            }
             except Exception:
                 logging.debug("music_preview_community_lookup_failed mbid=%s", recording_mbid, exc_info=True)
 
@@ -572,6 +712,8 @@ def _resolve_music_preview_candidate(
         if not isinstance(candidate, dict):
             continue
         source = str(candidate.get("source") or "").strip().lower()
+        if source not in {"youtube", "youtube_music"}:
+            continue
         source_url = _normalize_preview_source_url(
             source,
             candidate.get("url"),
@@ -950,6 +1092,7 @@ def _run_playlist_import_job(
         runtime_config = _read_config_or_404()
 
         def _progress(snapshot: dict) -> None:
+            progress_message = str(snapshot.get("message") or "").strip() or "Resolving tracks and enqueueing jobs..."
             _update_playlist_import_job(
                 job_id,
                 phase=snapshot.get("phase") or "resolving",
@@ -964,7 +1107,9 @@ def _run_playlist_import_job(
                 top_rejection_reasons=snapshot.get("top_rejection_reasons") or {},
                 selected_bucket_counts=snapshot.get("selected_bucket_counts") or {},
                 batch_id=snapshot.get("batch_id"),
-                message="Resolving tracks and enqueueing jobs...",
+                resolution_processed_tracks=int(snapshot.get("resolution_processed_tracks") or 0),
+                resolution_total_tracks=int(snapshot.get("resolution_total_tracks") or 0),
+                message=progress_message,
             )
 
         result = process_imported_tracks(
@@ -1095,7 +1240,7 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
     normalized_artist_mbid = str(artist_mbid or "").strip()
     if not normalized_artist_mbid:
         return []
-    payload = musicbrainzngs.search_release_groups(
+    payload = _mb_search_release_groups_raw(
         query=f"arid:{normalized_artist_mbid}",
         limit=max(1, min(int(limit or 10), 100)),
     )
@@ -1335,6 +1480,71 @@ def _ensure_music_failures_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_music_artwork_cache_table(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS music_artwork_cache (
+            cache_kind TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (cache_kind, cache_key)
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_music_artwork_cache_updated_at ON music_artwork_cache (updated_at)")
+    conn.commit()
+
+
+def _get_music_artwork_cache_entry(cache_kind: str, cache_key: str) -> dict[str, Any] | None:
+    db_path = app.state.paths.db_path
+    with sqlite3.connect(db_path) as conn:
+        _ensure_music_artwork_cache_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT payload_json, updated_at FROM music_artwork_cache WHERE cache_kind=? AND cache_key=? LIMIT 1",
+            (str(cache_kind or "").strip(), str(cache_key or "").strip()),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    payload_raw, updated_at = row
+    try:
+        payload = json.loads(str(payload_raw or "{}"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["updated_at"] = float(updated_at or 0)
+    return payload
+
+
+def _set_music_artwork_cache_entry(cache_kind: str, cache_key: str, payload: dict[str, Any]) -> None:
+    db_path = app.state.paths.db_path
+    serialized = safe_json_dumps(payload if isinstance(payload, dict) else {}, sort_keys=True)
+    now_ts = time.time()
+    with sqlite3.connect(db_path) as conn:
+        _ensure_music_artwork_cache_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO music_artwork_cache (cache_kind, cache_key, payload_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(cache_kind, cache_key) DO UPDATE SET
+                payload_json=excluded.payload_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                str(cache_kind or "").strip(),
+                str(cache_key or "").strip(),
+                serialized,
+                now_ts,
+            ),
+        )
+        conn.commit()
+
+
 def _parse_iso_datetime(value: str, *, field_name: str) -> datetime:
     text = str(value or "").strip()
     if not text:
@@ -1448,6 +1658,293 @@ def _read_persisted_run_summary_dispatch(run_type: str, run_id: str) -> dict[str
                 pass
 
 
+def _normalize_music_genre_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower()).strip()
+
+
+def _music_genre_aliases(value: Any) -> list[str]:
+    normalized = _normalize_music_genre_key(value)
+    aliases = _MUSIC_GENRE_ALIAS_MAP.get(normalized) or [str(value or "").strip()]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for alias in aliases:
+        text = str(alias or "").strip()
+        key = _normalize_music_genre_key(text)
+        if not text or not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(text)
+    return ordered or [str(value or "").strip()]
+
+
+def _extract_release_year_from_text(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if len(text) >= 4 and text[:4].isdigit():
+        try:
+            return int(text[:4])
+        except ValueError:
+            return None
+    return None
+
+
+def _read_listenbrainz_artists_popularity(artist_mbids: list[str]) -> dict[str, dict[str, Any]]:
+    now = time.time()
+    normalized_mbids = []
+    seen: set[str] = set()
+    for artist_mbid in artist_mbids:
+        mbid = str(artist_mbid or "").strip().lower()
+        if not mbid or mbid in seen:
+            continue
+        seen.add(mbid)
+        normalized_mbids.append(mbid)
+
+    results: dict[str, dict[str, Any]] = {}
+    uncached: list[str] = []
+    for mbid in normalized_mbids:
+        cached = _get_music_artwork_cache_entry("listenbrainz_artist_popularity", mbid) or {}
+        updated_at = float(cached.get("updated_at") or 0)
+        if updated_at > 0 and (now - updated_at) < LISTENBRAINZ_ARTIST_POPULARITY_CACHE_TTL_SECONDS:
+            results[mbid] = cached
+        else:
+            uncached.append(mbid)
+
+    if uncached:
+        url = f"{LISTENBRAINZ_BASE_URL}/popularity/artist"
+        payload = {"artist_mbids": uncached}
+        try:
+            response = requests.post(
+                url,
+                timeout=LISTENBRAINZ_REQUEST_TIMEOUT_SECONDS,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                json=payload,
+            )
+            if response.ok:
+                data = response.json()
+                items = data if isinstance(data, list) else []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    mbid = str(item.get("artist_mbid") or "").strip().lower()
+                    if not mbid:
+                        continue
+                    cached_payload = {
+                        "updated_at": now,
+                        "artist_mbid": mbid,
+                        "total_listen_count": int(item.get("total_listen_count") or 0),
+                        "total_user_count": int(item.get("total_user_count") or 0),
+                    }
+                    results[mbid] = cached_payload
+                    _set_music_artwork_cache_entry("listenbrainz_artist_popularity", mbid, cached_payload)
+        except Exception:
+            logging.debug("ListenBrainz artist popularity batch lookup failed", exc_info=True)
+
+        for mbid in uncached:
+            if mbid in results:
+                continue
+            fallback_payload = {
+                "updated_at": now,
+                "artist_mbid": mbid,
+                "total_listen_count": 0,
+                "total_user_count": 0,
+            }
+            results[mbid] = fallback_payload
+            _set_music_artwork_cache_entry("listenbrainz_artist_popularity", mbid, fallback_payload)
+
+    return results
+
+
+def _rank_genre_artists_with_listenbrainz(artists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(artists, list) or not artists:
+        return []
+
+    sorted_by_source = sorted(
+        [item for item in artists if isinstance(item, dict)],
+        key=lambda item: int(item.get("source_score") or 0),
+        reverse=True,
+    )
+    candidates = [
+        item for item in sorted_by_source[:LISTENBRAINZ_MAX_RERANK_CANDIDATES]
+        if str(item.get("artist_mbid") or "").strip()
+    ]
+    popularity_by_mbid: dict[str, dict[str, Any]] = {}
+    if candidates:
+        popularity_by_mbid = _read_listenbrainz_artists_popularity(
+            [str(item.get("artist_mbid") or "").strip() for item in candidates]
+        )
+
+    max_listens = max(
+        [int((popularity_by_mbid.get(str(item.get("artist_mbid") or "").strip().lower()) or {}).get("total_listen_count") or 0) for item in candidates]
+        or [0]
+    )
+    max_users = max(
+        [int((popularity_by_mbid.get(str(item.get("artist_mbid") or "").strip().lower()) or {}).get("total_user_count") or 0) for item in candidates]
+        or [0]
+    )
+    peak_listens_log = math.log1p(max_listens) if max_listens > 0 else 0.0
+    peak_users_log = math.log1p(max_users) if max_users > 0 else 0.0
+
+    ranked: list[dict[str, Any]] = []
+    for artist in artists:
+        if not isinstance(artist, dict):
+            continue
+        mbid = str(artist.get("artist_mbid") or "").strip().lower()
+        popularity = popularity_by_mbid.get(mbid) or {}
+        source_score = max(0.0, min(1.0, float(int(artist.get("source_score") or 0)) / 100.0))
+        listen_count = int(popularity.get("total_listen_count") or 0)
+        user_count = int(popularity.get("total_user_count") or 0)
+        listen_norm = (math.log1p(listen_count) / peak_listens_log) if peak_listens_log > 0 and listen_count > 0 else 0.0
+        user_norm = (math.log1p(user_count) / peak_users_log) if peak_users_log > 0 and user_count > 0 else 0.0
+        popularity_norm = (listen_norm * 0.72) + (user_norm * 0.28)
+        rank_score = (source_score * 0.50) + (popularity_norm * 0.50)
+        ranked.append(
+            {
+                **artist,
+                "listenbrainz": {
+                    "total_listen_count": listen_count,
+                    "total_user_count": user_count,
+                },
+                "rank_score": round(rank_score, 6),
+            }
+        )
+
+    ranked.sort(
+        key=lambda item: (
+            float(item.get("rank_score") or 0),
+            int(((item.get("listenbrainz") or {}).get("total_listen_count") or 0)),
+            int(item.get("source_score") or 0),
+            str(item.get("name") or "").lower(),
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
+def _fallback_rank_genre_artists(artists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleaned = [item for item in artists if isinstance(item, dict)]
+    cleaned.sort(
+        key=lambda item: (
+            int(item.get("source_score") or 0),
+            str(item.get("name") or "").strip().lower(),
+        ),
+        reverse=True,
+    )
+    return cleaned
+
+
+def _best_effort_rank_genre_artists(artists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fallback = _fallback_rank_genre_artists(artists)
+    if not fallback:
+        return []
+    try:
+        ranked = _rank_genre_artists_with_listenbrainz(fallback)
+        if isinstance(ranked, list) and ranked:
+            return ranked
+    except Exception:
+        logging.warning("ListenBrainz rerank failed for genre artists", exc_info=True)
+    return fallback
+
+
+def _music_genre_prewarm_targets(config: dict | None) -> list[str]:
+    prefs = _normalized_music_preferences(config if isinstance(config, dict) else {})
+    ui_preferences = (config or {}).get("ui_preferences") if isinstance(config, dict) else {}
+    hidden_keys = {
+        _normalize_music_genre_key(value)
+        for value in (ui_preferences.get("music_hidden_genres") if isinstance(ui_preferences, dict) else []) or []
+        if str(value or "").strip()
+    }
+    ordered: list[str] = []
+    seen: set[str] = set()
+    candidates = [
+        *prefs.get("favorite_genres", []),
+        *STARTUP_MUSIC_GENRE_PREWARM_TARGETS,
+    ]
+    for value in candidates:
+        text = str(value or "").strip()
+        key = _normalize_music_genre_key(text)
+        if not text or not key or key in seen or key in hidden_keys:
+            continue
+        seen.add(key)
+        ordered.append(text)
+    return ordered[:8]
+
+
+def _warm_single_music_genre_artist_cache(genre: str, *, limit: int = STARTUP_MUSIC_GENRE_PREWARM_LIMIT) -> None:
+    genre_value = str(genre or "").strip()
+    if not genre_value:
+        return
+    normalized_limit = max(1, min(24, int(limit or STARTUP_MUSIC_GENRE_PREWARM_LIMIT)))
+    cache_key = f"{_normalize_music_genre_key(genre_value)}:{normalized_limit}:0"
+    now = time.time()
+    persisted_payload = _get_music_artwork_cache_entry("genre_artists", cache_key) or {}
+    persisted_updated_at = float(persisted_payload.get("updated_at") or 0)
+    persisted_items = persisted_payload.get("artists")
+    if (
+        isinstance(persisted_items, list)
+        and persisted_updated_at > 0
+        and (now - persisted_updated_at) < MUSIC_GENRE_ARTIST_CACHE_TTL_SECONDS
+    ):
+        cache = getattr(app.state, "music_genre_artist_cache", None)
+        if isinstance(cache, dict) and cache_key not in cache:
+            cache[cache_key] = {
+                "cached_at": now,
+                "artists": persisted_items,
+            }
+        return
+
+    aliases = _music_genre_aliases(genre_value)[:MUSIC_GENRE_MAX_ALIAS_SEARCHES]
+    per_alias_limit = max(
+        8,
+        min(16, int(math.ceil(normalized_limit / max(1, len(aliases)))) * 2),
+    )
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        alias_results = search_artists_by_genre(genre=alias, limit=per_alias_limit, offset=0)
+        for artist in alias_results:
+            if not isinstance(artist, dict):
+                continue
+            dedupe_key = str(artist.get("artist_mbid") or artist.get("name") or "").strip().lower()
+            if not dedupe_key or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            merged.append(
+                {
+                    **artist,
+                    "genre": genre_value,
+                }
+            )
+        if len(merged) >= max(MUSIC_GENRE_FALLBACK_CANDIDATE_POOL, normalized_limit * 2):
+            break
+    if not merged:
+        return
+    artists = _best_effort_rank_genre_artists(merged)[:normalized_limit]
+    cache = getattr(app.state, "music_genre_artist_cache", None)
+    if isinstance(cache, dict):
+        cache[cache_key] = {
+            "cached_at": now,
+            "artists": artists,
+        }
+    _set_music_artwork_cache_entry(
+        "genre_artists",
+        cache_key,
+        {
+            "updated_at": now,
+            "artists": artists,
+        },
+    )
+
+
+def _startup_prewarm_music_genres(config: dict | None) -> None:
+    targets = _music_genre_prewarm_targets(config)
+    if not targets:
+        return
+    for genre in targets:
+        try:
+            _warm_single_music_genre_artist_cache(genre)
+        except Exception:
+            logging.warning("Startup music genre prewarm failed genre=%s", genre, exc_info=True)
+
+
 def _write_persisted_run_summary_dispatch(run_type: str, run_id: str, record: dict[str, object]) -> None:
     db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
     if not db_path:
@@ -1549,6 +2046,19 @@ def _record_telegram_delivery(
             _mutate()
     else:
         _mutate()
+
+
+def _send_watcher_batch_telegram(config: dict, message: str) -> dict:
+    """Send a watcher batch notification via Telegram. Returns {'sent': bool, 'message_id': int|None}."""
+    try:
+        result = telegram_notify_result(config, message)
+        if isinstance(result, dict):
+            return {"sent": bool(result.get("ok")), "message_id": result.get("message_id")}
+        sent = bool(telegram_notify(config, message))
+        return {"sent": sent, "message_id": None}
+    except Exception:
+        logging.exception("Watcher telegram notify failed")
+        return {"sent": False, "message_id": None}
 
 
 def _telegram_preflight_error(config) -> str | None:
@@ -2283,8 +2793,12 @@ class RunRequest(BaseModel):
     delivery_mode: str | None = None
 
 
-class DirectUrlPreviewRequest(BaseModel):
+class DirectUrlResolveRequest(BaseModel):
     url: str
+    media_mode: str | None = None
+
+
+DIRECT_URL_MUSIC_PAGE_ERROR = "Direct URLs must be searched from the Video page."
 
 
 # Cancel job API request model
@@ -2433,311 +2947,11 @@ def _build_music_track_canonical_id(
     )
 
 
-class _IntentQueueAdapter:
-    """Queue adapter that writes intent payloads into the unified download queue."""
+class _IntentQueueAdapter(IntentQueueAdapter):
+    """Backwards-compatible wrapper bound to FastAPI app state."""
 
-    def enqueue(self, payload: dict) -> dict[str, object]:
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="intent_enqueue_invalid_payload")
-        engine = getattr(app.state, "worker_engine", None)
-        store = getattr(engine, "store", None) if engine is not None else None
-        if store is None:
-            raise HTTPException(status_code=503, detail="intent_queue_store_unavailable")
-        try:
-            runtime_config = load_config(app.state.config_path)
-        except Exception:
-            runtime_config = {}
-        base_dir = app.state.paths.single_downloads_dir
-
-        media_intent = str(payload.get("media_intent") or "").strip() or "track"
-        origin = str(payload.get("origin") or "").strip() or ("spotify_playlist" if payload.get("playlist_id") else "intent")
-        origin_id = str(
-            payload.get("origin_id")
-            or payload.get("playlist_id")
-            or payload.get("spotify_track_id")
-            or "manual"
-        ).strip() or "manual"
-        destination = str(payload.get("destination") or "").strip() or None
-        final_format = str(payload.get("final_format") or "").strip() or None
-        force_redownload = bool(payload.get("force_redownload"))
-        canonical_metadata = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
-        # Heuristic for Music Mode-origin payloads:
-        # explicit music flags OR MusicBrainz identifiers already present in payload/canonical metadata.
-        is_music_mode_origin = bool(payload.get("music_mode")) or str(payload.get("media_type") or "").strip().lower() == "music" or any(
-            bool(str(payload.get(key) or "").strip())
-            for key in (
-                "recording_mbid",
-                "mb_recording_id",
-                "mb_release_id",
-                "mb_release_group_id",
-                "release_id",
-                "release_group_id",
-            )
-        ) or any(
-            bool(str(canonical_metadata.get(key) or "").strip())
-            for key in (
-                "recording_mbid",
-                "mb_recording_id",
-                "mb_release_id",
-                "mb_release_group_id",
-                "release_id",
-                "release_group_id",
-            )
-        )
-
-        def _to_dict(value):
-            if isinstance(value, dict):
-                return dict(value)
-            if value is None:
-                return {}
-            out = {}
-            for key in (
-                "title",
-                "artist",
-                "album",
-                "album_artist",
-                "track_num",
-                "disc_num",
-                "date",
-                "genre",
-                "isrc",
-                "mbid",
-                "lyrics",
-            ):
-                if hasattr(value, key):
-                    out[key] = getattr(value, key)
-            return out
-
-        def _enqueue_music_query_job(
-            artist: str,
-            track: str,
-            album: str | None = None,
-            *,
-            recording_mbid: str | None = None,
-            mb_release_id: str | None = None,
-            mb_release_group_id: str | None = None,
-            media_mode: str | None = None,
-        ) -> dict[str, object]:
-            def _optional_pos_int(value):
-                if value is None or str(value).strip() == "":
-                    return None
-                try:
-                    parsed = int(value)
-                except (TypeError, ValueError):
-                    return None
-                return parsed if parsed > 0 else None
-
-            normalized_artist = str(artist or "").strip()
-            normalized_track = str(track or "").strip()
-            normalized_album = str(album or "").strip() or None
-            normalized_album_artist = str(payload.get("album_artist") or "").strip() or None
-            normalized_recording_mbid = str(recording_mbid or "").strip() or None
-            normalized_release_mbid = str(mb_release_id or "").strip() or None
-            normalized_release_group_mbid = str(mb_release_group_id or "").strip() or None
-            normalized_track_number = _optional_pos_int(payload.get("track_number"))
-            normalized_disc_number = _optional_pos_int(payload.get("disc_number"))
-            normalized_track_total = _optional_pos_int(payload.get("track_total"))
-            normalized_disc_total = _optional_pos_int(payload.get("disc_total"))
-            normalized_release_date = str(payload.get("release_date") or "").strip() or None
-            normalized_artwork_url = str(payload.get("artwork_url") or "").strip() or None
-            normalized_genre = str(payload.get("genre") or "").strip() or None
-            normalized_release_primary_type = str(payload.get("release_primary_type") or "").strip() or None
-            release_secondary_raw = payload.get("release_secondary_types")
-            normalized_release_secondary_types = []
-            if isinstance(release_secondary_raw, (list, tuple, set)):
-                for value in release_secondary_raw:
-                    text = str(value or "").strip()
-                    if text:
-                        normalized_release_secondary_types.append(text)
-            normalized_mb_youtube_urls = (
-                list(payload.get("mb_youtube_urls"))
-                if isinstance(payload.get("mb_youtube_urls"), (list, tuple, set))
-                else []
-            )
-            if not normalized_artist or not normalized_track:
-                raise HTTPException(status_code=400, detail="intent_enqueue_missing_artist_or_track")
-            query = quote(f"{normalized_artist} {normalized_track}".strip())
-            url = f"https://music.youtube.com/search?q={query}"
-            normalized_media_mode = str(media_mode or "").strip().lower()
-            target_media_type = "video" if normalized_media_mode == "music_video" else "music"
-            canonical_metadata = {
-                "artist": normalized_artist,
-                "track": normalized_track,
-                "album": normalized_album,
-                "album_artist": normalized_album_artist,
-                "release_date": normalized_release_date,
-                "track_number": normalized_track_number,
-                "disc_number": normalized_disc_number,
-                "track_total": normalized_track_total,
-                "disc_total": normalized_disc_total,
-                "artwork_url": normalized_artwork_url,
-                "genre": normalized_genre,
-                "duration_ms": payload.get("duration_ms"),
-                "recording_mbid": normalized_recording_mbid,
-                "mb_recording_id": normalized_recording_mbid,
-                "mb_release_id": normalized_release_mbid,
-                "mb_release_group_id": normalized_release_group_mbid,
-                "mb_youtube_urls": normalized_mb_youtube_urls,
-                "release_primary_type": normalized_release_primary_type,
-                "release_secondary_types": normalized_release_secondary_types,
-            }
-            canonical_id = _build_music_track_canonical_id(
-                normalized_artist,
-                normalized_album,
-                payload.get("track_number"),
-                normalized_track,
-                recording_mbid=normalized_recording_mbid,
-                mb_release_id=normalized_release_mbid,
-                mb_release_group_id=normalized_release_group_mbid,
-                disc_number=payload.get("disc_number"),
-            )
-            enqueue_payload = build_download_job_payload(
-                config=runtime_config,
-                origin=origin,
-                origin_id=origin_id,
-                media_type=target_media_type,
-                media_intent="music_track",
-                source="youtube_music",
-                url=url,
-                input_url=url,
-                destination=destination,
-                base_dir=base_dir,
-                final_format_override=final_format,
-                resolved_metadata=canonical_metadata,
-                output_template_overrides={
-                    "audio_mode": target_media_type == "music",
-                    "album_artist": normalized_album_artist,
-                    "track_number": normalized_track_number,
-                    "disc_number": normalized_disc_number,
-                    "track_total": normalized_track_total,
-                    "disc_total": normalized_disc_total,
-                    "release_date": normalized_release_date,
-                    "duration_ms": payload.get("duration_ms"),
-                    "artwork_url": normalized_artwork_url,
-                    "genre": normalized_genre,
-                    "recording_mbid": normalized_recording_mbid,
-                    "mb_recording_id": normalized_recording_mbid,
-                    "mb_release_id": normalized_release_mbid,
-                    "mb_release_group_id": normalized_release_group_mbid,
-                    "mb_youtube_urls": normalized_mb_youtube_urls,
-                    "release_primary_type": normalized_release_primary_type,
-                    "release_secondary_types": normalized_release_secondary_types,
-                },
-                canonical_id=canonical_id,
-            )
-            job_id, created, dedupe_reason = store.enqueue_job(
-                **enqueue_payload,
-                force_requeue=force_redownload,
-            )
-            logging.info(
-                "Intent payload queued playlist_id=%s spotify_track_id=%s job_id=%s created=%s dedupe_reason=%s",
-                payload.get("playlist_id"),
-                payload.get("spotify_track_id"),
-                job_id,
-                bool(created),
-                dedupe_reason,
-            )
-            return {
-                "job_id": job_id,
-                "created": bool(created),
-                "dedupe_reason": dedupe_reason,
-            }
-
-        if media_intent == "music_track":
-            recording_mbid = str(
-                payload.get("recording_mbid")
-                or payload.get("mb_recording_id")
-                or ""
-            ).strip()
-            if not recording_mbid:
-                logging.error("[MUSIC] enqueue_rejected missing_recording_mbid")
-                raise HTTPException(status_code=400, detail="recording_mbid required for music_track enqueue")
-            return _enqueue_music_query_job(
-                str(payload.get("artist") or ""),
-                str(payload.get("track") or payload.get("title") or ""),
-                str(payload.get("album") or ""),
-                recording_mbid=recording_mbid,
-                mb_release_id=str(payload.get("mb_release_id") or payload.get("release_id") or ""),
-                mb_release_group_id=str(payload.get("mb_release_group_id") or payload.get("release_group_id") or ""),
-                media_mode=str(payload.get("media_mode") or ""),
-            )
-
-        resolved_media = payload.get("resolved_media") if isinstance(payload.get("resolved_media"), dict) else {}
-        media_url = str(resolved_media.get("media_url") or payload.get("url") or "").strip()
-        if not media_url:
-            if is_music_mode_origin:
-                logging.warning("[MUSIC] enqueue_rejected music_mode_requires_mbid")
-                raise HTTPException(status_code=400, detail="music_mode_requires_mbid")
-            fallback_artist = str(payload.get("artist") or "").strip()
-            fallback_track = str(payload.get("track") or payload.get("title") or "").strip()
-            fallback_album = str(payload.get("album") or "").strip() or None
-            if fallback_artist and fallback_track:
-                return _enqueue_music_query_job(
-                    fallback_artist,
-                    fallback_track,
-                    fallback_album,
-                    media_mode=str(payload.get("media_mode") or ""),
-                )
-            logging.warning("Intent enqueue skipped: no media URL or searchable artist/title available")
-            raise HTTPException(status_code=400, detail="intent_enqueue_missing_media_url")
-        source = str(resolved_media.get("source_id") or payload.get("source") or resolve_source(media_url)).strip() or "unknown"
-        music_metadata = _to_dict(payload.get("music_metadata"))
-        external_ids = music_metadata.get("external_ids") if isinstance(music_metadata.get("external_ids"), dict) else {}
-        canonical_id = str(
-            music_metadata.get("isrc")
-            or music_metadata.get("mbid")
-            or ""
-        ).strip() or extract_external_track_canonical_id(
-            external_ids,
-            fallback_spotify_id=payload.get("spotify_track_id"),
-        )
-        requested_media_type = str(payload.get("media_type") or "").strip().lower()
-        if requested_media_type in {"music", "audio"}:
-            target_media_type = "music"
-        elif requested_media_type == "video":
-            target_media_type = "video"
-        elif music_metadata or is_music_mode_origin:
-            target_media_type = "music"
-        else:
-            target_media_type = resolve_media_type(runtime_config, url=media_url)
-        enqueue_payload = build_download_job_payload(
-            config=runtime_config,
-            origin=origin,
-            origin_id=origin_id,
-            media_type=target_media_type,
-            media_intent=media_intent,
-            source=source,
-            url=media_url,
-            input_url=media_url,
-            destination=destination,
-            base_dir=base_dir,
-            final_format_override=final_format,
-            resolved_metadata=music_metadata,
-            output_template_overrides={
-                "audio_mode": target_media_type == "music",
-                "duration_ms": resolved_media.get("duration_ms"),
-                "kind": payload.get("kind"),
-            },
-            canonical_id=canonical_id,
-            external_id=str(payload.get("external_id") or "").strip() or None,
-        )
-        job_id, created, dedupe_reason = store.enqueue_job(
-            **enqueue_payload,
-            force_requeue=force_redownload,
-        )
-        logging.info(
-            "Intent payload queued playlist_id=%s spotify_track_id=%s job_id=%s created=%s dedupe_reason=%s",
-            payload.get("playlist_id"),
-            payload.get("spotify_track_id"),
-            job_id,
-            bool(created),
-            dedupe_reason,
-        )
-        return {
-            "job_id": job_id,
-            "created": bool(created),
-            "dedupe_reason": dedupe_reason,
-        }
+    def __init__(self) -> None:
+        super().__init__(state=app.state)
 
 
 class SafeJSONResponse(JSONResponse):
@@ -2855,6 +3069,21 @@ async def basic_auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def webui_cache_control_middleware(request: Request, call_next):
+    response = await call_next(request)
+    path = str(request.url.path or "")
+    if request.method in {"GET", "HEAD"} and (
+        path in {"/", "/index.html", "/app.js", "/styles.css"}
+        or path.endswith(".js")
+        or path.endswith(".css")
+    ):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 @app.on_event("startup")
 async def startup():
     _log_transition("APP_STARTUP", phase="begin")
@@ -2954,16 +3183,19 @@ async def startup():
     init_db(app.state.paths.db_path)
     with sqlite3.connect(app.state.paths.db_path) as _conn:
         _ensure_run_summary_dispatch_table(_conn)
+        _ensure_music_artwork_cache_table(_conn)
+        ensure_music_player_tables(_conn)
     _ensure_watch_tables(app.state.paths.db_path)
     app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, startup_cfg)
     logging.info("Search DB path: %s", app.state.search_db_path)
     community_cache.configure_resolution_index_db_path(app.state.search_db_path)
+    configure_search_db_path(app.state.search_db_path)
     try:
         resolution_stats = rebuild_resolution_index_from_dataset(
             db_path=app.state.search_db_path,
             dataset_root=str(DATA_DIR / "community_cache_dataset"),
         )
-        logging.info("Resolution index ready: %s", safe_json_dump(resolution_stats))
+        logging.info("Resolution index ready: %s", safe_json_dumps(resolution_stats))
     except Exception:
         logging.exception("Resolution index rebuild failed")
     app.state.search_service = SearchResolutionService(
@@ -2993,11 +3225,25 @@ async def startup():
     app.state.playlist_import_jobs = {}
     app.state.playlist_import_jobs_lock = threading.Lock()
     app.state.playlist_import_active_count = 0
+    try:
+        abandoned_imports = mark_stale_import_batches_abandoned(app.state.paths.db_path)
+        if abandoned_imports:
+            logging.warning("Marked %s stale playlist import batch(es) abandoned after startup", abandoned_imports)
+    except Exception:
+        logging.exception("Failed to mark stale playlist import batches abandoned")
     app.state.music_cover_art_cache = {}
+    app.state.music_genre_artist_cache = {}
+    threading.Thread(
+        target=_startup_prewarm_music_genres,
+        args=(startup_cfg if isinstance(startup_cfg, dict) else {},),
+        daemon=True,
+        name="music-genre-prewarm",
+    ).start()
     app.state.community_publish_last_summary = None
     app.state.community_publish_backfill_last_summary = None
     app.state.community_publish_task_lock = threading.Lock()
     app.state.community_publish_active_task = None
+    app.state.long_term_retry_last_summary = None
     app.state.resolution_sync_last_summary = None
     app.state.resolution_sync_task_lock = threading.Lock()
     app.state.resolution_sync_active_task = None
@@ -3013,6 +3259,7 @@ async def startup():
         app.state.paths,
         search_service=app.state.search_service,
     )
+    _apply_long_term_retry_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
 
     def _worker_runner():
         logging.info("Download worker started")
@@ -3031,6 +3278,13 @@ async def startup():
             _community_publish_schedule_tick,
             trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=20)),
             id=f"{COMMUNITY_PUBLISH_JOB_ID}_startup",
+            replace_existing=True,
+        )
+    if bool((startup_cfg if isinstance(startup_cfg, dict) else {}).get("long_term_retry_enabled", True)):
+        app.state.scheduler.add_job(
+            _long_term_retry_schedule_tick,
+            trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=35)),
+            id=f"{LONG_TERM_RETRY_JOB_ID}_startup",
             replace_existing=True,
         )
     resolution_cfg = _resolution_config(startup_cfg if isinstance(startup_cfg, dict) else {})
@@ -3152,6 +3406,9 @@ def _browse_root_map():
     library_exports_dir = "/library-exports"
     if os.path.isdir(library_exports_dir):
         roots["library_exports"] = os.path.realpath(library_exports_dir)
+    hostfs_dir = "/hostfs"
+    if os.path.isdir(hostfs_dir):
+        roots["host"] = hostfs_dir
     return roots
 
 
@@ -3185,14 +3442,22 @@ def _resolve_browse_path(root_base, rel_path):
     return normalized, abs_path
 
 
-def _list_browse_entries(base, directory, mode, ext, limit=None):
+def _hostfs_to_host_path(container_path: str) -> str:
+    """Translate a /hostfs/... container path back to the real host path."""
+    hostfs_root = os.environ.get("RETREIVR_HOSTFS_ROOT", "/Users").rstrip("/")
+    if container_path.startswith("/hostfs"):
+        return hostfs_root + container_path[len("/hostfs"):]
+    return container_path
+
+
+def _list_browse_entries(base, directory, mode, ext, limit=None, show_hidden=False):
     entries = []
     with os.scandir(directory) as it:
         for entry in it:
-            if entry.name.startswith("."):
-                continue
             is_dir = entry.is_dir(follow_symlinks=False)
             is_file = entry.is_file(follow_symlinks=False)
+            if entry.name.startswith(".") and not (show_hidden and is_file):
+                continue
             if mode == "dir":
                 if not is_dir:
                     continue
@@ -3282,6 +3547,77 @@ def _file_id_from_path(path):
         return None
     rel = os.path.relpath(full, DOWNLOADS_DIR)
     return _encode_file_id(rel)
+
+
+def _open_location_allowed_roots():
+    roots = {os.path.realpath(str(DOWNLOADS_DIR))}
+    browse_roots = getattr(app.state, "browse_roots", None)
+    if isinstance(browse_roots, dict):
+        for base in browse_roots.values():
+            if base:
+                roots.add(os.path.realpath(str(base)))
+    single_downloads_dir = getattr(getattr(app.state, "paths", None), "single_downloads_dir", "")
+    if single_downloads_dir:
+        roots.add(os.path.realpath(str(single_downloads_dir)))
+    return [root for root in roots if root]
+
+
+def _resolve_open_location_target(file_id: str | None, requested_path: str | None) -> tuple[str, bool]:
+    file_id_value = str(file_id or "").strip()
+    path_value = str(requested_path or "").strip()
+    candidate = ""
+    if file_id_value:
+        try:
+            rel = _decode_file_id(file_id_value)
+        except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
+            raise HTTPException(status_code=400, detail="Invalid file id") from exc
+        candidate = os.path.abspath(os.path.join(DOWNLOADS_DIR, rel))
+    elif path_value:
+        candidate = path_value if os.path.isabs(path_value) else os.path.join(DOWNLOADS_DIR, path_value)
+        candidate = os.path.abspath(candidate)
+    else:
+        raise HTTPException(status_code=400, detail="file_id or path is required")
+
+    allowed_roots = _open_location_allowed_roots()
+    if not _path_allowed(candidate, allowed_roots):
+        raise HTTPException(status_code=403, detail="Path not allowed")
+
+    if not os.path.exists(candidate):
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    if os.path.isfile(candidate):
+        return os.path.realpath(candidate), True
+    if os.path.isdir(candidate):
+        return os.path.realpath(candidate), False
+    raise HTTPException(status_code=404, detail="Path not found")
+
+
+def _launch_os_location(path: str, *, select_file: bool) -> None:
+    target = os.path.realpath(path)
+    if sys.platform == "darwin":
+        command = ["open", "-R", target] if select_file else ["open", target]
+    elif os.name == "nt":
+        normalized = os.path.normpath(target)
+        command = ["explorer", f"/select,{normalized}"] if select_file else ["explorer", normalized]
+    else:
+        open_target = os.path.dirname(target) if select_file else target
+        command = ["xdg-open", open_target]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"File manager command unavailable: {command[0]}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Failed to open location: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip() or f"exit code {completed.returncode}"
+        raise RuntimeError(f"Failed to open location: {detail}")
 
 
 def _iter_file(path, chunk_size=1024 * 1024):
@@ -3418,16 +3754,29 @@ def _run_immediate_download_to_client(
     resolved_media_type, resolved_media_intent, audio_mode = _resolve_direct_url_mode(
         media_type=media_type,
         media_intent=media_intent,
-        music_mode=False,
+        music_mode=bool(is_music_media_type(media_type)),
     )
-    normalized_format = _normalize_format(raw_final_format)
-    normalized_audio_format = _normalize_audio_format(raw_final_format)
+    effective_defaults = resolve_effective_download_settings(
+        config,
+        media_type=resolved_media_type,
+        destination=None,
+        final_format_override=raw_final_format,
+        fallback_destination=str(getattr(paths, "single_downloads_dir", "") or DOWNLOADS_DIR).strip() or str(DOWNLOADS_DIR),
+    )
+    normalized_format = _normalize_format(effective_defaults.get("final_format"))
+    _audio_only_formats = {"mp3", "m4a", "flac"}
     if audio_mode:
-        raise RuntimeError("music_client_delivery_unsupported")
-    else:
         final_format = (
-            normalized_format
-            or _normalize_format(config.get("final_format"))
+            _normalize_audio_format(effective_defaults.get("final_format"))
+            or _normalize_audio_format(config.get("audio_final_format"))
+            or "mp3"
+        )
+    else:
+        # For video mode, discard audio-only format overrides so they don't
+        # coerce the download into audio mode.
+        _video_format_candidate = normalized_format if normalized_format not in _audio_only_formats else None
+        final_format = (
+            _video_format_candidate
             or _normalize_format(config.get("video_final_format"))
             or "mkv"
         )
@@ -3465,6 +3814,70 @@ def _run_immediate_download_to_client(
             raise RuntimeError("yt_dlp_no_output")
 
         meta = extract_meta(info, fallback_url=url)
+        if audio_mode:
+            duration_sec = info.get("duration") if isinstance(info, dict) else None
+            duration_ms = int(float(duration_sec) * 1000) if duration_sec else None
+            binding_payload = {
+                "media_type": "music",
+                "media_intent": "music_track",
+                "artist": meta.get("artist") or meta.get("channel"),
+                "track": meta.get("track") or meta.get("title"),
+                "album": meta.get("album"),
+                "duration_ms": duration_ms,
+                "output_template": {
+                    "canonical_metadata": {
+                        "recording_mbid": meta.get("mb_recording_id") or meta.get("recording_mbid"),
+                        "mb_release_id": meta.get("mb_release_id"),
+                        "mb_release_group_id": meta.get("mb_release_group_id"),
+                        "album": meta.get("album"),
+                        "release_date": meta.get("release_date"),
+                        "track_number": meta.get("track_number"),
+                        "disc_number": meta.get("disc") or meta.get("disc_number"),
+                        "duration_ms": duration_ms,
+                        "artist": meta.get("artist") or meta.get("channel"),
+                        "track": meta.get("track") or meta.get("title"),
+                    }
+                },
+            }
+            mb_bound = False
+            try:
+                ensure_mb_bound_music_track(
+                    binding_payload,
+                    config=config,
+                    country_preference=str(config.get("country") or "US"),
+                )
+                mb_bound = True
+            except (ValueError, Exception) as _mb_exc:
+                logging.warning(
+                    json.dumps(
+                        safe_json(
+                            {
+                                "message": "mb_binding_skipped_fallback_to_source_tags",
+                                "job_id": job_id,
+                                "reason": str(_mb_exc),
+                            }
+                        )
+                    )
+                )
+            canonical = (
+                binding_payload.get("output_template", {}).get("canonical_metadata")
+                if isinstance(binding_payload.get("output_template", {}), dict)
+                else {}
+            )
+            if isinstance(canonical, dict):
+                meta["artist"] = canonical.get("artist") or meta.get("artist")
+                meta["album_artist"] = canonical.get("artist") or meta.get("album_artist") or meta.get("artist")
+                meta["album"] = canonical.get("album") or meta.get("album")
+                meta["track"] = canonical.get("track") or meta.get("track") or meta.get("title")
+                meta["release_date"] = canonical.get("release_date") or meta.get("release_date")
+                meta["track_number"] = canonical.get("track_number") or meta.get("track_number")
+                meta["disc_number"] = canonical.get("disc_number") or meta.get("disc_number")
+                meta["disc"] = canonical.get("disc_number") or meta.get("disc")
+                meta["recording_mbid"] = canonical.get("recording_mbid") or meta.get("recording_mbid")
+                meta["mb_recording_id"] = canonical.get("recording_mbid") or meta.get("mb_recording_id")
+                meta["mb_release_id"] = canonical.get("mb_release_id") or meta.get("mb_release_id")
+                meta["mb_release_group_id"] = canonical.get("mb_release_group_id") or meta.get("mb_release_group_id")
+
         video_id = meta.get("video_id") or job_id
         template = audio_template if audio_mode else filename_template
         final_path, _ = finalize_download_artifact(
@@ -3477,8 +3890,8 @@ def _run_immediate_download_to_client(
             template=template,
             paths=paths,
             config=config,
-            enforce_music_contract=False,
-            enqueue_audio_metadata=False,
+            enforce_music_contract=bool(audio_mode and str(resolved_media_intent or "").strip().lower() == "music_track" and mb_bound),
+            enqueue_audio_metadata=bool(audio_mode),
         )
 
         size = 0
@@ -3551,10 +3964,8 @@ def _run_direct_url_with_cli(
     if not url or not isinstance(url, str):
         raise ValueError("single_url is required")
 
-    # Match the queue path: resolve_dir handles empty/relative/absolute and rejects
-    # destinations that escape the base via inputs like "../etc".
-    dest_dir = resolve_dir((destination or "").strip(), paths.single_downloads_dir)
-    ensure_dir(dest_dir)
+    # Resolve destination using the same bounded path policy as queued jobs.
+    base_download_dir = str(getattr(paths, "single_downloads_dir", "") or DOWNLOADS_DIR).strip() or str(DOWNLOADS_DIR)
 
     # Direct URL runs are intentionally NOT persisted into the unified download_jobs queue.
     # They bypass adapters/worker and run yt-dlp CLI synchronously (reference behavior).
@@ -3584,6 +3995,15 @@ def _run_direct_url_with_cli(
         media_intent=media_intent,
         music_mode=music_mode,
     )
+    effective_defaults = resolve_effective_download_settings(
+        config,
+        media_type=cli_media_type,
+        destination=destination,
+        final_format_override=final_format_override,
+        fallback_destination=base_download_dir,
+    )
+    dest_dir = resolve_dir(effective_defaults.get("destination"), base_download_dir)
+    ensure_dir(dest_dir)
 
     logging.info(
         json.dumps(
@@ -3593,7 +4013,7 @@ def _run_direct_url_with_cli(
                     "url": url,
                     "job_id": job_id,
                     "destination": dest_dir,
-                    "final_format": final_format_override,
+                    "final_format": effective_defaults.get("final_format"),
                     "media_type": cli_media_type,
                     "media_intent": cli_media_intent,
                     "audio_mode": bool(audio_mode),
@@ -3604,18 +4024,20 @@ def _run_direct_url_with_cli(
     )
 
     try:
-        resolved_final_format = final_format_override
+        _audio_only_fmts = {"mp3", "m4a", "flac"}
         if audio_mode:
             resolved_final_format = (
-                _normalize_audio_format(final_format_override)
-                or _normalize_audio_format(config.get("music_final_format"))
+                _normalize_audio_format(effective_defaults.get("final_format"))
                 or _normalize_audio_format(config.get("audio_final_format"))
                 or "mp3"
             )
         else:
+            # For video mode, ignore audio-only format overrides so they don't
+            # coerce the download into an audio-only container.
+            _raw_fmt = _normalize_format(effective_defaults.get("final_format"))
+            _video_fmt = _raw_fmt if _raw_fmt not in _audio_only_fmts else None
             resolved_final_format = (
-                _normalize_format(final_format_override)
-                or _normalize_format(config.get("final_format"))
+                _video_fmt
                 or _normalize_format(config.get("video_final_format"))
                 or "mkv"
             )
@@ -3673,11 +4095,26 @@ def _run_direct_url_with_cli(
                     }
                 },
             }
-            ensure_mb_bound_music_track(
-                binding_payload,
-                config=config,
-                country_preference=str(config.get("country") or "US"),
-            )
+            mb_bound = False
+            try:
+                ensure_mb_bound_music_track(
+                    binding_payload,
+                    config=config,
+                    country_preference=str(config.get("country") or "US"),
+                )
+                mb_bound = True
+            except (ValueError, Exception) as _mb_exc:
+                logging.warning(
+                    json.dumps(
+                        safe_json(
+                            {
+                                "message": "mb_binding_skipped_fallback_to_source_tags",
+                                "job_id": job_id,
+                                "reason": str(_mb_exc),
+                            }
+                        )
+                    )
+                )
             canonical = (
                 binding_payload.get("output_template", {}).get("canonical_metadata")
                 if isinstance(binding_payload.get("output_template", {}), dict)
@@ -3686,16 +4123,16 @@ def _run_direct_url_with_cli(
             if isinstance(canonical, dict):
                 meta["artist"] = canonical.get("artist") or meta.get("artist")
                 meta["album_artist"] = canonical.get("artist") or meta.get("album_artist") or meta.get("artist")
-                meta["album"] = canonical.get("album")
+                meta["album"] = canonical.get("album") or meta.get("album")
                 meta["track"] = canonical.get("track") or meta.get("track") or meta.get("title")
-                meta["release_date"] = canonical.get("release_date")
-                meta["track_number"] = canonical.get("track_number")
-                meta["disc_number"] = canonical.get("disc_number")
-                meta["disc"] = canonical.get("disc_number")
-                meta["recording_mbid"] = canonical.get("recording_mbid")
-                meta["mb_recording_id"] = canonical.get("recording_mbid")
-                meta["mb_release_id"] = canonical.get("mb_release_id")
-                meta["mb_release_group_id"] = canonical.get("mb_release_group_id")
+                meta["release_date"] = canonical.get("release_date") or meta.get("release_date")
+                meta["track_number"] = canonical.get("track_number") or meta.get("track_number")
+                meta["disc_number"] = canonical.get("disc_number") or meta.get("disc_number")
+                meta["disc"] = canonical.get("disc_number") or meta.get("disc")
+                meta["recording_mbid"] = canonical.get("recording_mbid") or meta.get("recording_mbid")
+                meta["mb_recording_id"] = canonical.get("recording_mbid") or meta.get("mb_recording_id")
+                meta["mb_release_id"] = canonical.get("mb_release_id") or meta.get("mb_release_id")
+                meta["mb_release_group_id"] = canonical.get("mb_release_group_id") or meta.get("mb_release_group_id")
 
         filename_template = (
             config.get("audio_filename_template") or config.get("music_filename_template")
@@ -3712,7 +4149,7 @@ def _run_direct_url_with_cli(
             template=filename_template,
             paths=paths,
             config=config,
-            enforce_music_contract=bool(audio_mode and str(cli_media_intent or "").strip().lower() == "music_track"),
+            enforce_music_contract=bool(audio_mode and str(cli_media_intent or "").strip().lower() == "music_track" and mb_bound),
             enqueue_audio_metadata=bool(audio_mode),
         )
         moved = [final_path]
@@ -4288,12 +4725,6 @@ async def _start_run_with_config(
 
         async def _runner():
             effective_final_format_override = final_format_override
-            if effective_final_format_override is None:
-                effective_final_format_override = (
-                    config.get("default_video_format")
-                    or config.get("final_format")
-                    or "mkv"
-                )
             try:
                 logging.info(
                     "Run runner entered run_id=%s source=%s single_url=%s playlist_id=%s",
@@ -4943,6 +5374,41 @@ def _community_publish_schedule_tick() -> None:
         logger.exception("Community publish worker tick failed")
 
 
+def _long_term_retry_schedule_tick() -> None:
+    worker_engine = getattr(app.state, "worker_engine", None)
+    if worker_engine is None:
+        return
+    config = get_loaded_config() or {}
+    if not bool((config if isinstance(config, dict) else {}).get("long_term_retry_enabled", True)):
+        return
+    try:
+        summary = worker_engine.process_long_term_retry_once()
+        logger.info(
+            "Long-term retry tick status=%s claimed=%s requeued=%s abandoned=%s errors=%s",
+            summary.get("status"),
+            summary.get("claimed"),
+            summary.get("requeued"),
+            summary.get("abandoned"),
+            summary.get("errors"),
+        )
+        app.state.long_term_retry_last_summary = summary
+    except Exception:
+        logger.exception("Long-term retry tick failed")
+
+
+def _get_next_long_term_retry_run_iso() -> str | None:
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return None
+    job = scheduler.get_job(LONG_TERM_RETRY_JOB_ID)
+    if not job or not job.next_run_time:
+        return None
+    next_run = job.next_run_time
+    if next_run.tzinfo is None:
+        next_run = next_run.replace(tzinfo=timezone.utc)
+    return next_run.astimezone(timezone.utc).isoformat()
+
+
 def _get_next_community_publish_run_iso() -> str | None:
     scheduler = app.state.scheduler
     if not scheduler:
@@ -5163,6 +5629,38 @@ def _apply_community_publish_schedule(config: dict):
         misfire_grace_time=60,
     )
     logger.info("Community publish worker enabled (interval=%s min)", interval)
+
+
+def _apply_long_term_retry_schedule(config: dict):
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return
+    try:
+        scheduler.remove_job(LONG_TERM_RETRY_JOB_ID)
+    except Exception:
+        pass
+
+    normalized = config if isinstance(config, dict) else {}
+    if not bool(normalized.get("long_term_retry_enabled", True)):
+        logger.info("Long-term retry disabled by config")
+        return
+    interval = normalized.get("long_term_retry_poll_minutes", 60)
+    try:
+        interval = int(interval)
+    except (TypeError, ValueError):
+        interval = 60
+    interval = max(1, interval)
+    start_date = datetime.now(timezone.utc) + timedelta(minutes=1)
+    scheduler.add_job(
+        _long_term_retry_schedule_tick,
+        trigger=IntervalTrigger(minutes=interval, start_date=start_date),
+        id=LONG_TERM_RETRY_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=60,
+    )
+    logger.info("Long-term retry enabled (interval=%s min)", interval)
 
 
 def _apply_resolution_cache_sync_schedule(config: dict):
@@ -5729,7 +6227,7 @@ async def _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batc
     logging.debug("Watcher polled playlist_id=%s items=%s", playlist_id, len(videos))
 
     with sqlite3.connect(app.state.paths.db_path) as conn:
-        if subscribe_mode and not playlist_has_seen(conn, playlist_id):
+        if subscribe_mode and not playlist_has_seen(conn, playlist_id) and not watch.get("last_checked_at"):
             # First watcher pass for subscribe mode marks items as seen without downloading.
             for entry in videos:
                 vid = entry.get("videoId") or entry.get("id")
@@ -6927,12 +7425,24 @@ async def api_update_ytdlp():
 
 @app.get("/api/paths")
 async def api_paths():
+    import pathlib
+    host_browse_start = ""
+    if os.path.isdir("/hostfs"):
+        hostfs_root = os.environ.get("RETREIVR_HOSTFS_ROOT", "").rstrip("/") or "/"
+        host_workspace = os.environ.get("RETREIVR_HOST_WORKSPACE", "").strip()
+        if host_workspace:
+            if hostfs_root == "/":
+                host_browse_start = host_workspace.lstrip("/")
+            elif host_workspace.startswith(hostfs_root + "/"):
+                host_browse_start = host_workspace[len(hostfs_root) + 1:]
     return {
         "config_dir": CONFIG_DIR,
         "data_dir": DATA_DIR,
         "downloads_dir": DOWNLOADS_DIR,
         "log_dir": LOG_DIR,
         "tokens_dir": TOKENS_DIR,
+        "home_dir": str(pathlib.Path.home()),
+        "host_browse_start": host_browse_start,
         "browse_roots": app.state.browse_roots,
     }
 
@@ -6999,7 +7509,8 @@ async def api_get_config_path():
 
 
 @app.put("/api/config/path")
-async def api_put_config_path(payload: ConfigPathRequest):
+async def api_put_config_path(request: Request, payload: ConfigPathRequest):
+    _require_admin_session(request)
     path = payload.path.strip()
     if not path:
         raise HTTPException(status_code=400, detail="Config path is required")
@@ -7032,6 +7543,9 @@ async def api_run(request: RunRequest):
         raise HTTPException(status_code=400, detail="Provide either single_url or playlist_id, not both")
     if request.single_url and _looks_like_playlist_url(request.single_url):
         raise HTTPException(status_code=400, detail=DIRECT_URL_PLAYLIST_ERROR)
+    requested_media_mode = str(request.media_mode or "").strip().lower()
+    if request.single_url and (requested_media_mode == "music" or bool(request.music_mode)):
+        raise HTTPException(status_code=400, detail=DIRECT_URL_MUSIC_PAGE_ERROR)
     if request.playlist_account:
         accounts = (config.get("accounts") or {}) if isinstance(config, dict) else {}
         if request.playlist_account not in accounts:
@@ -7080,25 +7594,58 @@ async def api_run(request: RunRequest):
     return {"run_id": app.state.run_id, "status": "started"}
 
 
-@app.post("/api/direct_url_preview")
-async def api_direct_url_preview(request: DirectUrlPreviewRequest):
+def _normalize_direct_url_media_mode(value: str | None) -> str:
+    normalized = str(value or "video").strip().lower() or "video"
+    if normalized not in {"video", "music", "music_video"}:
+        raise HTTPException(status_code=400, detail="media_mode must be one of: video, music, music_video")
+    return normalized
+
+
+def _build_home_direct_resolve_payload(*, url: str, preview: dict, playlist_id: str | None = None) -> dict:
+    title = str(preview.get("playlist_title") or preview.get("title") or url).strip() or url
+    uploader = str(preview.get("uploader") or "").strip() or None
+    duration_sec = preview.get("duration_sec")
+    candidate = {
+        "title": title,
+        "artist_detected": uploader,
+        "album_detected": None,
+        "track_detected": None,
+        "final_score": None,
+        "source": str(preview.get("source") or "direct").strip() or "direct",
+        "url": str(preview.get("url") or url).strip() or url,
+        "thumbnail_url": str(preview.get("thumbnail_url") or "").strip() or None,
+        "allow_download": True,
+        "job_status": "",
+        "duration_sec": duration_sec if isinstance(duration_sec, (int, float)) else None,
+        "playlist_id": str(playlist_id or "").strip() or None,
+    }
+    item = {
+        "status": "candidate_found",
+        "allow_download": True,
+        "media_type": "video",
+        "artist": uploader,
+        "album": None,
+        "track": title,
+        "duration_sec": duration_sec if isinstance(duration_sec, (int, float)) else None,
+        "transient_kind": "playlist_url" if playlist_id else "direct_url",
+        "source_url": candidate["url"],
+    }
+    return {"home_item": item, "home_candidates": [candidate]}
+
+@app.post("/api/direct-url/resolve")
+async def api_direct_url_resolve(request: DirectUrlResolveRequest):
     url = request.url.strip() if request.url else ""
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
-    if _looks_like_playlist_url(url):
-        raise HTTPException(status_code=400, detail=DIRECT_URL_PLAYLIST_ERROR)
     if not _is_http_url(url):
         raise HTTPException(
             status_code=400,
             detail="This search result is not directly downloadable."
         )
-    try:
-        normalize_search_payload(
-            {"query": url, "search_only": True},
-            default_sources=list(getattr(app.state.search_service, "adapters", {}).keys()),
-        )
-    except ValueError:
-        pass
+    media_mode = _normalize_direct_url_media_mode(request.media_mode)
+    if media_mode == "music":
+        raise HTTPException(status_code=400, detail=DIRECT_URL_MUSIC_PAGE_ERROR)
+    playlist_id = extract_playlist_id(url) if _looks_like_playlist_url(url) else None
     runtime_config = get_loaded_config() or _read_config_or_404()
     if not runtime_config:
         raise RuntimeError("search_missing_runtime_config")
@@ -7114,52 +7661,28 @@ async def api_direct_url_preview(request: DirectUrlPreviewRequest):
             sort_keys=True,
         )
     )
+    if playlist_id:
+        preview, _fallback_error = get_playlist_preview_fallback(
+            playlist_id,
+            cookie_file=resolve_cookie_file(runtime_config),
+        )
+        resolved_preview = {
+            "playlist_title": str((preview or {}).get("playlist_title") or f"YouTube Playlist ({playlist_id})").strip() or f"YouTube Playlist ({playlist_id})",
+            "thumbnail_url": str((preview or {}).get("thumbnail_url") or "").strip() or None,
+            "first_video_id": str((preview or {}).get("first_video_id") or "").strip() or None,
+            "url": url,
+            "source": "youtube",
+        }
+        payload = _build_home_direct_resolve_payload(url=url, preview=resolved_preview, playlist_id=playlist_id)
+        return safe_json({"result_type": "home_result", "playlist_id": playlist_id, "preview": resolved_preview, **payload})
     try:
         preview = preview_direct_url(url, runtime_config)
     except Exception as exc:
-        logging.exception("Direct URL preview failed: %s", exc)
+        logging.exception("Direct URL resolve failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return safe_json({"preview": preview})
-
-
-@app.get("/api/playlist/preview")
-async def api_playlist_preview(playlist_id: str = Query(..., min_length=2, max_length=200)):
-    normalized_playlist_id = extract_playlist_id(playlist_id) or str(playlist_id or "").strip()
-    if not normalized_playlist_id:
-        raise HTTPException(status_code=400, detail="playlist_id_required")
-    config = get_loaded_config() or _read_config_or_404()
-    cookie_file = resolve_cookie_file(config)
-    preview, _fallback_error = get_playlist_preview_fallback(
-        normalized_playlist_id,
-        cookie_file=cookie_file,
-    )
-    first_video_id = str((preview or {}).get("first_video_id") or "").strip()
-    thumbnail_url = str((preview or {}).get("thumbnail_url") or "").strip() or None
-    playlist_title = str((preview or {}).get("playlist_title") or "").strip() or None
-    if not first_video_id:
-        videos, _videos_fallback_error = get_playlist_videos_fallback(
-            normalized_playlist_id,
-            cookie_file=cookie_file,
-        )
-        if isinstance(videos, list):
-            for entry in videos:
-                if not isinstance(entry, dict):
-                    continue
-                candidate = str(entry.get("videoId") or "").strip()
-                if candidate:
-                    first_video_id = candidate
-                    break
-        if not thumbnail_url and first_video_id:
-            thumbnail_url = f"https://i.ytimg.com/vi/{first_video_id}/hqdefault.jpg"
-    return safe_json(
-        {
-            "playlist_id": normalized_playlist_id,
-            "playlist_title": playlist_title,
-            "first_video_id": first_video_id or None,
-            "thumbnail_url": thumbnail_url,
-        }
-    )
-
+    preview["url"] = str(preview.get("url") or url).strip() or url
+    payload = _build_home_direct_resolve_payload(url=url, preview=preview)
+    return safe_json({"result_type": "home_result", "preview": preview, **payload})
 
 @app.post("/api/cancel")
 async def api_cancel():
@@ -7913,10 +8436,7 @@ def _select_release_with_tracks(mb, release_group_mbid: str, release_dicts: list
             continue
         try:
             release_payload = mb._call_with_retry(  # noqa: SLF001
-                lambda rid=release_mbid: musicbrainzngs.get_release_by_id(
-                    rid,
-                    includes=release_includes,
-                )
+                lambda rid=release_mbid: _mb_get_release_by_id_raw(rid, includes=release_includes)
             )
         except Exception:
             logger.exception("[MUSIC] release fetch failed release_group=%s release=%s", release_group_mbid, release_mbid)
@@ -7974,7 +8494,7 @@ def download_full_album(data: dict):
     mb = _mb_service()
     try:
         release_group_payload = mb._call_with_retry(  # noqa: SLF001
-            lambda: musicbrainzngs.get_release_group_by_id(
+            lambda: _mb_get_release_group_by_id_raw(
                 release_group_mbid,
                 # release-group does not accept "genres" include in musicbrainzngs.
                 includes=["releases", "tags"],
@@ -8367,10 +8887,7 @@ def music_album_tracks(
     mb = _mb_service()
     try:
         release_group_payload = mb._call_with_retry(  # noqa: SLF001
-            lambda: musicbrainzngs.get_release_group_by_id(
-                group_id,
-                includes=["releases"],
-            )
+            lambda: _mb_get_release_group_by_id_raw(group_id, includes=["releases"])
         )
     except Exception:
         logging.exception("music_album_tracks release-group fetch failed release_group_mbid=%s", group_id)
@@ -8514,6 +9031,137 @@ def music_search(
     )
 
 
+@app.get("/api/music/genres/{genre}/artists")
+def music_genre_artists(
+    genre: str,
+    limit: int = Query(24, ge=1, le=60),
+    offset: int = Query(0, ge=0),
+):
+    genre_value = str(genre or "").strip()
+    if not genre_value:
+        raise HTTPException(status_code=400, detail="genre required")
+    stale_items: list[dict[str, Any]] | None = None
+    try:
+        normalized_genre = _normalize_music_genre_key(genre_value)
+        normalized_limit = int(limit)
+        normalized_offset = int(offset)
+        cache_key = f"{normalized_genre}:{normalized_limit}:{normalized_offset}"
+        cache = getattr(app.state, "music_genre_artist_cache", None)
+        now = time.time()
+        persisted_payload = _get_music_artwork_cache_entry("genre_artists", cache_key) or {}
+        persisted_updated_at = float(persisted_payload.get("updated_at") or 0)
+        persisted_items = persisted_payload.get("artists")
+        if (
+            isinstance(persisted_items, list)
+            and persisted_updated_at > 0
+            and (now - persisted_updated_at) < MUSIC_GENRE_ARTIST_CACHE_TTL_SECONDS
+        ):
+            if isinstance(cache, dict):
+                cache[cache_key] = {
+                    "cached_at": now,
+                    "artists": persisted_items,
+                }
+            return {
+                "genre": genre_value,
+                "artists": persisted_items,
+                "cached": True,
+            }
+        if isinstance(persisted_items, list) and persisted_items:
+            stale_items = persisted_items
+        if isinstance(cache, dict):
+            cached = cache.get(cache_key)
+            if isinstance(cached, dict):
+                cached_at = float(cached.get("cached_at") or 0)
+                cached_items = cached.get("artists")
+                if now - cached_at < MUSIC_GENRE_ARTIST_CACHE_TTL_SECONDS and isinstance(cached_items, list):
+                    return {
+                        "genre": genre_value,
+                        "artists": cached_items,
+                        "cached": True,
+                    }
+                if isinstance(cached_items, list) and cached_items:
+                    stale_items = cached_items
+        aliases = _music_genre_aliases(genre_value)[:MUSIC_GENRE_MAX_ALIAS_SEARCHES]
+        per_alias_limit = max(
+            8,
+            min(
+                16,
+                int(math.ceil(normalized_limit / max(1, len(aliases)))) * 2,
+            ),
+        )
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for alias_index, alias in enumerate(aliases):
+            alias_results = search_artists_by_genre(
+                genre=alias,
+                limit=per_alias_limit,
+                offset=normalized_offset if alias_index == 0 else 0,
+            )
+            for artist in alias_results:
+                if not isinstance(artist, dict):
+                    continue
+                dedupe_key = str(artist.get("artist_mbid") or artist.get("name") or "").strip().lower()
+                if not dedupe_key or dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                merged.append(
+                    {
+                        **artist,
+                        "genre": genre_value,
+                    }
+                )
+            if len(merged) >= max(MUSIC_GENRE_FALLBACK_CANDIDATE_POOL, normalized_limit * 2):
+                break
+        if not merged:
+            if stale_items:
+                return {
+                    "genre": genre_value,
+                    "artists": stale_items[:normalized_limit],
+                    "cached": True,
+                    "degraded": True,
+                }
+            return {
+                "genre": genre_value,
+                "artists": [],
+                "cached": False,
+                "degraded": True,
+            }
+        artists = _best_effort_rank_genre_artists(merged)[:normalized_limit]
+        if isinstance(cache, dict):
+            cache[cache_key] = {
+                "cached_at": now,
+                "artists": artists,
+            }
+        _set_music_artwork_cache_entry(
+            "genre_artists",
+            cache_key,
+            {
+                "updated_at": now,
+                "artists": artists,
+            },
+        )
+        return {
+            "genre": genre_value,
+            "artists": artists,
+            "cached": False,
+        }
+    except Exception:
+        logging.exception("music_genre_artists failed genre=%s", genre_value)
+        if stale_items:
+            return {
+                "genre": genre_value,
+                "artists": stale_items[:normalized_limit],
+                "cached": True,
+                "degraded": True,
+            }
+        return {
+            "genre": genre_value,
+            "artists": [],
+            "cached": False,
+            "degraded": True,
+        }
+
+
 @app.post("/api/music/video/availability")
 def music_video_availability(data: dict = Body(...)):
     payload = data if isinstance(data, dict) else {}
@@ -8573,14 +9221,11 @@ def music_video_availability(data: dict = Body(...)):
     if include_youtube_probe:
         precheck = _quick_youtube_mv_precheck(artist, track, album=album)
         signals["youtube_precheck"] = precheck
-        _log_event(
-            logging.INFO,
-            "music_video_precheck_result",
-            recording_mbid=recording_mbid or None,
-            matched=bool(precheck.get("matched")) if isinstance(precheck, dict) else False,
-            reason=(precheck.get("reason") if isinstance(precheck, dict) else None),
-            title=(precheck.get("title") if isinstance(precheck, dict) else None),
-            query=(precheck.get("query") if isinstance(precheck, dict) else None),
+        logging.info(
+            "music_video_precheck_result recording_mbid=%s matched=%s reason=%s",
+            recording_mbid or None,
+            bool(precheck.get("matched")) if isinstance(precheck, dict) else False,
+            precheck.get("reason") if isinstance(precheck, dict) else None,
         )
         if isinstance(precheck, dict) and bool(precheck.get("matched")):
             score += 1
@@ -8636,10 +9281,115 @@ def music_preview(data: dict = Body(...)):
         "source_url": source_url,
         "title": title,
         "resolved_via": str(preview.get("resolved_via") or "").strip() or None,
+        "video_id": str(preview.get("video_id") or extract_video_id(source_url) or "").strip() or None,
     }
     if media_mode != "music_video":
         response["stream_url"] = f"/api/music/preview/stream?url={quote(source_url, safe='')}"
     return response
+
+
+@app.post("/api/music/runtime-resolution")
+def music_runtime_resolution(data: dict = Body(...)):
+    payload = data if isinstance(data, dict) else {}
+    recording_mbid = str(payload.get("recording_mbid") or "").strip().lower()
+    source = str(payload.get("source") or "").strip().lower()
+    source_url = str(payload.get("source_url") or "").strip()
+    if not recording_mbid or not source_url or source not in {"youtube", "youtube_music"}:
+        raise HTTPException(status_code=400, detail="recording_mbid, source_url, and youtube-family source required")
+    source_id = str(payload.get("source_id") or payload.get("video_id") or extract_video_id(source_url) or "").strip() or None
+    raw_payload = payload.get("raw_payload") if isinstance(payload.get("raw_payload"), dict) else {}
+    if not raw_payload:
+        raw_payload = {
+            "artist": str(payload.get("artist") or "").strip() or None,
+            "track": str(payload.get("track") or "").strip() or None,
+            "album": str(payload.get("album") or "").strip() or None,
+            "video_id": source_id,
+            "source": source,
+            "resolved_via": str(payload.get("resolved_via") or "").strip() or None,
+        }
+    result = upsert_local_acquired_mapping(
+        app.state.search_db_path,
+        mbid=recording_mbid,
+        source_url=source_url,
+        source=source,
+        node_id="runtime_playback",
+        resolution_method="runtime_playback",
+        source_id=source_id,
+        raw_payload=raw_payload,
+    )
+    publish_mode = "off"
+    publish_status = "skipped"
+    publish_reason = "community_publish_disabled"
+    publish_outbox_path: str | None = None
+    try:
+        cfg = apply_community_publish_defaults(app.state.config if isinstance(app.state.config, dict) else {})
+        publish_mode = str(cfg.get("community_cache_publish_mode") or "off").strip().lower() or "off"
+        if publish_mode == "write_outbox":
+            selected_score_raw = payload.get("selected_score")
+            try:
+                selected_score = float(selected_score_raw)
+            except Exception:
+                selected_score = 1.0
+            selected_score = max(0.0, min(1.0, selected_score))
+            proposal = {
+                "schema_version": 1,
+                "proposal_type": "community_cache_publish_proposal",
+                "proposal_id": uuid4().hex,
+                "emitted_at": utc_now(),
+                "recording_mbid": recording_mbid,
+                "release_mbid": str(payload.get("release_mbid") or payload.get("mb_release_id") or "").strip() or None,
+                "release_group_mbid": str(payload.get("release_group_mbid") or payload.get("mb_release_group_id") or "").strip() or None,
+                "video_id": source_id,
+                "source": normalize_community_publish_source(source),
+                "candidate_url": source_url,
+                "candidate_id": str(payload.get("candidate_id") or source_id or "").strip() or None,
+                "duration_ms": payload.get("duration_ms"),
+                "selected_score": selected_score,
+                "duration_delta_ms": payload.get("duration_delta_ms"),
+                "final_path": None,
+                "retreivr_version": str(payload.get("retreivr_version") or "runtime_playback"),
+            }
+            outbox_result = append_publish_proposal_to_outbox(
+                config=cfg,
+                db_path=app.state.search_db_path,
+                proposal=proposal,
+            )
+            publish_status = str(outbox_result.get("status") or "error")
+            publish_reason = str(outbox_result.get("reason") or "outbox_append_failed")
+            publish_outbox_path = str(outbox_result.get("outbox_path") or "").strip() or None
+        elif publish_mode == "dry_run":
+            publish_status = "dry_run"
+            publish_reason = "community_publish_dry_run"
+        else:
+            publish_status = "skipped"
+            publish_reason = "community_publish_off"
+    except Exception as exc:
+        publish_status = "error"
+        publish_reason = f"community_publish_runtime_error:{exc}"
+        logging.warning("music_runtime_resolution community publish emit failed mbid=%s error=%s", recording_mbid, exc)
+    logging.info(
+        "music_runtime_resolution_recorded recording_mbid=%s source=%s source_url=%s resolved_via=%s status=%s publish_mode=%s publish_status=%s publish_reason=%s",
+        recording_mbid,
+        source,
+        source_url,
+        str(raw_payload.get("resolved_via") or payload.get("resolved_via") or "runtime_playback"),
+        str((result or {}).get("status") or "updated"),
+        publish_mode,
+        publish_status,
+        publish_reason,
+    )
+    return safe_json(
+        {
+            "status": "ok",
+            "result": result,
+            "community_publish": {
+                "mode": publish_mode,
+                "status": publish_status,
+                "reason": publish_reason,
+                "outbox_path": publish_outbox_path,
+            },
+        }
+    )
 
 
 @app.get("/api/music/preview/stream")
@@ -8873,6 +9623,109 @@ def music_album_art(album_id: str):
             "cached_at": now,
         }
     return {"status": "ok", "cover_url": cover_url}
+
+
+@app.get("/api/music/artist/art/{artist_mbid}")
+def music_artist_art(artist_mbid: str):
+    artist_key = str(artist_mbid or "").strip()
+    if not artist_key:
+        raise HTTPException(status_code=400, detail="artist_mbid is required")
+    payload = _get_music_artwork_cache_entry("artist", artist_key) or {}
+    return {
+        "status": "ok",
+        "cover_url": payload.get("cover_url"),
+        "updated_at": payload.get("updated_at"),
+    }
+
+
+@app.put("/api/music/artist/art/{artist_mbid}")
+def music_artist_art_update(artist_mbid: str, payload: dict = Body(...)):
+    artist_key = str(artist_mbid or "").strip()
+    if not artist_key:
+        raise HTTPException(status_code=400, detail="artist_mbid is required")
+    cover_url = str((payload or {}).get("cover_url") or "").strip()
+    if not cover_url:
+        raise HTTPException(status_code=400, detail="cover_url is required")
+    _set_music_artwork_cache_entry("artist", artist_key, {"cover_url": cover_url})
+    return {"status": "ok", "cover_url": cover_url}
+
+
+@app.get("/api/music/genre/art/{genre}")
+def music_genre_art(genre: str):
+    genre_key = str(genre or "").strip().lower()
+    if not genre_key:
+        raise HTTPException(status_code=400, detail="genre is required")
+    payload = _get_music_artwork_cache_entry("genre", genre_key) or {}
+    cover_urls = payload.get("cover_urls")
+    if not isinstance(cover_urls, list):
+        cover_urls = []
+    return {
+        "status": "ok",
+        "cover_urls": cover_urls,
+        "updated_at": payload.get("updated_at"),
+    }
+
+
+@app.put("/api/music/genre/art/{genre}")
+def music_genre_art_update(genre: str, payload: dict = Body(...)):
+    genre_key = str(genre or "").strip().lower()
+    if not genre_key:
+        raise HTTPException(status_code=400, detail="genre is required")
+    cover_urls = (payload or {}).get("cover_urls")
+    if not isinstance(cover_urls, list):
+        raise HTTPException(status_code=400, detail="cover_urls must be a list")
+    normalized = []
+    seen = set()
+    for value in cover_urls:
+        url = str(value or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        normalized.append(url)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="cover_urls must contain at least one URL")
+    _set_music_artwork_cache_entry("genre", genre_key, {"cover_urls": normalized[:4]})
+    return {"status": "ok", "cover_urls": normalized[:4]}
+
+
+@app.get("/api/arr/genre/art/{kind}/{genre_id}")
+def arr_genre_art(kind: str, genre_id: int):
+    normalized_kind = str(kind or "").strip().lower()
+    if normalized_kind not in {"movie", "tv"}:
+        raise HTTPException(status_code=400, detail="kind must be movie or tv")
+    cache_key = f"{normalized_kind}:{int(genre_id)}"
+    payload = _get_music_artwork_cache_entry("arr_genre", cache_key) or {}
+    cover_urls = payload.get("cover_urls")
+    if not isinstance(cover_urls, list):
+        cover_urls = []
+    return {
+        "status": "ok",
+        "cover_urls": cover_urls,
+        "updated_at": payload.get("updated_at"),
+    }
+
+
+@app.put("/api/arr/genre/art/{kind}/{genre_id}")
+def arr_genre_art_update(kind: str, genre_id: int, payload: dict = Body(...)):
+    normalized_kind = str(kind or "").strip().lower()
+    if normalized_kind not in {"movie", "tv"}:
+        raise HTTPException(status_code=400, detail="kind must be movie or tv")
+    cover_urls = (payload or {}).get("cover_urls")
+    if not isinstance(cover_urls, list):
+        raise HTTPException(status_code=400, detail="cover_urls must be a list")
+    normalized = []
+    seen = set()
+    for value in cover_urls:
+        url = str(value or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        normalized.append(url)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="cover_urls must contain at least one URL")
+    cache_key = f"{normalized_kind}:{int(genre_id)}"
+    _set_music_artwork_cache_entry("arr_genre", cache_key, {"cover_urls": normalized[:4]})
+    return {"status": "ok", "cover_urls": normalized[:4]}
 
 
 @app.post("/api/spotify/playlists/import")
@@ -9554,7 +10407,7 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
         cur = conn.cursor()
         query = (
             "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, updated_at, last_error, output_template, "
-            "progress_downloaded_bytes, progress_total_bytes, progress_percent, progress_speed_bps, progress_eta_seconds, progress_updated_at "
+            "progress_downloaded_bytes, progress_total_bytes, progress_percent, progress_speed_bps, progress_eta_seconds, progress_updated_at, file_path "
             "FROM download_jobs"
         )
         params = []
@@ -9625,12 +10478,14 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                 "progress_downloaded_bytes": row[12],
                 "progress_total_bytes": row[13],
                 "progress_percent": row[14],
-                "progress_speed_bps": row[15],
-                "progress_eta_seconds": row[16],
-                "progress_updated_at": row[17],
-            }
-            for row in cur.fetchall()
-        ]
+                    "progress_speed_bps": row[15],
+                    "progress_eta_seconds": row[16],
+                    "progress_updated_at": row[17],
+                    "file_path": row[18],
+                    "file_id": _file_id_from_path(row[18]) if row[18] else None,
+                }
+                for row in cur.fetchall()
+            ]
     finally:
         conn.close()
     return safe_json({"jobs": rows})
@@ -9716,7 +10571,11 @@ async def api_review_queue_preview(item_id: str, request: Request):
     if not file_path or not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="Preview file not found")
     allowed_roots = [app.state.paths.review_queue_dir, DOWNLOADS_DIR]
-    if not _path_allowed(file_path, allowed_roots):
+    is_tag_repair = str(item.get("media_intent") or "") == "music_tag_repair_review"
+    if not _path_allowed(file_path, allowed_roots) and not (
+        is_tag_repair
+        and is_local_player_path_allowed(_current_loaded_config(), file_path, allowed_extensions=AUDIO_EXTENSIONS)
+    ):
         raise HTTPException(status_code=403, detail="Preview path not allowed")
     return build_media_file_response(
         request,
@@ -9818,7 +10677,8 @@ async def api_get_config():
 
 
 @app.put("/api/config")
-async def api_put_config(payload: dict = Body(...)):
+async def api_put_config(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
     payload = _strip_deprecated_fields(payload)
     errors = validate_config(payload)
     # Saving config should not require Spotify OAuth client credentials.
@@ -9838,6 +10698,1047 @@ async def api_put_config(payload: dict = Body(...)):
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
+    _persist_config_payload(payload)
+
+    if "schedule" in payload:
+        schedule = _merge_schedule_config(payload.get("schedule"))
+        app.state.schedule_config = schedule
+        _apply_schedule_config(schedule)
+    _apply_spotify_schedule(payload or {})
+    _apply_community_publish_schedule(payload or {})
+    _apply_resolution_cache_sync_schedule(payload or {})
+    _apply_long_term_retry_schedule(payload or {})
+    policy = normalize_watch_policy(payload)
+    if getattr(normalize_watch_policy, "valid", True):
+        app.state.watch_policy = policy
+        _apply_watch_policy(policy)
+        app.state.watch_config_cache = payload
+    enable_watcher = _config_watcher_enabled(payload)
+    if enable_watcher:
+        _enable_watcher_runtime()
+    else:
+        await _disable_watcher_runtime("config updated (enable_watcher=false)")
+    return {"status": "updated"}
+
+
+@app.get("/api/config/ui-preferences")
+async def api_get_ui_preferences():
+    cfg = _current_loaded_config()
+    prefs = cfg.get("ui_preferences") if isinstance(cfg.get("ui_preferences"), dict) else {}
+    return safe_json(prefs)
+
+
+@app.put("/api/config/ui-preferences")
+async def api_put_ui_preferences(payload: dict = Body(...)):
+    current = dict(_current_loaded_config() or _read_config_or_404())
+    existing = current.get("ui_preferences") if isinstance(current.get("ui_preferences"), dict) else {}
+    next_prefs = {**existing}
+    for key in (
+        "home_video_card_size",
+        "home_video_sort",
+        "music_card_size",
+        "music_sort",
+        "music_hide_suggested_genres",
+        "music_hidden_genres",
+        "movies_tv_card_size",
+        "movies_tv_sort",
+    ):
+        if key in payload:
+            next_prefs[key] = payload.get(key)
+    current["ui_preferences"] = next_prefs
+    errors = validate_config(current)
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+    _persist_config_payload(current)
+    return safe_json(current["ui_preferences"])
+
+
+@app.get("/api/admin/security/status")
+async def api_admin_security_status(request: Request):
+    cfg = _current_loaded_config()
+    return safe_json(_admin_security_status(cfg, request=request))
+
+
+@app.post("/api/admin/pin/verify")
+async def api_admin_pin_verify(payload: dict = Body(...)):
+    cfg = _current_loaded_config()
+    security = _security_config(cfg)
+    if not security.get("admin_pin_enabled"):
+        raise HTTPException(status_code=400, detail={"error": "admin_pin_disabled"})
+    pin = str(payload.get("pin") or "").strip()
+    if not _verify_admin_pin(pin, security.get("admin_pin_hash") or ""):
+        raise HTTPException(status_code=403, detail={"error": "admin_pin_invalid", "message": "PIN did not match."})
+    token, expires_at = _issue_admin_session(cfg)
+    return safe_json({"status": "verified", "token": token, "expires_at": expires_at, **_admin_security_status(cfg)})
+
+
+@app.post("/api/admin/pin/configure")
+async def api_admin_pin_configure(request: Request, payload: dict = Body(...)):
+    cfg = dict(_current_loaded_config())
+    security = _security_config(cfg)
+    desired_enabled = bool(payload.get("admin_pin_enabled"))
+    session_minutes = int(payload.get("admin_pin_session_minutes") or security.get("admin_pin_session_minutes") or 30)
+    session_minutes = max(1, min(1440, session_minutes))
+    current_pin = str(payload.get("current_pin") or "").strip()
+    new_pin = str(payload.get("new_pin") or "").strip()
+    existing_enabled = bool(security.get("admin_pin_enabled"))
+    if existing_enabled:
+        if not (_has_valid_admin_session(_admin_token_from_request(request)) or _verify_admin_pin(current_pin, security.get("admin_pin_hash") or "")):
+            raise HTTPException(status_code=403, detail={"error": "admin_pin_required", "message": "Current admin PIN required."})
+    if desired_enabled and not existing_enabled and not new_pin:
+        raise HTTPException(status_code=400, detail={"error": "new_pin_required"})
+    next_security = dict(cfg.get("security") or {})
+    next_security["admin_pin_enabled"] = desired_enabled
+    next_security["admin_pin_session_minutes"] = session_minutes
+    if desired_enabled:
+        next_security["admin_pin_hash"] = _hash_admin_pin(new_pin) if new_pin else str(security.get("admin_pin_hash") or "")
+    else:
+        next_security["admin_pin_hash"] = ""
+    cfg["security"] = next_security
+    _persist_config_payload(cfg)
+    if desired_enabled:
+        token, expires_at = _issue_admin_session(cfg)
+        return safe_json({"status": "updated", "token": token, "expires_at": expires_at, **_admin_security_status(cfg)})
+    return safe_json({"status": "updated", **_admin_security_status(cfg)})
+
+
+@app.get("/api/setup/status")
+async def api_setup_status():
+    cfg = _current_loaded_config()
+    return safe_json({**_build_stack_payload(cfg), "security": _admin_security_status(cfg)})
+
+
+@app.post("/api/setup/managed/plan")
+async def api_setup_managed_plan(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    cfg = _current_loaded_config()
+    plan = normalize_managed_plan(cfg, payload)
+    updated_cfg = _managed_setup_config_update(
+        cfg,
+        plan,
+        phase="planned",
+        phase_message="Managed setup plan saved. Review and apply when ready.",
+        last_error="",
+        resume_ready=False,
+        apply_result="",
+    )
+    persisted = _persist_config_payload(updated_cfg)
+    summary = build_stack_apply_summary(persisted, normalize_stack_config(persisted))
+    preflight = build_stack_preflight(persisted, normalize_stack_config(persisted), project_dir=str(_repo_root()))
+    return safe_json(
+        {
+            "status": "planned",
+            "service_management": build_setup_status(persisted).get("service_management") or {},
+            "managed_stack": build_managed_status(persisted),
+            "stack": normalize_stack_config(persisted),
+            "apply_summary": summary,
+            "preflight": preflight,
+        }
+    )
+
+
+@app.post("/api/setup/managed/apply")
+async def api_setup_managed_apply(request: Request):
+    _require_admin_session(request)
+    cfg = _current_loaded_config()
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    managed_cfg = setup_cfg.get("managed_stack") if isinstance(setup_cfg.get("managed_stack"), dict) else {}
+    if not managed_cfg:
+        raise HTTPException(status_code=400, detail={"error": "managed_plan_missing"})
+    plan = normalize_managed_plan(cfg, {**(managed_cfg.get("enabled_features") or {}), "direct_manage": bool(managed_cfg.get("direct_manage_requested"))})
+    preflight = build_stack_preflight(cfg, normalize_stack_config({"setup": {"stack": plan.get("stack") or {}}}), project_dir=str(_repo_root()))
+    if not bool(preflight.get("ok")):
+        raise HTTPException(status_code=409, detail={"error": "preflight_failed", "preflight": preflight})
+    prepared_cfg = _managed_setup_config_update(
+        cfg,
+        plan,
+        phase="prepared",
+        phase_message="Retreivr prepared your managed stack settings.",
+        last_error="",
+        resume_ready=True,
+        apply_result="prepared",
+    )
+    prepared_cfg = _discover_and_persist_managed_keys(prepared_cfg)
+    written = write_managed_env_block(_default_env_path(prepared_cfg), managed_env_values(prepared_cfg, normalize_stack_config(prepared_cfg)))
+    summary = build_stack_apply_summary(prepared_cfg, normalize_stack_config(prepared_cfg))
+    service_mgmt = dict((prepared_cfg.get("setup") or {}).get("service_management") or {})
+    service_mgmt["mode"] = "managed"
+    service_mgmt["apply_mode"] = str(plan.get("apply_mode") or "manual")
+    prepared_cfg.setdefault("setup", {})["service_management"] = service_mgmt
+    prepared_cfg["setup"]["last_applied_env_path"] = str(written)
+    prepared_cfg["setup"]["last_applied_command"] = str(summary.get("compose_command") or "")
+    prepared_cfg["setup"]["last_applied_at"] = datetime.now(timezone.utc).isoformat()
+    next_steps = [f"Run `{summary['compose_command']}` from the Retreivr project root."]
+    direct_attempt = {"status": "not_attempted"}
+    if str(plan.get("apply_mode")) == "direct" and normalize_stack_config(prepared_cfg).get("enable_hostctl"):
+        try:
+            _hostctl_request("GET", "/health", timeout=8.0)
+        except Exception as exc:  # noqa: BLE001
+            prepared_cfg = _managed_setup_config_update(
+                prepared_cfg,
+                plan,
+                phase="waiting_for_restart",
+                phase_message="Direct management is unavailable. Verify Host Control and retry.",
+                last_error=str(exc),
+                resume_ready=True,
+                apply_result="direct_unavailable",
+            )
+            persisted = _persist_config_payload(prepared_cfg)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "hostctl_unreachable",
+                    "message": "Direct management was requested but Retreivr Host Control is unreachable.",
+                    "hint": "Enable the hostctl profile and ensure RETREIVR_HOSTCTL_URL points to a reachable hostctl service.",
+                    "managed_stack": build_managed_status(persisted),
+                    "compose_command": str(summary.get("compose_command") or ""),
+                    "preflight": preflight,
+                },
+            ) from exc
+        try:
+            direct_attempt = _hostctl_request(
+                "POST",
+                "/compose/apply",
+                {
+                    "profiles": summary.get("profiles") or [],
+                    "project_dir": str(_repo_root()),
+                },
+                timeout=90.0,
+            )
+            prepared_cfg = _managed_setup_config_update(
+                prepared_cfg,
+                plan,
+                phase="checking_services",
+                phase_message="Retreivr started the managed services and is checking readiness.",
+                last_error="",
+                resume_ready=True,
+                apply_result="direct_started",
+            )
+            next_steps = ["Retreivr started the managed services directly. Refresh setup status if the services are still warming up."]
+        except Exception as exc:  # noqa: BLE001
+            prepared_cfg = _managed_setup_config_update(
+                prepared_cfg,
+                plan,
+                phase="waiting_for_restart",
+                phase_message="Direct management failed. Resolve hostctl access and retry.",
+                last_error=str(exc),
+                resume_ready=True,
+                apply_result="direct_failed",
+            )
+            persisted = _persist_config_payload(prepared_cfg)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "hostctl_apply_failed",
+                    "message": "Direct management apply failed.",
+                    "hint": "Review Retreivr Host Control status and retry direct apply, or switch to manual apply mode.",
+                    "managed_stack": build_managed_status(persisted),
+                    "compose_command": str(summary.get("compose_command") or ""),
+                    "preflight": preflight,
+                },
+            ) from exc
+    else:
+        if str(plan.get("apply_mode")) == "direct":
+            prepared_cfg = _managed_setup_config_update(
+                prepared_cfg,
+                plan,
+                phase="waiting_for_restart",
+                phase_message="Direct management requested but hostctl profile is disabled.",
+                last_error="hostctl_profile_not_enabled",
+                resume_ready=True,
+                apply_result="direct_unavailable",
+            )
+            persisted = _persist_config_payload(prepared_cfg)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "hostctl_profile_not_enabled",
+                    "message": "Direct management requires the hostctl profile.",
+                    "hint": "Enable hostctl in managed stack features, then retry apply.",
+                    "managed_stack": build_managed_status(persisted),
+                    "compose_command": str(summary.get("compose_command") or ""),
+                    "preflight": preflight,
+                },
+            )
+        prepared_cfg = _managed_setup_config_update(
+            prepared_cfg,
+            plan,
+            phase="waiting_for_restart",
+            phase_message="Managed setup is prepared. Finish the restart/apply step to continue automatically.",
+            last_error="",
+            resume_ready=True,
+            apply_result="manual_required",
+        )
+        next_steps.append("Return to Retreivr after restart. Guided Setup will continue from there.")
+    persisted = _persist_config_payload(prepared_cfg)
+    return safe_json(
+        {
+            "status": str(((persisted.get("setup") or {}).get("managed_stack") or {}).get("apply_result") or "prepared"),
+            "env_path": str(written),
+            "compose_command": str(summary.get("compose_command") or ""),
+            "profiles": summary.get("profiles") or [],
+            "preflight": preflight,
+            "direct_attempt": direct_attempt,
+            "managed_stack": build_managed_status(persisted),
+            "next_steps": next_steps,
+        }
+    )
+
+
+@app.get("/api/setup/managed/status")
+async def api_setup_managed_status():
+    cfg = _current_loaded_config()
+    status = build_managed_status(cfg)
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    managed_cfg = setup_cfg.get("managed_stack") if isinstance(setup_cfg.get("managed_stack"), dict) else {}
+    phase = str(status.get("phase") or "")
+    if phase in ("checking_services", "waiting_for_restart", "prepared") and bool(managed_cfg.get("resume_ready")):
+        current_cfg = _discover_and_persist_managed_keys(cfg)
+        health = build_connections_status(current_cfg)
+        configure_result = auto_configure_services(current_cfg)
+        desired_services = set(str(item) for item in (managed_cfg.get("selected_services") or []))
+        ready = True
+        for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "qbittorrent"):
+            if service_name not in desired_services:
+                continue
+            service_payload = health.get(service_name) if isinstance(health.get(service_name), dict) else {}
+            if not bool(service_payload.get("reachable")):
+                ready = False
+        next_phase = "configured" if ready else "checking_services"
+        next_message = "Managed services are configured." if ready else "Managed services are still starting or need attention."
+        updated_cfg = _managed_setup_config_update(
+            current_cfg,
+            normalize_managed_plan(current_cfg, {**(managed_cfg.get("enabled_features") or {}), "direct_manage": bool(managed_cfg.get("direct_manage_requested"))}),
+            phase=next_phase,
+            phase_message=next_message,
+            last_error="",
+            resume_ready=not ready,
+            apply_result="configured" if ready else str(managed_cfg.get("apply_result") or ""),
+            last_health=health,
+            last_configure_result=configure_result,
+        )
+        cfg = _persist_config_payload(updated_cfg)
+        status = build_managed_status(cfg)
+    return safe_json(status)
+
+
+@app.post("/api/setup/managed/retry")
+async def api_setup_managed_retry(request: Request):
+    _require_admin_session(request)
+    cfg = _current_loaded_config()
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    managed_cfg = setup_cfg.get("managed_stack") if isinstance(setup_cfg.get("managed_stack"), dict) else {}
+    if not managed_cfg:
+        raise HTTPException(status_code=400, detail={"error": "managed_plan_missing"})
+    updated_cfg = _managed_setup_config_update(
+        cfg,
+        normalize_managed_plan(cfg, {**(managed_cfg.get("enabled_features") or {}), "direct_manage": bool(managed_cfg.get("direct_manage_requested"))}),
+        phase="checking_services",
+        phase_message="Retrying managed service discovery and configuration.",
+        last_error="",
+        resume_ready=True,
+    )
+    persisted = _persist_config_payload(updated_cfg)
+    return safe_json({"status": "retrying", "managed_stack": build_managed_status(persisted)})
+
+
+def _build_jellyfin_discovery_candidates(request: Request) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = [
+        ("Retreivr managed Jellyfin", "http://jellyfin:8096"),
+        ("This device (http)", "http://localhost:8096"),
+        ("This device (https)", "https://localhost:8920"),
+        ("Docker host alias", "http://host.docker.internal:8096"),
+    ]
+    seen: set[str] = set()
+
+    def add_candidate(label: str, url: str) -> None:
+        normalized = str(url or "").strip().rstrip("/")
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append((label, normalized))
+
+    request_host = str(request.url.hostname or "").strip()
+    if request_host and request_host not in {"localhost", "127.0.0.1", "::1"}:
+        add_candidate("Current app host", f"http://{request_host}:8096")
+        add_candidate("Current app host (https)", f"https://{request_host}:8920")
+
+    try:
+        hostname = socket.gethostname()
+        _, _, host_ips = socket.gethostbyname_ex(hostname)
+        for ip in host_ips:
+            ip_value = str(ip or "").strip()
+            if not ip_value or ip_value.startswith("127."):
+                continue
+            add_candidate(f"Local network ({ip_value})", f"http://{ip_value}:8096")
+            add_candidate(f"Local network secure ({ip_value})", f"https://{ip_value}:8920")
+    except Exception:
+        pass
+
+    ordered: list[tuple[str, str]] = []
+    seen.clear()
+    for label, url in candidates:
+        normalized = str(url or "").strip().rstrip("/")
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append((label, normalized))
+    return ordered
+
+
+@app.get("/api/setup/jellyfin/discover")
+async def api_setup_jellyfin_discover(request: Request):
+    _require_admin_session(request)
+    suggestions: list[dict[str, Any]] = []
+    for label, base_url in _build_jellyfin_discovery_candidates(request):
+        reachable, message = _probe_json(f"{base_url}/System/Info/Public")
+        if not reachable:
+            reachable, message = _probe_json(f"{base_url}/System/Info")
+        if not reachable:
+            continue
+        suggestions.append(
+            {
+                "label": label,
+                "url": base_url,
+                "status": message,
+            }
+        )
+    return safe_json({"suggestions": suggestions})
+
+
+@app.post("/api/setup/existing/discover")
+async def api_setup_existing_discover(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    normalized = normalize_existing_stack_payload(payload)
+    discovered: dict[str, Any] = {}
+    for service_name, service_cfg in (normalized.get("services") or {}).items():
+        if not isinstance(service_cfg, dict) or not service_cfg.get("enabled"):
+            continue
+        base_url = str(service_cfg.get("base_url") or "").strip().rstrip("/")
+        if not base_url:
+            discovered[service_name] = {"configured": False, "reachable": False, "status": "address_needed", "reason_code": "address_needed", "state": "needs_attention", "retry_hint": "Add a base URL and retry discovery."}
+            continue
+        if not _valid_http_url(base_url):
+            discovered[service_name] = {"configured": False, "reachable": False, "status": "invalid_base_url", "base_url": base_url, "reason_code": "invalid_base_url", "state": "needs_attention", "retry_hint": "Use a full http/https base URL."}
+            continue
+        if service_name == "qbittorrent":
+            try:
+                session = _qbit_login_session(base_url, str(service_cfg.get("username") or "").strip(), str(service_cfg.get("password") or "").strip())
+                _qbit_request(session, base_url, "GET", "app/version")
+                discovered[service_name] = {"configured": True, "reachable": True, "status": "reachable", "base_url": base_url, "reason_code": "reachable", "state": "connected", "retry_hint": ""}
+            except Exception as exc:  # noqa: BLE001
+                discovered[service_name] = {"configured": True, "reachable": False, "status": str(exc), "base_url": base_url, "reason_code": "unreachable", "state": "failed", "retry_hint": "Verify qBittorrent URL and login credentials, then retry."}
+            continue
+        api_key = str(service_cfg.get("api_key") or "").strip()
+        headers = {"X-Api-Key": api_key} if api_key else {}
+        endpoint = "/System/Info" if service_name == "jellyfin" else f"/api/{'v1' if service_name == 'prowlarr' else 'v3'}/system/status"
+        reachable, message = _probe_json(f"{base_url}{endpoint}", headers=headers)
+        reason_code = "reachable" if reachable else ("credentials_missing" if service_name in {"radarr", "sonarr", "readarr", "prowlarr", "bazarr"} and not api_key else "unreachable")
+        discovered[service_name] = {
+            "configured": True,
+            "reachable": reachable,
+            "status": message,
+            "base_url": base_url,
+            "reason_code": reason_code,
+            "state": "connected" if reachable else ("needs_attention" if reason_code == "credentials_missing" else "failed"),
+            "retry_hint": "" if reachable else ("Add an API key and retry discovery." if reason_code == "credentials_missing" else "Verify URL/API key and retry discovery."),
+        }
+    cfg = dict(_current_loaded_config())
+    setup_cfg = dict(cfg.get("setup") or {})
+    service_mgmt = dict(setup_cfg.get("service_management") or {})
+    service_mgmt["mode"] = "existing"
+    service_mgmt["apply_mode"] = "manual"
+    setup_cfg["service_management"] = service_mgmt
+    setup_cfg["existing_stack"] = {"selected_services": list(discovered.keys()), "discovered_health": discovered}
+    cfg["setup"] = setup_cfg
+    persisted = _persist_config_payload(cfg)
+    return safe_json({"status": "discovered", "existing_stack": build_existing_status(persisted)})
+
+
+@app.post("/api/setup/existing/connect")
+async def api_setup_existing_connect(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    normalized = normalize_existing_stack_payload(payload)
+    key_discovery_policy = _key_discovery_policy(_current_loaded_config())
+    services_payload = normalized.get("services") if isinstance(normalized.get("services"), dict) else {}
+    requested_services = [
+        str(name or "").strip().lower()
+        for name, service_cfg in services_payload.items()
+        if isinstance(service_cfg, dict) and bool(service_cfg.get("enabled"))
+    ]
+    discovery_scope = set(str(item or "").strip().lower() for item in (key_discovery_policy.get("scope") or []))
+    allowed_services = [name for name in requested_services if not discovery_scope or name in discovery_scope]
+    discovered_local_keys = discover_local_service_keys(allowed_services) if bool(key_discovery_policy.get("enabled")) else {}
+    preview = []
+    for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"):
+        service_cfg = services_payload.get(service_name) if isinstance(services_payload.get(service_name), dict) else None
+        if not isinstance(service_cfg, dict) or not bool(service_cfg.get("enabled")):
+            continue
+        if str(service_cfg.get("api_key") or "").strip():
+            continue
+        discovered = str(discovered_local_keys.get(service_name) or "").strip()
+        if discovered:
+            service_cfg["api_key"] = discovered
+            preview.append({"service": service_name, "status": "discovered", "masked_key": f"{discovered[:4]}…{discovered[-4:]}" if len(discovered) > 8 else "••••"})
+        else:
+            preview.append({"service": service_name, "status": "not_found", "masked_key": None})
+    if bool(payload.get("preview_only")):
+        return safe_json({"status": "preview", "key_discovery": {"enabled": bool(key_discovery_policy.get("enabled")), "results": preview}})
+    errors = _existing_stack_validation_errors(normalized)
+    if errors:
+        raise HTTPException(status_code=400, detail={"error": "validation_failed", "errors": errors})
+    cfg = dict(_current_loaded_config())
+    arr_cfg = dict(cfg.get("arr") or {})
+    selected_services: list[str] = []
+    for service_name, service_cfg in (normalized.get("services") or {}).items():
+        if not isinstance(service_cfg, dict) or not service_cfg.get("enabled"):
+            continue
+        selected_services.append(service_name)
+        if service_name == "qbittorrent":
+            qb_cfg = dict(arr_cfg.get("qbittorrent") or {})
+            qb_cfg["base_url"] = str(service_cfg.get("base_url") or "").strip()
+            qb_cfg["username"] = str(service_cfg.get("username") or "").strip()
+            qb_cfg["password"] = str(service_cfg.get("password") or "").strip()
+            arr_cfg["qbittorrent"] = qb_cfg
+        elif service_name == "jellyfin":
+            jelly_cfg = dict(arr_cfg.get("jellyfin") or {})
+            jelly_cfg["base_url"] = str(service_cfg.get("base_url") or "").strip()
+            jelly_cfg["api_key"] = str(service_cfg.get("api_key") or "").strip()
+            arr_cfg["jellyfin"] = jelly_cfg
+        else:
+            service_target = dict(arr_cfg.get(service_name) or {})
+            service_target["base_url"] = str(service_cfg.get("base_url") or "").strip()
+            service_target["api_key"] = str(service_cfg.get("api_key") or "").strip()
+            arr_cfg[service_name] = service_target
+    cfg["arr"] = arr_cfg
+    setup_cfg = dict(cfg.get("setup") or {})
+    service_mgmt = dict(setup_cfg.get("service_management") or {})
+    service_mgmt["mode"] = "existing"
+    service_mgmt["apply_mode"] = "manual"
+    setup_cfg["service_management"] = service_mgmt
+    setup_cfg["existing_stack"] = {
+        "selected_services": selected_services,
+        "discovered_health": build_connections_status({**cfg, "arr": arr_cfg}),
+    }
+    _append_key_discovery_audit(
+        cfg,
+        {
+            "scope": "existing",
+            "action": "discover_apply",
+            "discovered_services": [entry["service"] for entry in preview if entry.get("status") == "discovered"],
+            "saved": True,
+        },
+    )
+    cfg["setup"] = setup_cfg
+    cfg = _persist_config_payload(cfg)
+    configure_result = auto_configure_services(cfg)
+    return safe_json({"status": "connected", "existing_stack": build_existing_status(cfg), "configure_result": configure_result, "key_discovery": {"enabled": bool(key_discovery_policy.get("enabled")), "results": preview}})
+
+
+@app.post("/api/setup/stack")
+async def api_setup_stack_update(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    cfg = dict(_current_loaded_config())
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    stack_cfg = setup_cfg.get("stack") if isinstance(setup_cfg.get("stack"), dict) else {}
+    next_stack = dict(stack_cfg)
+    for key in (
+        "enable_arr_stack",
+        "enable_radarr",
+        "enable_sonarr",
+        "enable_readarr",
+        "enable_prowlarr",
+        "enable_bazarr",
+        "enable_qbittorrent",
+        "enable_vpn",
+        "enable_jellyfin",
+    ):
+        if key in payload:
+            next_stack[key] = bool(payload.get(key))
+    for key in ("env_path", "media_root", "movies_root", "tv_root", "downloads_root", "books_root"):
+        if key in payload:
+            next_stack[key] = str(payload.get(key) or "").strip()
+    next_stack["compose_profiles"] = normalize_stack_config({"setup": {"stack": next_stack}}).get("compose_profiles", [])
+    setup_cfg["stack"] = next_stack
+    setup_cfg["restart_required"] = True
+    cfg["setup"] = setup_cfg
+    persisted = _persist_config_payload(cfg)
+    preflight = build_stack_preflight(persisted, normalize_stack_config(persisted), project_dir=str(_repo_root()))
+    return safe_json({**_build_stack_payload(persisted), "preflight": preflight, "security": _admin_security_status(persisted, request=request)})
+
+
+@app.get("/api/setup/command")
+async def api_setup_command():
+    cfg = _current_loaded_config()
+    stack = normalize_stack_config(cfg)
+    summary = build_stack_apply_summary(cfg, stack)
+    preflight = build_stack_preflight(cfg, stack, project_dir=str(_repo_root()))
+    return safe_json({"env_path": str(_default_env_path(cfg)), **summary, "preflight": preflight})
+
+
+@app.get("/api/setup/preflight")
+async def api_setup_preflight():
+    cfg = _current_loaded_config()
+    stack = normalize_stack_config(cfg)
+    return safe_json({"preflight": build_stack_preflight(cfg, stack, project_dir=str(_repo_root()))})
+
+
+@app.post("/api/setup/preflight")
+async def api_setup_preflight_with_draft(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    cfg = _current_loaded_config()
+    stack_payload = payload.get("stack") if isinstance(payload.get("stack"), dict) else {}
+    stack = normalize_stack_config({"setup": {"stack": stack_payload}} if stack_payload else cfg)
+    return safe_json({"preflight": build_stack_preflight(cfg, stack, project_dir=str(_repo_root())), "stack": stack})
+
+
+@app.post("/api/setup/apply-stack")
+async def api_setup_apply_stack(request: Request):
+    _require_admin_session(request)
+    cfg = _current_loaded_config()
+    stack = normalize_stack_config(cfg)
+    preflight = build_stack_preflight(cfg, stack, project_dir=str(_repo_root()))
+    if not bool(preflight.get("ok")):
+        raise HTTPException(status_code=409, detail={"error": "preflight_failed", "preflight": preflight})
+    env_path = _default_env_path(cfg)
+    written = write_managed_env_block(env_path, managed_env_values(cfg, stack))
+    summary = build_stack_apply_summary(cfg, stack)
+    updated_cfg = dict(cfg)
+    setup_cfg = updated_cfg.get("setup") if isinstance(updated_cfg.get("setup"), dict) else {}
+    setup_cfg["last_applied_at"] = datetime.now(timezone.utc).isoformat()
+    setup_cfg["last_applied_command"] = str(summary["compose_command"] or "")
+    setup_cfg["last_applied_env_path"] = str(written)
+    setup_cfg["restart_required"] = True
+    updated_cfg["setup"] = setup_cfg
+    _persist_config_payload(updated_cfg)
+    return safe_json(
+        {
+            "status": "written",
+            "env_path": str(written),
+            **summary,
+            "preflight": preflight,
+            "next_steps": [
+                f"Run `{summary['compose_command']}` from the Retreivr project root.",
+                "Return to Retreivr after restart and refresh Connections/Setup status.",
+            ],
+        }
+    )
+
+
+@app.get("/api/setup/key-discovery")
+async def api_setup_key_discovery_status():
+    cfg = _current_loaded_config()
+    return safe_json({"key_discovery": _key_discovery_policy(cfg)})
+
+
+@app.post("/api/setup/key-discovery")
+async def api_setup_key_discovery_update(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    cfg = dict(_current_loaded_config())
+    setup_cfg = dict(cfg.get("setup") or {})
+    current = _key_discovery_policy(cfg)
+    requested_scope = payload.get("scope") if isinstance(payload.get("scope"), list) else current.get("scope") or []
+    normalized_scope = [str(item or "").strip().lower() for item in requested_scope if str(item or "").strip()]
+    if not normalized_scope:
+        normalized_scope = ["radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"]
+    next_cfg = {
+        "enabled": bool(payload.get("enabled", current.get("enabled", False))),
+        "scope": normalized_scope,
+        "audit": list((setup_cfg.get("key_discovery") or {}).get("audit") or []),
+    }
+    setup_cfg["key_discovery"] = next_cfg
+    cfg["setup"] = setup_cfg
+    _append_key_discovery_audit(
+        cfg,
+        {
+            "scope": "global",
+            "action": "settings_update",
+            "enabled": next_cfg["enabled"],
+            "scope_services": normalized_scope,
+        },
+    )
+    persisted = _persist_config_payload(cfg)
+    return safe_json({"status": "updated", "key_discovery": _key_discovery_policy(persisted)})
+
+
+@app.post("/api/setup/key-discovery/disable-clear")
+async def api_setup_key_discovery_disable_clear(request: Request):
+    _require_admin_session(request)
+    cfg = dict(_current_loaded_config())
+    arr_cfg = dict(cfg.get("arr") or {})
+    cleared_services: list[str] = []
+    for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"):
+        service_cfg = dict(arr_cfg.get(service_name) or {})
+        if str(service_cfg.get("api_key") or "").strip():
+            cleared_services.append(service_name)
+        service_cfg["api_key"] = ""
+        arr_cfg[service_name] = service_cfg
+    cfg["arr"] = arr_cfg
+    setup_cfg = dict(cfg.get("setup") or {})
+    key_cfg = dict(setup_cfg.get("key_discovery") or {})
+    key_cfg["enabled"] = False
+    key_cfg["scope"] = key_cfg.get("scope") or ["radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"]
+    setup_cfg["key_discovery"] = key_cfg
+    cfg["setup"] = setup_cfg
+    _append_key_discovery_audit(
+        cfg,
+        {
+            "scope": "global",
+            "action": "disable_and_clear",
+            "cleared_services": cleared_services,
+            "enabled": False,
+        },
+    )
+    persisted = _persist_config_payload(cfg)
+    return safe_json({"status": "updated", "cleared_services": cleared_services, "key_discovery": _key_discovery_policy(persisted)})
+
+
+@app.get("/api/services/health")
+async def api_services_health():
+    services = _service_health_summary(_current_loaded_config())
+    summary = {
+        "connected": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "connected"),
+        "needs_attention": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "needs_attention"),
+        "failed": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "failed"),
+        "unknown": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "unknown"),
+    }
+    return safe_json({"services": services, "summary": summary})
+
+
+@app.post("/api/services/autoconfigure")
+async def api_services_autoconfigure(request: Request):
+    _require_admin_session(request)
+    cfg = _current_loaded_config()
+    services = auto_configure_services(cfg)
+    summary = {
+        "connected": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "connected"),
+        "needs_attention": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "needs_attention"),
+        "failed": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "failed"),
+    }
+    return safe_json({"status": "completed", "services": services, "summary": summary})
+
+
+@app.get("/api/player/library")
+async def api_player_library(limit: int = Query(250, ge=1, le=1000)):
+    cfg = _current_loaded_config()
+    items = scan_local_library(cfg, limit=limit)
+    for item in items:
+        artwork_local_path = str(item.get("artwork_local_path") or "").strip()
+        if artwork_local_path:
+            item["artwork_url"] = f"/api/player/art/local?path={quote(artwork_local_path, safe='')}"
+    return safe_json({"items": items})
+
+
+@app.get("/api/player/library/summary")
+async def api_player_library_summary(limit: int = Query(1000, ge=1, le=5000)):
+    cfg = _current_loaded_config()
+    items = scan_local_library(cfg, limit=limit)
+    summary = summarize_library(items)
+    for bucket in ("artists", "albums", "tracks"):
+        values = summary.get(bucket)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            artwork_local_path = str(item.get("artwork_local_path") or "").strip()
+            if artwork_local_path:
+                item["artwork_url"] = f"/api/player/art/local?path={quote(artwork_local_path, safe='')}"
+    return safe_json({"summary": summary})
+
+
+@app.post("/api/player/library/repair-tags")
+async def api_player_library_repair_tags(
+    limit: int = Query(500, ge=1, le=5000),
+    dry_run: bool = Query(True),
+    queue_review: bool = Query(False),
+):
+    cfg = _current_loaded_config()
+    result = repair_music_library_tags(
+        cfg,
+        db_path=app.state.paths.db_path,
+        limit=limit,
+        dry_run=dry_run,
+        queue_review=queue_review,
+    )
+    return safe_json(result)
+
+
+@app.get("/api/player/stations")
+async def api_player_stations():
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        stations = [get_station_detail(conn, cfg, station_id=int(station.get("id") or 0), preview_limit=10) for station in list_stations(conn)]
+    return safe_json({"stations": stations})
+
+
+@app.post("/api/player/stations")
+async def api_player_create_station(payload: dict = Body(...)):
+    seed_type = str(payload.get("seed_type") or "artist").strip() or "artist"
+    seed_value = str(payload.get("seed_value") or "").strip()
+    if seed_type != "favorites" and not seed_value:
+        raise HTTPException(status_code=400, detail={"error": "seed_value is required"})
+    name = str(payload.get("name") or seed_value).strip() or seed_value
+    station_mode = str(payload.get("station_mode") or "mix").strip().lower() or "mix"
+    seed_identity = payload.get("seed_identity") if isinstance(payload.get("seed_identity"), dict) else None
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        station = create_station(conn, name=name, seed_type=seed_type, seed_value=seed_value, station_mode=station_mode, seed_identity=seed_identity)
+        station = get_station_detail(conn, cfg := _current_loaded_config(), station_id=int(station.get("id") or 0), preview_limit=10) or station
+    return safe_json({"station": station})
+
+
+@app.delete("/api/player/stations/{station_id}")
+async def api_player_delete_station(station_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        delete_station(conn, station_id)
+    return safe_json({"status": "deleted", "station_id": int(station_id)})
+
+
+@app.get("/api/player/stations/{station_id}")
+async def api_player_station_detail(station_id: int, preview_limit: int = Query(10, ge=1, le=24)):
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        station = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=preview_limit)
+        if not station:
+            raise HTTPException(status_code=404, detail={"error": "station_not_found"})
+    return safe_json({"station": station})
+
+
+@app.post("/api/player/stations/{station_id}/start")
+async def api_player_station_start(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        stations = list_stations(conn)
+        station = next((entry for entry in stations if int(entry.get("id") or 0) == int(station_id)), None)
+        if not station:
+            raise HTTPException(status_code=404, detail={"error": "station_not_found"})
+        payload = start_station(conn, cfg, station=station, queue_target=queue_target)
+        detail = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=10)
+    logger.info(
+        "player_station_start station_id=%s queue=%s current_recording_mbid=%s current_source=%s",
+        int(station_id),
+        len(payload.get("queue") or []),
+        str(((payload.get("current_item") or {}).get("recording_mbid") or "")).strip() or None,
+        str(((payload.get("current_item") or {}).get("source") or "")).strip() or None,
+    )
+    return safe_json({"station": detail or station, **payload})
+
+
+@app.post("/api/player/stations/{station_id}/next")
+async def api_player_station_next(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        stations = list_stations(conn)
+        station = next((entry for entry in stations if int(entry.get("id") or 0) == int(station_id)), None)
+        if not station:
+            raise HTTPException(status_code=404, detail={"error": "station_not_found"})
+        payload = advance_station(conn, cfg, station=station, queue_target=queue_target)
+        detail = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=10)
+    logger.info(
+        "player_station_next station_id=%s queue=%s current_recording_mbid=%s current_source=%s",
+        int(station_id),
+        len(payload.get("queue") or []),
+        str(((payload.get("current_item") or {}).get("recording_mbid") or "")).strip() or None,
+        str(((payload.get("current_item") or {}).get("source") or "")).strip() or None,
+    )
+    return safe_json({"station": detail or station, **payload})
+
+
+@app.post("/api/player/stations/{station_id}/prime")
+async def api_player_station_prime(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        stations = list_stations(conn)
+        station = next((entry for entry in stations if int(entry.get("id") or 0) == int(station_id)), None)
+        if not station:
+            raise HTTPException(status_code=404, detail={"error": "station_not_found"})
+        payload = prime_station(conn, cfg, station=station, queue_target=queue_target)
+        detail = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=10)
+    return safe_json({"station": detail or station, **payload})
+
+
+@app.post("/api/player/stations/{station_id}/queue")
+async def api_player_station_queue(station_id: int, limit: int = Query(25, ge=1, le=100)):
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        station = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=10)
+        if not station:
+            raise HTTPException(status_code=404, detail={"error": "station_not_found"})
+        queue = build_station_queue(conn, cfg, station=station, limit=limit)
+    return safe_json({"station": station, "queue": queue})
+
+
+@app.get("/api/player/community-cache")
+async def api_player_community_cache(limit: int = Query(60, ge=1, le=120)):
+    with sqlite3.connect(app.state.search_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        items = list_cached_matches(conn, limit=limit)
+    return safe_json({"items": items})
+
+
+@app.get("/api/player/history")
+async def api_player_history(limit: int = Query(50, ge=1, le=200)):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        history_rows = list_history(conn, limit=limit)
+    for item in history_rows:
+        local_path = str(item.get("local_path") or "").strip()
+        is_local = str(item.get("source_kind") or "").strip().lower() == "local"
+        exists_locally = bool(local_path and os.path.isfile(local_path))
+        item["exists_locally"] = exists_locally
+        item["is_missing_local"] = bool(is_local and local_path and not exists_locally)
+        item["can_redownload"] = bool((item["is_missing_local"] or not exists_locally) and str(item.get("title") or "").strip() and str(item.get("artist") or "").strip())
+    return safe_json({"history": history_rows})
+
+
+@app.delete("/api/player/history/{history_id}")
+async def api_player_history_delete(history_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        delete_history_entry(conn, history_id)
+    return safe_json({"status": "deleted", "history_id": int(history_id)})
+
+
+@app.post("/api/player/history/{history_id}/redownload")
+async def api_player_history_redownload(history_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        history_rows = list_history(conn, limit=500)
+    entry = next((row for row in history_rows if int(row.get("id") or 0) == int(history_id)), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail={"error": "history_not_found"})
+    artist = str(entry.get("artist") or "").strip()
+    title = str(entry.get("title") or "").strip()
+    album = str(entry.get("album") or "").strip() or None
+    if not artist or not title:
+        raise HTTPException(status_code=400, detail={"error": "not_enough_metadata_to_redownload"})
+    adapter = _IntentQueueAdapter()
+    result = adapter.enqueue(
+        {
+            "artist": artist,
+            "track": title,
+            "album": album,
+            "media_type": "music",
+            "origin": "player_history",
+            "origin_id": f"history:{history_id}",
+            "force_redownload": True,
+        }
+    )
+    return safe_json({"status": "queued", "history_id": int(history_id), "result": result})
+
+
+@app.get("/api/player/playlists")
+async def api_player_playlists():
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        playlists = list_playlists(conn)
+    return safe_json({"playlists": playlists})
+
+
+@app.post("/api/player/playlists")
+async def api_player_create_playlist(payload: dict = Body(...)):
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"error": "name is required"})
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            playlist = create_playlist(conn, name=name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    return safe_json({"playlist": playlist})
+
+
+@app.get("/api/player/playlists/{playlist_id}")
+async def api_player_playlist_detail(playlist_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        playlists = list_playlists(conn)
+        playlist = next((entry for entry in playlists if int(entry.get("id") or 0) == int(playlist_id)), None)
+        if not playlist:
+            raise HTTPException(status_code=404, detail={"error": "playlist_not_found"})
+        items = playlist_items(conn, playlist_id)
+    return safe_json({"playlist": playlist, "items": items})
+
+
+@app.post("/api/player/playlists/{playlist_id}/items")
+async def api_player_playlist_add_item(playlist_id: int, payload: dict = Body(...)):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        playlists = list_playlists(conn)
+        playlist = next((entry for entry in playlists if int(entry.get("id") or 0) == int(playlist_id)), None)
+        if not playlist:
+            raise HTTPException(status_code=404, detail={"error": "playlist_not_found"})
+        item = add_playlist_item(conn, playlist_id, payload)
+    return safe_json({"item": item})
+
+
+@app.delete("/api/player/playlists/{playlist_id}/items/{item_id}")
+async def api_player_playlist_delete_item(playlist_id: int, item_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        remove_playlist_item(conn, playlist_id, item_id)
+    return safe_json({"status": "deleted", "playlist_id": int(playlist_id), "item_id": int(item_id)})
+
+
+@app.post("/api/player/playlists/{playlist_id}/reorder")
+async def api_player_playlist_reorder(playlist_id: int, payload: dict = Body(...)):
+    ordered_ids = payload.get("item_ids")
+    if not isinstance(ordered_ids, list):
+        raise HTTPException(status_code=400, detail={"error": "item_ids must be a list"})
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        items = reorder_playlist_items(conn, playlist_id, ordered_ids)
+    return safe_json({"playlist_id": int(playlist_id), "items": items})
+
+
+@app.delete("/api/player/playlists/{playlist_id}")
+async def api_player_delete_playlist(playlist_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        delete_playlist(conn, playlist_id)
+    return safe_json({"status": "deleted", "playlist_id": int(playlist_id)})
+
+
+@app.post("/api/player/history")
+async def api_player_history_add(payload: dict = Body(...)):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        add_history_entry(conn, payload)
+    return safe_json({"status": "recorded"})
+
+
+@app.get("/api/player/stream/local")
+async def api_player_stream_local(path: str = Query(...)):
+    cfg = _current_loaded_config()
+    if not is_local_player_path_allowed(cfg, path, allowed_extensions=AUDIO_EXTENSIONS):
+        raise HTTPException(status_code=403, detail={"error": "path_not_allowed"})
+    resolved = resolve_local_player_file(cfg, path, allowed_extensions=AUDIO_EXTENSIONS)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail={"error": "file_not_found"})
+    return FileResponse(resolved)
+
+
+@app.get("/api/player/art/local")
+async def api_player_art_local(path: str = Query(...)):
+    cfg = _current_loaded_config()
+    if not is_local_player_path_allowed(cfg, path, allowed_extensions=IMAGE_EXTENSIONS):
+        raise HTTPException(status_code=403, detail={"error": "path_not_allowed"})
+    resolved = resolve_local_player_file(cfg, path, allowed_extensions=IMAGE_EXTENSIONS)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail={"error": "file_not_found"})
+    return FileResponse(
+        resolved,
+        media_type=mimetypes.guess_type(str(resolved))[0] or "image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+def _persist_config_payload(payload: dict) -> dict:
     config_path = app.state.config_path
     config_dir = os.path.dirname(config_path) or "."
     os.makedirs(config_dir, exist_ok=True)
@@ -9861,34 +11762,606 @@ async def api_put_config(payload: dict = Body(...)):
                 pass
 
     normalized_payload = safe_json(payload)
-    app.state.loaded_config = normalized_payload if isinstance(normalized_payload, dict) else {}
-    app.state.config = app.state.loaded_config
+    normalized_dict = normalized_payload if isinstance(normalized_payload, dict) else {}
+    app.state.loaded_config = normalized_dict
+    app.state.config = normalized_dict
     worker_engine = getattr(app.state, "worker_engine", None)
     if worker_engine is not None:
-        worker_engine.config = app.state.loaded_config
+        worker_engine.config = normalized_dict
     search_service = getattr(app.state, "search_service", None)
     if search_service is not None:
-        search_service.config = app.state.loaded_config
+        search_service.config = normalized_dict
+    return normalized_dict
 
-    if "schedule" in payload:
-        schedule = _merge_schedule_config(payload.get("schedule"))
-        app.state.schedule_config = schedule
-        _apply_schedule_config(schedule)
-    _apply_spotify_schedule(payload or {})
-    _apply_community_publish_schedule(payload or {})
-    _apply_resolution_cache_sync_schedule(payload or {})
-    policy = normalize_watch_policy(payload)
-    if getattr(normalize_watch_policy, "valid", True):
-        app.state.watch_policy = policy
-        _apply_watch_policy(policy)
-        app.state.watch_config_cache = payload
-    enable_watcher = _config_watcher_enabled(payload)
-    if enable_watcher:
-        _enable_watcher_runtime()
-    else:
-        await _disable_watcher_runtime("config updated (enable_watcher=false)")
 
-    return {"status": "updated"}
+def _current_loaded_config() -> dict:
+    cfg = getattr(app.state, "loaded_config", None)
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _repo_root() -> Path:
+    workspace = os.environ.get("RETREIVR_WORKSPACE", "").strip()
+    if workspace:
+        return Path(workspace).resolve()
+    return Path(__file__).resolve().parents[1]
+
+
+def _default_env_path(config: dict | None = None) -> Path:
+    cfg = config if isinstance(config, dict) else _current_loaded_config()
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    stack_cfg = setup_cfg.get("stack") if isinstance(setup_cfg.get("stack"), dict) else {}
+    configured = str(stack_cfg.get("env_path") or os.environ.get("RETREIVR_ENV_FILE") or ".env").strip() or ".env"
+    candidate = Path(configured)
+    if not candidate.is_absolute():
+        candidate = (_repo_root() / candidate).resolve()
+    return candidate
+
+
+def _hostctl_base_url() -> str:
+    return str(os.environ.get("RETREIVR_HOSTCTL_URL") or "http://retreivr-hostctl:8010").strip().rstrip("/")
+
+
+def _hostctl_request(method: str, path: str, payload: dict | None = None, timeout: float = 20.0) -> dict[str, Any]:
+    base = _hostctl_base_url()
+    response = requests.request(method.upper(), f"{base}{path}", json=payload or {}, timeout=timeout)
+    if response.status_code >= 400:
+        raise RuntimeError(f"hostctl_{response.status_code}")
+    if not response.content:
+        return {}
+    return response.json() if "json" in str(response.headers.get("content-type", "")).lower() else {"text": response.text}
+
+
+def _managed_setup_config_update(cfg: dict, plan: dict[str, Any], *, phase: str, phase_message: str = "", last_error: str = "", resume_ready: bool | None = None, apply_result: str | None = None, last_health: dict | None = None, last_configure_result: dict | None = None) -> dict:
+    updated = apply_managed_service_defaults(cfg, plan)
+    setup_cfg = dict(updated.get("setup") or {})
+    service_mgmt = dict(setup_cfg.get("service_management") or {})
+    service_mgmt["mode"] = "managed"
+    service_mgmt["apply_mode"] = str(plan.get("apply_mode") or "manual")
+    setup_cfg["service_management"] = service_mgmt
+    managed_cfg = dict(setup_cfg.get("managed_stack") or {})
+    managed_cfg["direct_manage_requested"] = bool(plan.get("direct_manage_requested"))
+    managed_cfg["hostctl_enabled"] = bool((plan.get("stack") or {}).get("enable_hostctl"))
+    managed_cfg["phase"] = str(phase or managed_cfg.get("phase") or "idle")
+    managed_cfg["phase_message"] = str(phase_message or "")
+    managed_cfg["last_error"] = str(last_error or "")
+    managed_cfg["selected_services"] = list(plan.get("selected_services") or [])
+    managed_cfg["enabled_features"] = dict(plan.get("enabled_features") or {})
+    managed_cfg["internal_urls"] = dict(plan.get("internal_urls") or {})
+    managed_cfg["generated_credentials"] = dict(plan.get("generated_credentials") or {})
+    if resume_ready is not None:
+        managed_cfg["resume_ready"] = bool(resume_ready)
+    if apply_result is not None:
+        managed_cfg["apply_result"] = str(apply_result)
+    if isinstance(last_health, dict):
+        managed_cfg["last_health"] = last_health
+    if isinstance(last_configure_result, dict):
+        managed_cfg["last_configure_result"] = last_configure_result
+    setup_cfg["managed_stack"] = managed_cfg
+    stack = dict(plan.get("stack") or {})
+    setup_cfg["stack"] = stack
+    setup_cfg["restart_required"] = bool(phase in ("prepared", "waiting_for_restart"))
+    updated["setup"] = setup_cfg
+    return updated
+
+
+def _discover_and_persist_managed_keys(cfg: dict) -> dict:
+    policy = _key_discovery_policy(cfg)
+    if not bool(policy.get("enabled")):
+        return cfg
+    updated = dict(cfg)
+    arr_cfg = dict(updated.get("arr") or {})
+    discovered = discover_managed_service_keys(updated)
+    _append_key_discovery_audit(
+        updated,
+        {
+            "scope": "managed",
+            "action": "discover",
+            "discovered_services": sorted(list(discovered.keys())),
+            "saved": True,
+        },
+    )
+    for service_name, api_key in discovered.items():
+        service_cfg = dict(arr_cfg.get(service_name) or {})
+        if api_key:
+            service_cfg["api_key"] = api_key
+        arr_cfg[service_name] = service_cfg
+    updated["arr"] = arr_cfg
+    return updated
+
+
+def _build_stack_payload(config: dict | None = None) -> dict[str, Any]:
+    cfg = config if isinstance(config, dict) else _current_loaded_config()
+    payload = build_setup_status(cfg)
+    stack = normalize_stack_config(cfg)
+    root = str(_repo_root())
+    payload["preflight"] = build_stack_preflight(cfg, stack, project_dir=root)
+    payload["stack"]["project_dir"] = root
+    payload["key_discovery"] = _key_discovery_policy(cfg)
+    return payload
+
+
+def _key_discovery_policy(cfg: dict | None = None) -> dict[str, Any]:
+    source = cfg if isinstance(cfg, dict) else _current_loaded_config()
+    setup_cfg = source.get("setup") if isinstance(source.get("setup"), dict) else {}
+    key_cfg = setup_cfg.get("key_discovery") if isinstance(setup_cfg.get("key_discovery"), dict) else {}
+    enabled = bool(key_cfg.get("enabled", False))
+    scope = key_cfg.get("scope") if isinstance(key_cfg.get("scope"), list) else ["radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"]
+    normalized_scope = [str(item or "").strip().lower() for item in scope if str(item or "").strip()]
+    if not normalized_scope:
+        normalized_scope = ["radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"]
+    audit = key_cfg.get("audit") if isinstance(key_cfg.get("audit"), list) else []
+    return {
+        "enabled": enabled,
+        "scope": normalized_scope,
+        "audit": audit[-20:],
+        "scope_disclosure": "Retreivr scans local service config files only for selected services under the workspace config directory.",
+        "data_handling_disclosure": "Discovered keys are stored locally in Retreivr config and never sent externally unless separately configured by you.",
+    }
+
+
+def _append_key_discovery_audit(cfg: dict, event: dict[str, Any]) -> None:
+    if not isinstance(cfg, dict):
+        return
+    setup_cfg = dict(cfg.get("setup") or {})
+    key_cfg = dict(setup_cfg.get("key_discovery") or {})
+    audit = list(key_cfg.get("audit") or [])
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **(event if isinstance(event, dict) else {}),
+    }
+    audit.append(entry)
+    key_cfg["audit"] = audit[-100:]
+    if "enabled" not in key_cfg:
+        key_cfg["enabled"] = False
+    setup_cfg["key_discovery"] = key_cfg
+    cfg["setup"] = setup_cfg
+
+
+def _service_health_summary(config: dict | None = None) -> dict[str, Any]:
+    cfg = config if isinstance(config, dict) else _current_loaded_config()
+    return build_connections_status(cfg)
+
+
+def _valid_http_url(value: str) -> bool:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return False
+    parsed = urlparse(candidate)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _existing_stack_validation_errors(normalized: dict[str, Any]) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    services = normalized.get("services") if isinstance(normalized.get("services"), dict) else {}
+    for service_name, service_cfg in services.items():
+        if not isinstance(service_cfg, dict) or not bool(service_cfg.get("enabled")):
+            continue
+        base_url = str(service_cfg.get("base_url") or "").strip()
+        if not base_url:
+            errors.append({"service": str(service_name), "field": "base_url", "message": "Base URL is required."})
+        elif not _valid_http_url(base_url):
+            errors.append({"service": str(service_name), "field": "base_url", "message": "Base URL must be an absolute http/https URL."})
+        if service_name in {"radarr", "sonarr", "readarr", "prowlarr", "bazarr"} and not str(service_cfg.get("api_key") or "").strip():
+            errors.append({"service": str(service_name), "field": "api_key", "message": "API key is required."})
+        if service_name == "qbittorrent":
+            if not str(service_cfg.get("username") or "").strip():
+                errors.append({"service": "qbittorrent", "field": "username", "message": "Username is required."})
+            if not str(service_cfg.get("password") or "").strip():
+                errors.append({"service": "qbittorrent", "field": "password", "message": "Password is required."})
+    return errors
+
+
+def _security_config(config: dict | None = None) -> dict[str, Any]:
+    cfg = config if isinstance(config, dict) else _current_loaded_config()
+    security = cfg.get("security") if isinstance(cfg.get("security"), dict) else {}
+    return {
+        "admin_pin_enabled": bool(security.get("admin_pin_enabled")),
+        "admin_pin_hash": str(security.get("admin_pin_hash") or "").strip(),
+        "admin_pin_session_minutes": int(security.get("admin_pin_session_minutes") or 30),
+    }
+
+
+def _hash_admin_pin(pin: str) -> str:
+    pin_value = str(pin or "").strip()
+    if not pin_value:
+        raise ValueError("pin is required")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pin_value.encode("utf-8"), salt, _ADMIN_PIN_ITERATIONS)
+    return f"pbkdf2_sha256${_ADMIN_PIN_ITERATIONS}${base64.b64encode(salt).decode('ascii')}${base64.b64encode(digest).decode('ascii')}"
+
+
+def _verify_admin_pin(pin: str, stored_hash: str) -> bool:
+    raw = str(stored_hash or "").strip()
+    pin_value = str(pin or "").strip()
+    if not raw or not pin_value:
+        return False
+    try:
+        algorithm, iterations_raw, salt_b64, digest_b64 = raw.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        iterations = int(iterations_raw)
+        salt = base64.b64decode(salt_b64.encode("ascii"))
+        expected = base64.b64decode(digest_b64.encode("ascii"))
+    except Exception:
+        return False
+    candidate = hashlib.pbkdf2_hmac("sha256", pin_value.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(candidate, expected)
+
+
+def _cleanup_admin_sessions() -> None:
+    now = datetime.now(timezone.utc)
+    with _ADMIN_PIN_SESSIONS_LOCK:
+        expired = [token for token, expires_at in _ADMIN_PIN_SESSIONS.items() if expires_at <= now]
+        for token in expired:
+            _ADMIN_PIN_SESSIONS.pop(token, None)
+
+
+def _issue_admin_session(config: dict | None = None) -> tuple[str, str]:
+    security = _security_config(config)
+    minutes = max(1, min(1440, int(security.get("admin_pin_session_minutes") or 30)))
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    token = secrets.token_urlsafe(32)
+    with _ADMIN_PIN_SESSIONS_LOCK:
+        _ADMIN_PIN_SESSIONS[token] = expires_at
+    return token, expires_at.isoformat()
+
+
+def _has_valid_admin_session(token: str | None) -> bool:
+    candidate = str(token or "").strip()
+    if not candidate:
+        return False
+    _cleanup_admin_sessions()
+    with _ADMIN_PIN_SESSIONS_LOCK:
+        expires_at = _ADMIN_PIN_SESSIONS.get(candidate)
+    return bool(expires_at and expires_at > datetime.now(timezone.utc))
+
+
+def _admin_token_from_request(request: Request) -> str:
+    return str(request.headers.get(ADMIN_PIN_HEADER) or "").strip()
+
+
+def _require_admin_session(request: Request, config: dict | None = None) -> None:
+    security = _security_config(config)
+    if not security.get("admin_pin_enabled"):
+        return
+    if _has_valid_admin_session(_admin_token_from_request(request)):
+        return
+    raise HTTPException(status_code=403, detail={"error": "admin_pin_required", "message": "Admin PIN required for this action."})
+
+
+def _admin_security_status(config: dict | None = None, *, request: Request | None = None) -> dict[str, Any]:
+    security = _security_config(config)
+    return {
+        "admin_pin_enabled": bool(security.get("admin_pin_enabled")),
+        "admin_pin_session_minutes": int(security.get("admin_pin_session_minutes") or 30),
+        "session_valid": _has_valid_admin_session(_admin_token_from_request(request)) if request is not None else False,
+    }
+
+
+def _normalized_music_preferences(config: dict | None) -> dict:
+    cfg = config if isinstance(config, dict) else {}
+    prefs = cfg.get("music_preferences")
+    if not isinstance(prefs, dict):
+        prefs = {}
+    favorite_genres = []
+    raw_genres = prefs.get("favorite_genres")
+    if isinstance(raw_genres, list):
+        seen = set()
+        for value in raw_genres:
+            genre = str(value or "").strip()
+            key = genre.lower()
+            if not genre or key in seen:
+                continue
+            seen.add(key)
+            favorite_genres.append(genre)
+    favorite_artists = []
+    raw_artists = prefs.get("favorite_artists")
+    if isinstance(raw_artists, list):
+        seen = set()
+        for item in raw_artists:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            artist_mbid = str(item.get("artist_mbid") or "").strip() or None
+            if not name:
+                continue
+            dedupe_key = (artist_mbid or "").lower() or name.lower()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            favorite_artists.append({
+                "name": name,
+                "artist_mbid": artist_mbid,
+            })
+    return {
+        "favorite_genres": favorite_genres,
+        "favorite_artists": favorite_artists,
+    }
+
+
+@app.get("/api/music/preferences")
+async def api_music_preferences_get():
+    return _normalized_music_preferences(_read_config_or_404())
+
+
+@app.put("/api/music/preferences")
+async def api_music_preferences_put(payload: dict = Body(...)):
+    current = _read_config_or_404()
+    next_config = dict(current)
+    next_config["music_preferences"] = _normalized_music_preferences({"music_preferences": payload})
+    errors = validate_config(next_config)
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+    _persist_config_payload(next_config)
+    return next_config["music_preferences"]
+
+
+@app.get("/api/arr/radarr/health")
+async def api_arr_radarr_health():
+    return safe_json(test_radarr_connection(_current_loaded_config()))
+
+
+@app.get("/api/arr/sonarr/health")
+async def api_arr_sonarr_health():
+    return safe_json(test_sonarr_connection(_current_loaded_config()))
+
+
+def _normalize_arr_saved_kind(kind: str) -> str:
+    normalized = str(kind or "").strip().lower()
+    if normalized in {"movie", "movies"}:
+        return "movie"
+    if normalized in {"tv", "show", "shows", "series"}:
+        return "tv"
+    raise HTTPException(status_code=400, detail={"error": "kind must be movie or tv"})
+
+
+def _saved_title_store() -> SavedTitleStore:
+    return SavedTitleStore(app.state.paths.db_path)
+
+
+def _attach_saved_titles_to_results(results: list[dict[str, Any]], *, kind: str) -> list[dict[str, Any]]:
+    items = [item for item in (results or []) if isinstance(item, dict)]
+    if not items:
+        return items
+    status_map = _saved_title_store().get_saved_status_map(kind, [item.get("tmdb_id") for item in items])
+    normalized_kind = _normalize_arr_saved_kind(kind)
+    annotated: list[dict[str, Any]] = []
+    for item in items:
+        tmdb_key = str(item.get("tmdb_id") or "").strip()
+        annotated.append(
+            {
+                **item,
+                "kind": str(item.get("kind") or normalized_kind),
+                "saved": bool(status_map.get(tmdb_key)),
+            }
+        )
+    return annotated
+
+
+def _attach_saved_titles_to_payload(payload: dict[str, Any], *, kind: str | None = None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    normalized_kind = _normalize_arr_saved_kind(kind or str(payload.get("kind") or "movie"))
+    next_payload = dict(payload)
+    next_payload["results"] = _attach_saved_titles_to_results(
+        list(payload.get("results") or []),
+        kind=normalized_kind,
+    )
+    if "kind" not in next_payload:
+        next_payload["kind"] = normalized_kind
+    return next_payload
+
+
+def _build_saved_titles_shelf(kind: str, *, limit: int) -> dict[str, Any]:
+    normalized_kind = _normalize_arr_saved_kind(kind)
+    store = _saved_title_store()
+    results = store.list_saved_titles(normalized_kind, limit=limit)
+    tmdb_ids = [item["tmdb_id"] for item in results if item.get("tmdb_id") is not None]
+    statuses = get_bulk_status(_current_loaded_config(), normalized_kind, tmdb_ids) if tmdb_ids else {}
+    connection = test_radarr_connection(_current_loaded_config()) if normalized_kind == "movie" else test_sonarr_connection(_current_loaded_config())
+    for item in results:
+        item["kind"] = normalized_kind
+        item["saved"] = True
+        item["arr_status"] = statuses.get(str(item.get("tmdb_id"))) or {"status": "not_added", "added": False, "downloaded": False, "arr_id": None}
+    return {
+        "kind": normalized_kind,
+        "shelf": "saved_for_later",
+        "provider": "local",
+        "results": results,
+        "connection": connection,
+    }
+
+
+@app.get("/api/arr/search/movies")
+async def api_arr_search_movies(
+    q: str = Query("", min_length=1),
+    limit: int = Query(20, ge=1, le=50),
+    year: int | None = Query(None, ge=1888, le=2100),
+):
+    try:
+        payload = build_movie_search_response(_current_loaded_config(), q, limit=limit, year=year)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind="movie"))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/genres")
+async def api_arr_genres(kind: str = Query(...)):
+    try:
+        return safe_json({"kind": kind, "genres": get_tmdb_genres(_current_loaded_config(), kind)})
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/genre/browse")
+async def api_arr_genre_browse(
+    kind: str = Query(...),
+    genre_id: int = Query(...),
+    limit: int = Query(24, ge=1, le=50),
+    year: int | None = Query(None, ge=1888, le=2100),
+):
+    try:
+        payload = build_arr_genre_browse_response(_current_loaded_config(), kind=kind, genre_id=genre_id, limit=limit, year=year)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind=kind))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/editorial")
+async def api_arr_editorial(
+    kind: str = Query(...),
+    shelf: str = Query(...),
+    limit: int = Query(12, ge=1, le=24),
+):
+    try:
+        normalized_kind = _normalize_arr_saved_kind(kind)
+        if str(shelf or "").strip().lower() == "saved_for_later":
+            return safe_json(_build_saved_titles_shelf(normalized_kind, limit=limit))
+        payload = build_arr_editorial_response(_current_loaded_config(), kind=normalized_kind, shelf=shelf, limit=limit)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind=normalized_kind))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/editorial-sources")
+async def api_arr_editorial_sources():
+    try:
+        return safe_json(get_arr_editorial_sources(_current_loaded_config()))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/editorial/shelves")
+async def api_arr_editorial_shelves(
+    kind: str = Query(...),
+):
+    try:
+        return safe_json(get_arr_editorial_shelves(_current_loaded_config(), kind=kind))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/editorial/shelf")
+async def api_arr_editorial_shelf(
+    kind: str = Query(...),
+    shelf: str = Query(...),
+    limit: int = Query(12, ge=1, le=24),
+):
+    try:
+        normalized_kind = _normalize_arr_saved_kind(kind)
+        if str(shelf or "").strip().lower() == "saved_for_later":
+            return safe_json(_build_saved_titles_shelf(normalized_kind, limit=limit))
+        payload = build_arr_editorial_response(_current_loaded_config(), kind=normalized_kind, shelf=shelf, limit=limit)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind=normalized_kind))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/search/tv")
+async def api_arr_search_tv(
+    q: str = Query("", min_length=1),
+    limit: int = Query(20, ge=1, le=50),
+    year: int | None = Query(None, ge=1888, le=2100),
+):
+    try:
+        payload = build_tv_search_response(_current_loaded_config(), q, limit=limit, year=year)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind="tv"))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.post("/api/arr/radarr/add")
+async def api_arr_add_movie(payload: dict = Body(...)):
+    try:
+        tmdb_id = int(payload.get("tmdb_id"))
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": "tmdb_id is required"})
+    try:
+        status = add_movie_to_radarr(_current_loaded_config(), tmdb_id)
+        return safe_json({"tmdb_id": tmdb_id, "status": status})
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.post("/api/arr/sonarr/add")
+async def api_arr_add_series(payload: dict = Body(...)):
+    try:
+        tmdb_id = int(payload.get("tmdb_id"))
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": "tmdb_id is required"})
+    try:
+        status = add_series_to_sonarr(_current_loaded_config(), tmdb_id)
+        return safe_json({"tmdb_id": tmdb_id, "status": status})
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.post("/api/arr/status/bulk")
+async def api_arr_status_bulk(payload: dict = Body(...)):
+    kind = str(payload.get("kind") or "").strip().lower()
+    tmdb_ids = payload.get("tmdb_ids")
+    if not isinstance(tmdb_ids, list):
+        raise HTTPException(status_code=400, detail={"error": "tmdb_ids must be a list"})
+    try:
+        statuses = get_bulk_status(_current_loaded_config(), kind, tmdb_ids)
+        return safe_json({"kind": kind, "statuses": statuses})
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/saved")
+async def api_arr_saved_titles(kind: str = Query(...), limit: int = Query(10, ge=1, le=24)):
+    normalized_kind = _normalize_arr_saved_kind(kind)
+    return safe_json(_build_saved_titles_shelf(normalized_kind, limit=limit))
+
+
+@app.post("/api/arr/saved/toggle")
+async def api_arr_saved_toggle(payload: dict = Body(...)):
+    normalized_kind = _normalize_arr_saved_kind(str(payload.get("kind") or ""))
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        raise HTTPException(status_code=400, detail={"error": "item is required"})
+    should_save = bool(payload.get("saved", True))
+    store = _saved_title_store()
+    try:
+        if should_save:
+            saved_item = store.save_title(normalized_kind, item)
+            tmdb_id = saved_item["tmdb_id"]
+            status_map = get_bulk_status(_current_loaded_config(), normalized_kind, [tmdb_id])
+            saved_item["kind"] = normalized_kind
+            saved_item["saved"] = True
+            saved_item["arr_status"] = status_map.get(str(tmdb_id)) or {"status": "not_added", "added": False, "downloaded": False, "arr_id": None}
+            return safe_json({"saved": True, "item": saved_item})
+        tmdb_id = int(item.get("tmdb_id"))
+        removed = store.remove_title(normalized_kind, tmdb_id)
+        return safe_json({"saved": False, "removed": removed, "tmdb_id": tmdb_id, "kind": normalized_kind})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/trailer")
+async def api_arr_trailer(kind: str = Query(...), tmdb_id: int = Query(...)):
+    try:
+        return safe_json(get_tmdb_trailer(_current_loaded_config(), kind, tmdb_id))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/cast")
+async def api_arr_cast(kind: str = Query(...), tmdb_id: int = Query(...), limit: int = Query(8, ge=1, le=20)):
+    try:
+        return safe_json(get_tmdb_cast(_current_loaded_config(), kind, tmdb_id, limit=limit))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/person")
+async def api_arr_person_titles(person_id: int = Query(...), kind: str = Query(...), limit: int = Query(24, ge=1, le=50)):
+    try:
+        payload = get_tmdb_person_titles(_current_loaded_config(), person_id, kind=kind, limit=limit)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind=kind))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
 @app.get("/api/community-cache/publish/status")
@@ -9905,6 +12378,41 @@ async def api_community_cache_publish_status():
         status["backfill_last_summary"] = backfill_last_summary
     status["next_run_at"] = _get_next_community_publish_run_iso()
     return safe_json(status)
+
+
+@app.get("/api/music/long-term-retry/status")
+async def api_music_long_term_retry_status():
+    worker_engine = getattr(app.state, "worker_engine", None)
+    if worker_engine is None:
+        raise HTTPException(status_code=503, detail="worker_engine_unavailable")
+    config = get_loaded_config() or _read_config_or_404()
+    queue_summary = worker_engine.store.summarize_long_term_retry_queue()
+    return safe_json(
+        {
+            "enabled": bool((config if isinstance(config, dict) else {}).get("long_term_retry_enabled", True)),
+            "interval_hours": int((config if isinstance(config, dict) else {}).get("long_term_retry_interval_hours", 24) or 24),
+            "batch_size": int((config if isinstance(config, dict) else {}).get("long_term_retry_batch_size", 10) or 10),
+            "max_attempts": int((config if isinstance(config, dict) else {}).get("long_term_retry_max_attempts", 0) or 0),
+            "poll_minutes": int((config if isinstance(config, dict) else {}).get("long_term_retry_poll_minutes", 60) or 60),
+            "queue": queue_summary,
+            "last_summary": getattr(app.state, "long_term_retry_last_summary", None),
+            "next_run_at": _get_next_long_term_retry_run_iso(),
+        }
+    )
+
+
+@app.post("/api/music/long-term-retry/run")
+async def api_music_long_term_retry_run():
+    worker_engine = getattr(app.state, "worker_engine", None)
+    if worker_engine is None:
+        raise HTTPException(status_code=503, detail="worker_engine_unavailable")
+    try:
+        summary = worker_engine.process_long_term_retry_once()
+        app.state.long_term_retry_last_summary = summary
+        return safe_json(summary)
+    except Exception as exc:
+        logger.exception("manual_long_term_retry_run_failed")
+        raise HTTPException(status_code=500, detail=str(exc) or "long_term_retry_run_failed")
 
 
 @app.get("/api/community-cache/sync/status")
@@ -9991,6 +12499,97 @@ async def api_reconcile_library():
     return safe_json({"status": "completed", **summary})
 
 
+_VIDEO_LIBRARY_EXTENSIONS = {
+    ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", ".wmv", ".flv",
+}
+
+
+def _archive_identifier_from_url(url: str | None) -> str | None:
+    value = str(url or "").strip()
+    if not value:
+        return None
+    match = re.search(r"archive\.org/(?:details|download)/([^/?#]+)", value)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _build_video_library_thumbnail(row: dict[str, Any]) -> str | None:
+    source = str(row.get("source") or "").strip().lower()
+    external_id = str(row.get("external_id") or "").strip()
+    canonical_url = str(row.get("canonical_url") or "").strip()
+    input_url = str(row.get("input_url") or "").strip()
+    if source in {"youtube", "youtube_music"} and external_id:
+        return f"https://i.ytimg.com/vi/{external_id}/hqdefault.jpg"
+    if source == "archive_org":
+        identifier = _archive_identifier_from_url(canonical_url) or _archive_identifier_from_url(input_url)
+        if identifier:
+            return f"https://archive.org/services/img/{identifier}"
+    return None
+
+
+def _list_video_library_items(db_path: str, *, limit: int = 24) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT title, filename, destination, source, completed_at, file_size_bytes,
+                       input_url, canonical_url, external_id
+                FROM download_history
+                WHERE status='completed'
+                ORDER BY COALESCE(completed_at, created_at, id) DESC
+                LIMIT ?
+                """,
+                (max(int(limit) * 8, 150),),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+    except sqlite3.OperationalError:
+        return []
+    for row in rows:
+        filename = str(row.get("filename") or "").strip()
+        destination = str(row.get("destination") or "").strip()
+        if not filename:
+            continue
+        filepath = os.path.abspath(os.path.join(destination or DOWNLOADS_DIR, filename))
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in _VIDEO_LIBRARY_EXTENSIONS:
+            continue
+        if not os.path.isfile(filepath):
+            continue
+        if filepath in seen:
+            continue
+        seen.add(filepath)
+        title = str(row.get("title") or "").strip() or os.path.splitext(filename)[0]
+        file_id = _file_id_from_path(filepath)
+        source = str(row.get("source") or "").strip() or "local"
+        thumbnail_url = _build_video_library_thumbnail(row)
+        items.append(
+            {
+                "title": title,
+                "filename": filename,
+                "filepath": filepath,
+                "file_id": file_id,
+                "thumbnail_url": thumbnail_url,
+                "downloaded_at": row.get("completed_at"),
+                "size_bytes": row.get("file_size_bytes"),
+                "source": source,
+                "file_ext": ext or None,
+                "media_type": str(mimetypes.guess_type(filepath)[0] or "").strip() or None,
+                "video_id": row.get("external_id") or None,
+                "source_url": str(row.get("canonical_url") or "").strip() or str(row.get("input_url") or "").strip() or None,
+                "canonical_url": str(row.get("canonical_url") or "").strip() or None,
+                "input_url": str(row.get("input_url") or "").strip() or None,
+            }
+        )
+        if len(items) >= int(limit):
+            break
+    return items
+
+
 @app.get("/api/history")
 async def api_history(
     limit: int = Query(200, ge=1, le=5000),
@@ -10031,9 +12630,31 @@ async def api_history(
     ]
 
 
+@app.get("/api/library/videos")
+async def api_video_library(limit: int = Query(24, ge=1, le=200)):
+    return safe_json({"items": _list_video_library_items(app.state.paths.db_path, limit=limit)})
+
+
 @app.get("/api/files")
 async def api_files():
     return _list_download_files(DOWNLOADS_DIR)
+
+
+class FileLocationOpenRequest(BaseModel):
+    file_id: str | None = None
+    path: str | None = None
+
+
+@app.post("/api/files/open-location")
+async def api_files_open_location(payload: FileLocationOpenRequest):
+    target, select_file = _resolve_open_location_target(payload.file_id, payload.path)
+    try:
+        await anyio.to_thread.run_sync(
+            functools.partial(_launch_os_location, target, select_file=select_file)
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "target": target, "select_file": select_file}
 
 
 @app.get("/api/files/{file_id}/download")
@@ -10053,6 +12674,27 @@ async def api_file_download(file_id: str):
     content_type, _ = mimetypes.guess_type(candidate)
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     return StreamingResponse(_iter_file(candidate), media_type=content_type or "application/octet-stream", headers=headers)
+
+
+@app.get("/api/files/{file_id}/stream")
+async def api_file_stream(file_id: str, request: Request):
+    try:
+        rel = _decode_file_id(file_id)
+    except (ValueError, UnicodeDecodeError, binascii.Error):
+        raise HTTPException(status_code=400, detail="Invalid file id")
+
+    candidate = os.path.abspath(os.path.join(DOWNLOADS_DIR, rel))
+    if not _path_allowed(candidate, [DOWNLOADS_DIR]):
+        raise HTTPException(status_code=403, detail="File not allowed")
+    if not os.path.isfile(candidate):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return build_media_file_response(
+        request,
+        candidate,
+        media_type=guess_browser_media_type(candidate, mimetypes.guess_type(candidate)[0]),
+        content_disposition="inline",
+    )
 
 
 @app.get("/api/deliveries/{delivery_id}/download")
@@ -10126,6 +12768,7 @@ async def api_browse(
     mode: str = Query("dir", description="dir or file"),
     ext: str = Query("", description="Optional file extension filter, e.g. .json"),
     limit: int | None = Query(None, ge=1, le=5000, description="Optional max entries"),
+    show_hidden: bool = Query(False, description="Include hidden files (dotfiles)"),
 ):
     root = (root or "").strip().lower()
     roots = app.state.browse_roots
@@ -10159,9 +12802,14 @@ async def api_browse(
             parent = ""
 
     try:
-        entries = _list_browse_entries(base, target, mode, ext, limit=limit)
+        entries = _list_browse_entries(base, target, mode, ext, limit=limit, show_hidden=show_hidden)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read directory: {exc}") from exc
+
+    if root == "host":
+        target = _hostfs_to_host_path(target)
+        for entry in entries:
+            entry["abs_path"] = _hostfs_to_host_path(entry["abs_path"])
 
     return {
         "root": root,

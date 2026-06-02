@@ -32,16 +32,16 @@ def build_album_directory(metadata: Any) -> str:
 
 
 def build_track_filename(metadata: Any) -> str:
-    """Build canonical track filename with zero-padded track number."""
+    """Build canonical track filename with track number for filesystem sorting."""
     title = sanitize_component(_get_field(metadata, "title") or "Unknown Title")
-
-    track_num_raw = _get_field(metadata, "track_num", None)
-    track_num = int(track_num_raw) if isinstance(track_num_raw, int) else 0
-    if track_num < 0:
-        track_num = 0
-
+    track_num = _get_field(metadata, "track_num") or _get_field(metadata, "track_number")
     ext = str(_get_field(metadata, "ext") or "").lstrip(".")
-    filename = f"{track_num:02d} - {title}"
+    try:
+        track_int = int(str(track_num).split("/", 1)[0])
+    except (TypeError, ValueError):
+        track_int = 0
+    prefix = f"{track_int:02d} - " if track_int > 0 else ""
+    filename = f"{prefix}{title}"
     if ext:
         return f"{filename}.{ext}"
     return filename

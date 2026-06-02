@@ -117,7 +117,7 @@ def test_reconcile_music_library_backfills_jobs_history_and_isrc(tmp_path, monke
 def test_reconcile_library_backfills_video_jobs_and_history(tmp_path, monkeypatch) -> None:
     downloads_root = tmp_path / "downloads"
     video_root = downloads_root / "Videos"
-    video_path = video_root / "Channel" / "Clip.mp4"
+    video_path = video_root / "Channel" / "Clip.mkv"
     video_path.parent.mkdir(parents=True, exist_ok=True)
     video_path.write_bytes(b"video")
 

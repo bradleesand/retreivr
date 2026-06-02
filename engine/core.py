@@ -27,12 +27,14 @@ from engine.job_queue import (
     build_download_job_payload,
     build_output_template,
     ensure_download_jobs_table,
+    ensure_long_term_retry_table,
     preview_direct_url,
     resolve_cookie_file as _resolve_cookie_file_canonical,
     resolve_media_intent,
     resolve_media_type,
     resolve_source,
 )
+from engine.download_defaults import resolve_effective_download_settings
 from engine.paths import EnginePaths
 
 CLIENT_DELIVERY_TIMEOUT_SECONDS = 600
@@ -372,11 +374,142 @@ def apply_config_defaults(config):
             "local_node_id": "local_node",
         },
     )
+    normalized.setdefault(
+        "arr",
+        {
+            "tmdb_api_key": "",
+            "radarr": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "sonarr": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "readarr": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "prowlarr": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "bazarr": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "qbittorrent": {
+                "base_url": "",
+                "username": "",
+                "password": "",
+                "download_dir": "",
+                "category_movies": "movies",
+                "category_tv": "tv",
+                "category_books": "books",
+            },
+            "jellyfin": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "vpn": {
+                "provider": "gluetun",
+                "control_url": "",
+                "enabled": False,
+                "route_qbittorrent": True,
+                "route_prowlarr": False,
+                "route_retreivr": False,
+            },
+        },
+    )
+    normalized.setdefault(
+        "playback",
+        {
+            "external_player_mode": "none",
+            "external_player_label": "",
+            "external_player_url_template": "",
+            "plex_base_url": "",
+        },
+    )
+    normalized.setdefault(
+        "setup",
+        {
+            "show_on_startup": True,
+            "completed_modules": [],
+            "last_applied_at": "",
+            "last_applied_command": "",
+            "last_applied_env_path": "",
+            "restart_required": False,
+            "service_management": {
+                "mode": "none",
+                "apply_mode": "manual",
+            },
+            "managed_stack": {
+                "direct_manage_requested": False,
+                "hostctl_enabled": False,
+                "phase": "idle",
+                "phase_message": "",
+                "last_error": "",
+                "selected_services": [],
+                "enabled_features": {
+                    "movies": False,
+                    "tv": False,
+                    "books": False,
+                    "subtitles": False,
+                    "downloader": False,
+                    "vpn": False,
+                    "jellyfin": False,
+                },
+                "internal_urls": {},
+                "generated_credentials": {
+                    "qbittorrent_username": "",
+                    "qbittorrent_password": "",
+                },
+                "resume_ready": False,
+                "apply_result": "",
+                "last_health": {},
+                "last_configure_result": {},
+            },
+            "existing_stack": {
+                "selected_services": [],
+                "discovered_health": {},
+            },
+            "stack": {
+                "enable_arr_stack": False,
+                "enable_radarr": False,
+                "enable_sonarr": False,
+                "enable_readarr": False,
+                "enable_prowlarr": False,
+                "enable_bazarr": False,
+                "enable_qbittorrent": False,
+                "enable_vpn": False,
+                "enable_jellyfin": False,
+                "env_path": ".env",
+                "compose_profiles": [],
+                "media_root": "./media",
+                "movies_root": "./media/movies",
+                "tv_root": "./media/tv",
+                "downloads_root": "./downloads",
+                "books_root": "./media/books",
+            },
+        },
+    )
     normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
     normalized.setdefault("music_skip_metadata_probe", True)
     normalized.setdefault("music_candidate_cooldown_enabled", True)
     normalized.setdefault("music_candidate_cooldown_seconds", 21600)
     normalized.setdefault("music_candidate_cooldown_min_failures", 1)
+    normalized.setdefault("long_term_retry_enabled", True)
+    normalized.setdefault("long_term_retry_interval_hours", 24)
+    normalized.setdefault("long_term_retry_batch_size", 10)
+    normalized.setdefault("long_term_retry_max_attempts", 0)
+    normalized.setdefault("long_term_retry_poll_minutes", 60)
+    normalized.setdefault(
+        "music_preferences",
+        {
+            "favorite_genres": [],
+            "favorite_artists": [],
+        },
+    )
 
     return normalized
 
@@ -486,6 +619,33 @@ def validate_config(config):
     music_candidate_cooldown_min_failures = config.get("music_candidate_cooldown_min_failures")
     if music_candidate_cooldown_min_failures is not None and not isinstance(music_candidate_cooldown_min_failures, int):
         errors.append("music_candidate_cooldown_min_failures must be an integer")
+    long_term_retry_enabled = config.get("long_term_retry_enabled")
+    if long_term_retry_enabled is not None and not isinstance(long_term_retry_enabled, bool):
+        errors.append("long_term_retry_enabled must be true/false")
+    long_term_retry_interval_hours = config.get("long_term_retry_interval_hours")
+    if long_term_retry_interval_hours is not None:
+        if not isinstance(long_term_retry_interval_hours, int):
+            errors.append("long_term_retry_interval_hours must be an integer")
+        elif long_term_retry_interval_hours < 1:
+            errors.append("long_term_retry_interval_hours must be >= 1")
+    long_term_retry_batch_size = config.get("long_term_retry_batch_size")
+    if long_term_retry_batch_size is not None:
+        if not isinstance(long_term_retry_batch_size, int):
+            errors.append("long_term_retry_batch_size must be an integer")
+        elif long_term_retry_batch_size < 1:
+            errors.append("long_term_retry_batch_size must be >= 1")
+    long_term_retry_max_attempts = config.get("long_term_retry_max_attempts")
+    if long_term_retry_max_attempts is not None:
+        if not isinstance(long_term_retry_max_attempts, int):
+            errors.append("long_term_retry_max_attempts must be an integer")
+        elif long_term_retry_max_attempts < 0:
+            errors.append("long_term_retry_max_attempts must be >= 0")
+    long_term_retry_poll_minutes = config.get("long_term_retry_poll_minutes")
+    if long_term_retry_poll_minutes is not None:
+        if not isinstance(long_term_retry_poll_minutes, int):
+            errors.append("long_term_retry_poll_minutes must be an integer")
+        elif long_term_retry_poll_minutes < 1:
+            errors.append("long_term_retry_poll_minutes must be >= 1")
 
     youtube_cfg = config.get("youtube")
     if youtube_cfg is not None:
@@ -566,6 +726,86 @@ def validate_config(config):
                         errors.append(f"{prefix}.codec must be a string")
                     if export.get("bitrate") is not None and not isinstance(export.get("bitrate"), str):
                         errors.append(f"{prefix}.bitrate must be a string")
+
+    music_preferences = config.get("music_preferences")
+    if music_preferences is not None:
+        if not isinstance(music_preferences, dict):
+            errors.append("music_preferences must be an object")
+        else:
+            favorite_genres = music_preferences.get("favorite_genres")
+            if favorite_genres is not None:
+                if not isinstance(favorite_genres, list):
+                    errors.append("music_preferences.favorite_genres must be a list")
+                else:
+                    for index, genre in enumerate(favorite_genres):
+                        if not isinstance(genre, str) or not str(genre).strip():
+                            errors.append(f"music_preferences.favorite_genres[{index}] must be a non-empty string")
+            favorite_artists = music_preferences.get("favorite_artists")
+            if favorite_artists is not None:
+                if not isinstance(favorite_artists, list):
+                    errors.append("music_preferences.favorite_artists must be a list")
+                else:
+                    for index, artist in enumerate(favorite_artists):
+                        if not isinstance(artist, dict):
+                            errors.append(f"music_preferences.favorite_artists[{index}] must be an object")
+                            continue
+                        name = artist.get("name")
+                        artist_mbid = artist.get("artist_mbid")
+                        if not isinstance(name, str) or not str(name).strip():
+                            errors.append(f"music_preferences.favorite_artists[{index}].name must be a non-empty string")
+                        if artist_mbid is not None and (not isinstance(artist_mbid, str) or not str(artist_mbid).strip()):
+                            errors.append(f"music_preferences.favorite_artists[{index}].artist_mbid must be a non-empty string when present")
+
+    ui_preferences = config.get("ui_preferences")
+    if ui_preferences is not None:
+        if not isinstance(ui_preferences, dict):
+            errors.append("ui_preferences must be an object")
+        else:
+            for key in ("home_video_card_size", "music_card_size", "movies_tv_card_size"):
+                value = ui_preferences.get(key)
+                if value is None:
+                    continue
+                if not isinstance(value, int):
+                    errors.append(f"ui_preferences.{key} must be an integer")
+                elif key == "home_video_card_size" and (value < 220 or value > 420):
+                    errors.append("ui_preferences.home_video_card_size must be between 220 and 420")
+                elif key != "home_video_card_size" and (value < 120 or value > 320):
+                    errors.append(f"ui_preferences.{key} must be between 120 and 320")
+            for key in ("home_video_sort", "music_sort", "movies_tv_sort"):
+                value = ui_preferences.get(key)
+                if value is not None and not isinstance(value, str):
+                    errors.append(f"ui_preferences.{key} must be a string")
+            value = ui_preferences.get("home_video_results_limit")
+            if value is not None:
+                if not isinstance(value, int):
+                    errors.append("ui_preferences.home_video_results_limit must be an integer")
+                elif value < 0 or value > 200:
+                    errors.append("ui_preferences.home_video_results_limit must be between 0 and 200")
+            value = ui_preferences.get("music_hide_suggested_genres")
+            if value is not None and not isinstance(value, bool):
+                errors.append("ui_preferences.music_hide_suggested_genres must be true/false")
+            hidden_genres = ui_preferences.get("music_hidden_genres")
+            if hidden_genres is not None:
+                if not isinstance(hidden_genres, list):
+                    errors.append("ui_preferences.music_hidden_genres must be a list")
+                else:
+                    for index, entry in enumerate(hidden_genres):
+                        if not isinstance(entry, str) or not entry.strip():
+                            errors.append(f"ui_preferences.music_hidden_genres[{index}] must be a non-empty string")
+            hidden_artists = ui_preferences.get("music_hidden_artists")
+            if hidden_artists is not None:
+                if not isinstance(hidden_artists, list):
+                    errors.append("ui_preferences.music_hidden_artists must be a list")
+                else:
+                    for index, entry in enumerate(hidden_artists):
+                        if not isinstance(entry, dict):
+                            errors.append(f"ui_preferences.music_hidden_artists[{index}] must be an object")
+                            continue
+                        if not isinstance(entry.get("name"), str) or not str(entry.get("name") or "").strip():
+                            errors.append(f"ui_preferences.music_hidden_artists[{index}].name must be a non-empty string")
+                        artist_mbid = entry.get("artist_mbid")
+                        if artist_mbid is not None and (not isinstance(artist_mbid, str) or not str(artist_mbid).strip()):
+                            errors.append(f"ui_preferences.music_hidden_artists[{index}].artist_mbid must be a non-empty string when present")
 
     if final_format is not None and not isinstance(final_format, str):
         errors.append("final_format must be a string")
@@ -731,6 +971,222 @@ def validate_config(config):
                             errors.append(f"resolution_api.nodes[{index}].node_id must be a non-empty string")
                         if not isinstance(api_key, str) or not api_key.strip():
                             errors.append(f"resolution_api.nodes[{index}].api_key must be a non-empty string")
+
+    arr_cfg = config.get("arr")
+    if arr_cfg is not None:
+        if not isinstance(arr_cfg, dict):
+            errors.append("arr must be an object")
+        else:
+            tmdb_api_key = arr_cfg.get("tmdb_api_key")
+            if tmdb_api_key is not None and not isinstance(tmdb_api_key, str):
+                errors.append("arr.tmdb_api_key must be a string")
+            editorial_cfg = arr_cfg.get("editorial")
+            if editorial_cfg is not None:
+                if not isinstance(editorial_cfg, dict):
+                    errors.append("arr.editorial must be an object")
+                else:
+                    provider = editorial_cfg.get("provider")
+                    if provider is not None and not isinstance(provider, str):
+                        errors.append("arr.editorial.provider must be a string")
+                    cache_hours = editorial_cfg.get("cache_hours")
+                    if cache_hours is not None:
+                        try:
+                            parsed = int(cache_hours)
+                        except Exception:
+                            errors.append("arr.editorial.cache_hours must be an integer")
+                        else:
+                            if parsed < 1:
+                                errors.append("arr.editorial.cache_hours must be >= 1")
+                    mdblist_cfg = editorial_cfg.get("mdblist")
+                    if mdblist_cfg is not None:
+                        if not isinstance(mdblist_cfg, dict):
+                            errors.append("arr.editorial.mdblist must be an object")
+                        else:
+                            for field_name in ("enabled", "allow_public_mode"):
+                                value = mdblist_cfg.get(field_name)
+                                if value is not None and not isinstance(value, bool):
+                                    errors.append(f"arr.editorial.mdblist.{field_name} must be true/false")
+                            api_key = mdblist_cfg.get("api_key")
+                            if api_key is not None and not isinstance(api_key, str):
+                                errors.append("arr.editorial.mdblist.api_key must be a string")
+            for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"):
+                service_cfg = arr_cfg.get(service_name)
+                if service_cfg is None:
+                    continue
+                if not isinstance(service_cfg, dict):
+                    errors.append(f"arr.{service_name} must be an object")
+                    continue
+                base_url = service_cfg.get("base_url")
+                if base_url is not None and not isinstance(base_url, str):
+                    errors.append(f"arr.{service_name}.base_url must be a string")
+                api_key = service_cfg.get("api_key")
+                if api_key is not None and not isinstance(api_key, str):
+                    errors.append(f"arr.{service_name}.api_key must be a string")
+            qb_cfg = arr_cfg.get("qbittorrent")
+            if qb_cfg is not None:
+                if not isinstance(qb_cfg, dict):
+                    errors.append("arr.qbittorrent must be an object")
+                else:
+                    for field_name in (
+                        "base_url",
+                        "username",
+                        "password",
+                        "download_dir",
+                        "category_movies",
+                        "category_tv",
+                        "category_books",
+                    ):
+                        value = qb_cfg.get(field_name)
+                        if value is not None and not isinstance(value, str):
+                            errors.append(f"arr.qbittorrent.{field_name} must be a string")
+            vpn_cfg = arr_cfg.get("vpn")
+            if vpn_cfg is not None:
+                if not isinstance(vpn_cfg, dict):
+                    errors.append("arr.vpn must be an object")
+                else:
+                    provider = vpn_cfg.get("provider")
+                    if provider is not None and not isinstance(provider, str):
+                        errors.append("arr.vpn.provider must be a string")
+                    control_url = vpn_cfg.get("control_url")
+                    if control_url is not None and not isinstance(control_url, str):
+                        errors.append("arr.vpn.control_url must be a string")
+                    enabled = vpn_cfg.get("enabled")
+                    if enabled is not None and not isinstance(enabled, bool):
+                        errors.append("arr.vpn.enabled must be true/false")
+                    for field_name in ("route_qbittorrent", "route_prowlarr", "route_retreivr"):
+                        value = vpn_cfg.get(field_name)
+                        if value is not None and not isinstance(value, bool):
+                            errors.append(f"arr.vpn.{field_name} must be true/false")
+
+    music_player_cfg = config.get("music_player")
+    if music_player_cfg is not None:
+        if not isinstance(music_player_cfg, dict):
+            errors.append("music_player must be an object")
+        else:
+            for bool_name in ("local_library_first", "cache_stream_fallback"):
+                value = music_player_cfg.get(bool_name)
+                if value is not None and not isinstance(value, bool):
+                    errors.append(f"music_player.{bool_name} must be true/false")
+            radio_history_limit = music_player_cfg.get("radio_history_limit")
+            if radio_history_limit is not None:
+                try:
+                    parsed = int(radio_history_limit)
+                except Exception:
+                    errors.append("music_player.radio_history_limit must be an integer")
+                else:
+                    if parsed < 1:
+                        errors.append("music_player.radio_history_limit must be >= 1")
+
+    setup_cfg = config.get("setup")
+    if setup_cfg is not None:
+        if not isinstance(setup_cfg, dict):
+            errors.append("setup must be an object")
+        else:
+            show_on_startup = setup_cfg.get("show_on_startup")
+            if show_on_startup is not None and not isinstance(show_on_startup, bool):
+                errors.append("setup.show_on_startup must be true/false")
+            completed_modules = setup_cfg.get("completed_modules")
+            if completed_modules is not None:
+                if not isinstance(completed_modules, list) or not all(isinstance(entry, str) for entry in completed_modules):
+                    errors.append("setup.completed_modules must be a list of strings")
+            last_applied_at = setup_cfg.get("last_applied_at")
+            if last_applied_at is not None and not isinstance(last_applied_at, str):
+                errors.append("setup.last_applied_at must be a string")
+            last_applied_command = setup_cfg.get("last_applied_command")
+            if last_applied_command is not None and not isinstance(last_applied_command, str):
+                errors.append("setup.last_applied_command must be a string")
+            last_applied_env_path = setup_cfg.get("last_applied_env_path")
+            if last_applied_env_path is not None and not isinstance(last_applied_env_path, str):
+                errors.append("setup.last_applied_env_path must be a string")
+            restart_required = setup_cfg.get("restart_required")
+            if restart_required is not None and not isinstance(restart_required, bool):
+                errors.append("setup.restart_required must be true/false")
+            service_mgmt = setup_cfg.get("service_management")
+            if service_mgmt is not None:
+                if not isinstance(service_mgmt, dict):
+                    errors.append("setup.service_management must be an object")
+                else:
+                    mode = service_mgmt.get("mode")
+                    if mode is not None and mode not in ("managed", "existing", "none"):
+                        errors.append("setup.service_management.mode must be one of managed, existing, none")
+                    apply_mode = service_mgmt.get("apply_mode")
+                    if apply_mode is not None and apply_mode not in ("direct", "manual"):
+                        errors.append("setup.service_management.apply_mode must be one of direct, manual")
+            managed_stack = setup_cfg.get("managed_stack")
+            if managed_stack is not None:
+                if not isinstance(managed_stack, dict):
+                    errors.append("setup.managed_stack must be an object")
+                else:
+                    for bool_name in ("direct_manage_requested", "hostctl_enabled", "resume_ready"):
+                        value = managed_stack.get(bool_name)
+                        if value is not None and not isinstance(value, bool):
+                            errors.append(f"setup.managed_stack.{bool_name} must be true/false")
+                    for str_name in ("phase", "phase_message", "last_error", "apply_result"):
+                        value = managed_stack.get(str_name)
+                        if value is not None and not isinstance(value, str):
+                            errors.append(f"setup.managed_stack.{str_name} must be a string")
+                    for obj_name in ("internal_urls", "generated_credentials", "enabled_features", "last_health", "last_configure_result"):
+                        value = managed_stack.get(obj_name)
+                        if value is not None and not isinstance(value, dict):
+                            errors.append(f"setup.managed_stack.{obj_name} must be an object")
+                    selected = managed_stack.get("selected_services")
+                    if selected is not None and (not isinstance(selected, list) or not all(isinstance(entry, str) for entry in selected)):
+                        errors.append("setup.managed_stack.selected_services must be a list of strings")
+            existing_stack = setup_cfg.get("existing_stack")
+            if existing_stack is not None:
+                if not isinstance(existing_stack, dict):
+                    errors.append("setup.existing_stack must be an object")
+                else:
+                    selected = existing_stack.get("selected_services")
+                    if selected is not None and (not isinstance(selected, list) or not all(isinstance(entry, str) for entry in selected)):
+                        errors.append("setup.existing_stack.selected_services must be a list of strings")
+                    discovered = existing_stack.get("discovered_health")
+                    if discovered is not None and not isinstance(discovered, dict):
+                        errors.append("setup.existing_stack.discovered_health must be an object")
+            stack_cfg = setup_cfg.get("stack")
+            if stack_cfg is not None:
+                if not isinstance(stack_cfg, dict):
+                    errors.append("setup.stack must be an object")
+                else:
+                    for bool_name in (
+                        "enable_arr_stack",
+                        "enable_radarr",
+                        "enable_sonarr",
+                        "enable_readarr",
+                        "enable_prowlarr",
+                        "enable_bazarr",
+                        "enable_qbittorrent",
+                        "enable_vpn",
+                        "enable_jellyfin",
+                        "enable_hostctl",
+                    ):
+                        value = stack_cfg.get(bool_name)
+                        if value is not None and not isinstance(value, bool):
+                            errors.append(f"setup.stack.{bool_name} must be true/false")
+                    for str_name in ("env_path", "media_root", "movies_root", "tv_root", "downloads_root", "books_root"):
+                        value = stack_cfg.get(str_name)
+                        if value is not None and not isinstance(value, str):
+                            errors.append(f"setup.stack.{str_name} must be a string")
+                    compose_profiles = stack_cfg.get("compose_profiles")
+                    if compose_profiles is not None:
+                        if not isinstance(compose_profiles, list) or not all(isinstance(entry, str) for entry in compose_profiles):
+                            errors.append("setup.stack.compose_profiles must be a list of strings")
+
+    security_cfg = config.get("security")
+    if security_cfg is not None:
+        if not isinstance(security_cfg, dict):
+            errors.append("security must be an object")
+        else:
+            enabled = security_cfg.get("admin_pin_enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                errors.append("security.admin_pin_enabled must be true/false")
+            pin_hash = security_cfg.get("admin_pin_hash")
+            if pin_hash is not None and not isinstance(pin_hash, str):
+                errors.append("security.admin_pin_hash must be a string")
+            session_minutes = security_cfg.get("admin_pin_session_minutes")
+            if session_minutes is not None:
+                if not isinstance(session_minutes, int) or session_minutes < 1 or session_minutes > 1440:
+                    errors.append("security.admin_pin_session_minutes must be an integer between 1 and 1440")
 
     custom_adapter_file = config.get("custom_search_adapters_file")
     if custom_adapter_file is not None:
@@ -925,6 +1381,7 @@ def init_db(db_path):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_videos_playlist ON playlist_videos (playlist_id)")
     ensure_download_jobs_table(conn)
+    ensure_long_term_retry_table(conn)
     try:
         from engine.import_pipeline import ensure_import_batch_tables
 
@@ -1104,7 +1561,39 @@ def get_playlist_videos(youtube, playlist_id):
     return videos
 
 
+_YT_VIDEO_ID_RE = re.compile(r'^[A-Za-z0-9_-]{11}$')
+
+
+def _extract_rd_seed_video(playlist_id):
+    """Return the seed video ID embedded in a YouTube Radio Mix playlist ID, or None.
+
+    YouTube Radio Mix IDs have two known formats:
+      - RD<videoId>   (standard mix seeded from a video)
+      - RDMM<videoId> (My Mix)
+    Both are session-bound and always "unviewable" via the playlist API.
+    """
+    if not playlist_id or not playlist_id.startswith("RD"):
+        return None
+    suffix = playlist_id[2:]
+    # RDMM<videoId>
+    if suffix.startswith("MM") and _YT_VIDEO_ID_RE.match(suffix[2:]):
+        return suffix[2:]
+    # RD<videoId>
+    if _YT_VIDEO_ID_RE.match(suffix):
+        return suffix
+    return None
+
+
 def get_playlist_videos_fallback(playlist_id, *, cookie_file=None):
+    seed_video = _extract_rd_seed_video(playlist_id)
+    if seed_video:
+        logging.warning(
+            "Playlist %s is a YouTube Radio Mix (unviewable); returning seed video %s",
+            playlist_id,
+            seed_video,
+        )
+        return [{"videoId": seed_video, "playlist_index": 1}], False
+
     playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
     opts = {
         "skip_download": True,
@@ -1133,6 +1622,19 @@ def get_playlist_videos_fallback(playlist_id, *, cookie_file=None):
 
 
 def get_playlist_preview_fallback(playlist_id, *, cookie_file=None):
+    seed_video = _extract_rd_seed_video(playlist_id)
+    if seed_video:
+        logging.warning(
+            "Playlist %s is a YouTube Radio Mix (unviewable); returning seed video %s for preview",
+            playlist_id,
+            seed_video,
+        )
+        return {
+            "playlist_title": None,
+            "first_video_id": seed_video,
+            "thumbnail_url": f"https://i.ytimg.com/vi/{seed_video}/hqdefault.jpg",
+        }, False
+
     playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
     opts = {
         "skip_download": True,
@@ -1312,6 +1814,13 @@ def run_single_download(
                 "duration_ms": duration_ms,
             }
 
+        effective_defaults = resolve_effective_download_settings(
+            config,
+            media_type=media_type,
+            destination=destination,
+            final_format_override=final_format_override,
+            fallback_destination=paths.single_downloads_dir,
+        )
         try:
             enqueue_payload = build_download_job_payload(
                 config=config,
@@ -1321,9 +1830,9 @@ def run_single_download(
                 media_intent=media_intent,
                 source=source,
                 url=video_url,
-                destination=destination,
+                destination=effective_defaults.get("destination"),
                 base_dir=paths.single_downloads_dir,
-                final_format_override=final_format_override,
+                final_format_override=effective_defaults.get("final_format"),
                 resolved_metadata=resolved_metadata,
             )
         except ValueError as exc:
@@ -1405,12 +1914,12 @@ def run_single_playlist(
         logging.error("Invalid playlist ID or URL: %s", playlist_value)
         return status
 
-    normalized_final_format = str(final_format_override or "").strip().lower()
     requested_media_mode = str(_ignored.get("media_mode") or "").strip().lower()
     if requested_media_mode not in {"video", "music", "music_video"}:
         requested_media_mode = "music_video" if bool(_ignored.get("music_video")) else ""
     explicit_music_mode = bool(_ignored.get("music_mode")) or requested_media_mode == "music"
     configured_media_type = str((config or {}).get("media_type") or "").strip().lower()
+    normalized_final_format = str(final_format_override or "").strip().lower()
     inferred_music_mode = explicit_music_mode or configured_media_type in {"music", "audio"} or normalized_final_format in {
         "mp3",
         "m4a",
@@ -1420,16 +1929,19 @@ def run_single_playlist(
         "opus",
         "aac",
     }
-    if inferred_music_mode:
-        default_folder = config.get("music_download_folder") or config.get("single_download_folder") or "."
-    else:
-        default_folder = config.get("single_download_folder") or config.get("music_download_folder") or "."
-    folder = destination or default_folder
+    effective_defaults = resolve_effective_download_settings(
+        config,
+        media_mode=requested_media_mode or ("music" if inferred_music_mode else "video"),
+        destination=destination,
+        final_format_override=final_format_override,
+        fallback_destination=".",
+    )
     entry = {
         "playlist_id": playlist_id,
-        "folder": folder,
+        "folder": effective_defaults.get("destination"),
         "remove_after_download": False,
         "mode": "full",
+        "final_format": effective_defaults.get("final_format"),
     }
     if requested_media_mode:
         entry["media_mode"] = requested_media_mode
@@ -1439,8 +1951,6 @@ def run_single_playlist(
         entry["media_type"] = "music"
     if account:
         entry["account"] = account
-    if final_format_override:
-        entry["final_format"] = final_format_override
 
     run_config = dict(config) if isinstance(config, dict) else {}
     run_config["playlists"] = [entry]
@@ -1646,3 +2156,87 @@ def run_archive(
         force_redownload=bool(force_redownload),
     )
     return status
+
+
+def download_with_ytdlp_native(url, temp_dir, *, paths=None, config=None, **kwargs):
+    """Minimal yt-dlp download using YoutubeDL with no advanced option overrides.
+
+    Returns the downloaded file path string on success, or None on failure.
+    Callers must not inject format/extractor overrides — this is the "pure" path.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    ytdlp_temp = str(getattr(paths, "ytdlp_temp_dir", temp_dir) or temp_dir)
+    opts = {
+        "outtmpl": f"{temp_dir}/%(id)s.%(ext)s",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "paths": {"temp": ytdlp_temp},
+    }
+    try:
+        with YoutubeDL(opts) as ydl:
+            rc = ydl.download([url])
+            if rc != 0:
+                return None
+        import glob as _glob
+        candidates = _glob.glob(f"{temp_dir}/*")
+        if candidates:
+            return candidates[0]
+        return None
+    except Exception:
+        logging.exception("download_with_ytdlp_native failed url=%s", url)
+        return None
+
+
+def download_with_ytdlp_hardened(url, temp_dir, *, paths=None, config=None, **kwargs):
+    """Fallback yt-dlp download with more permissive settings."""
+    cfg = config if isinstance(config, dict) else {}
+    opts = {
+        "outtmpl": f"{temp_dir}/%(id)s.%(ext)s",
+        "format": "bestvideo*+bestaudio/best",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "retries": 3,
+        "fragment_retries": 3,
+    }
+    try:
+        with YoutubeDL(opts) as ydl:
+            rc = ydl.download([url])
+            if rc != 0:
+                return None
+        import glob as _glob
+        candidates = _glob.glob(f"{temp_dir}/*")
+        if candidates:
+            return candidates[0]
+        return None
+    except Exception:
+        logging.exception("download_with_ytdlp_hardened failed url=%s", url)
+        return None
+
+
+def download_with_ytdlp_auto(url, temp_dir, *, paths=None, config=None, **kwargs):
+    """Try native download first; fall back to hardened on failure or exception."""
+    try:
+        result = download_with_ytdlp_native(url, temp_dir, paths=paths, config=config, **kwargs)
+        if result is not None:
+            return result
+    except Exception:
+        logging.exception("download_with_ytdlp_native raised, falling back to hardened url=%s", url)
+    return download_with_ytdlp_hardened(url, temp_dir, paths=paths, config=config, **kwargs)
+
+
+def _build_download_attempt_plan(mode: str) -> list:
+    """Return an ordered list of yt-dlp attempt configurations.
+
+    Each step is a dict with optional ``format`` and ``extractor_args`` keys.
+    Steps with ``extractor_args=None`` use the default extractor behaviour.
+    The list always includes a permissive "best" fallback as the last entry.
+    """
+    base_steps = [
+        {"format": None, "extractor_args": None},
+    ]
+    if mode == "strict":
+        base_steps.insert(0, {"format": "bestvideo+bestaudio/best", "extractor_args": {"youtube": {"skip": ["dash", "hls"]}}})
+    base_steps.append({"format": "bestaudio/best", "extractor_args": None})
+    return base_steps

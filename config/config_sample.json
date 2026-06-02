@@ -49,6 +49,11 @@
   "music_candidate_cooldown_enabled": true,
   "music_candidate_cooldown_seconds": 21600,
   "music_candidate_cooldown_min_failures": 1,
+  "long_term_retry_enabled": true,
+  "long_term_retry_interval_hours": 24,
+  "long_term_retry_batch_size": 10,
+  "long_term_retry_max_attempts": 0,
+  "long_term_retry_poll_minutes": 60,
   "yt_dlp_opts": {},
   "youtube": {
     "cookies": {
@@ -57,14 +62,19 @@
       "fallback_only": true
     }
   },
-  "filename_template": "%(title)s - %(uploader)s - %(upload_date)s.%(ext)s",
-  "music_filename_template": "%(artist)s/%(album)s/%(track_number)s - %(track)s.%(ext)s",
+  "filename_template": "%(title)s.%(ext)s",
+  "music_filename_template": "%(artist)s/%(album)s/%(track)s.%(ext)s",
   "music_metadata": {
     "enabled": true,
     "confidence_threshold": 70,
     "use_acoustid": false,
     "acoustid_api_key": "",
     "embed_artwork": true,
+    "artwork_cache": {
+      "enabled": true,
+      "cache_dir": "",
+      "max_size_mb": 256
+    },
     "allow_overwrite_tags": true,
     "max_artwork_size_px": 1500,
     "rate_limit_seconds": 1.5,
@@ -77,6 +87,29 @@
     "library_path": "",
     "exports": []
   },
+  "music_preferences": {
+    "favorite_genres": [],
+    "favorite_artists": []
+  },
+  "music_player": {
+    "stations": [],
+    "favorites": [],
+    "radio_history_limit": 100,
+    "local_library_first": true,
+    "cache_stream_fallback": true
+  },
+  "ui_preferences": {
+    "home_video_card_size": 220,
+    "home_video_sort": "best_match",
+    "home_video_results_limit": 24,
+    "music_card_size": 180,
+    "music_sort": "recommended",
+    "music_hidden_genres": [],
+    "music_hidden_artists": [],
+    "movies_tv_card_size": 260,
+    "movies_tv_sort": "best_match"
+  },
+  "settings_advanced_mode": false,
   "dry_run": false,
   "upload_date_format": "MM-YYYY",
   "final_format": "mkv",
@@ -113,6 +146,131 @@
     "sync_poll_minutes": 1440,
     "sync_batch_size": 500,
     "local_node_id": "local_node"
+  },
+  "arr": {
+    "tmdb_api_key": "",
+    "editorial": {
+      "provider": "mdblist",
+      "cache_hours": 12,
+      "mdblist": {
+        "enabled": true,
+        "api_key": "",
+        "allow_public_mode": true
+      }
+    },
+    "radarr": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "sonarr": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "readarr": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "prowlarr": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "bazarr": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "qbittorrent": {
+      "base_url": "",
+      "username": "",
+      "password": "",
+      "download_dir": "",
+      "category_movies": "movies",
+      "category_tv": "tv",
+      "category_books": "books"
+    },
+    "jellyfin": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "vpn": {
+      "provider": "gluetun",
+      "control_url": "",
+      "enabled": false,
+      "route_qbittorrent": true,
+      "route_prowlarr": false,
+      "route_retreivr": false
+    }
+  },
+  "setup": {
+    "show_on_startup": true,
+    "completed_modules": [],
+    "last_applied_at": "",
+    "last_applied_command": "",
+    "last_applied_env_path": "",
+    "restart_required": false,
+    "service_management": {
+      "mode": "none",
+      "apply_mode": "manual"
+    },
+    "managed_stack": {
+      "direct_manage_requested": false,
+      "hostctl_enabled": false,
+      "phase": "idle",
+      "phase_message": "",
+      "last_error": "",
+      "selected_services": [],
+      "enabled_features": {
+        "movies": false,
+        "tv": false,
+        "books": false,
+        "subtitles": false,
+        "downloader": false,
+        "vpn": false,
+        "jellyfin": false
+      },
+      "internal_urls": {},
+      "generated_credentials": {
+        "qbittorrent_username": "",
+        "qbittorrent_password": ""
+      },
+      "resume_ready": false,
+      "apply_result": "",
+      "last_health": {},
+      "last_configure_result": {}
+    },
+    "existing_stack": {
+      "selected_services": [],
+      "discovered_health": {}
+    },
+    "stack": {
+      "enable_arr_stack": false,
+      "enable_radarr": false,
+      "enable_sonarr": false,
+      "enable_readarr": false,
+      "enable_prowlarr": false,
+      "enable_bazarr": false,
+      "enable_qbittorrent": false,
+      "enable_vpn": false,
+      "enable_jellyfin": false,
+      "enable_hostctl": false,
+      "env_path": ".env",
+      "compose_profiles": [],
+      "media_root": "./media",
+      "movies_root": "./media/movies",
+      "tv_root": "./media/tv",
+      "downloads_root": "./downloads",
+      "books_root": "./media/books"
+    }
+  },
+  "security": {
+    "admin_pin_enabled": false,
+    "admin_pin_hash": "",
+    "admin_pin_session_minutes": 30
+  },
+  "playback": {
+    "external_player_mode": "none",
+    "external_player_label": "",
+    "external_player_url_template": "",
+    "plex_base_url": ""
   },
   "custom_search_adapters_file": "config/custom_search_adapters.yaml"
 }

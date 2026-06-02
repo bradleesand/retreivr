@@ -43,6 +43,8 @@ class _MockDownloader:
 def test_idempotency_full_pipeline_two_tracks(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "idempotency.sqlite"
     monkeypatch.setenv("RETREIVR_DB_PATH", str(db_path))
+    import db.downloaded_tracks as _dlt
+    import scheduler.jobs.spotify_playlist_watch as _spw
     monkeypatch.setattr("download.worker.tag_file", lambda _file_path, _metadata, **_kwargs: None)
 
     playlist_id = "playlist-42"

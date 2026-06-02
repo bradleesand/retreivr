@@ -33,19 +33,19 @@ def test_cached_lookup_coalesces_concurrent_misses(monkeypatch):
     _reset_cache_state(monkeypatch, max_size=64)
     calls = {"count": 0}
 
-    def _lookup(_mbid):
+    def _lookup(_mbid, *, dataset_root=None):
         calls["count"] += 1
         time.sleep(0.05)
         return {"video_id": "vid-1", "duration_ms": 123000, "confidence": 0.9}
 
-    monkeypatch.setattr(community_cache, "lookup_recording", _lookup)
+    monkeypatch.setattr(community_cache, "lookup_recording_local", _lookup)
 
     results = []
     errors = []
 
     def _worker():
         try:
-            results.append(community_cache.cached_lookup("rec-1"))
+            results.append(community_cache.cached_lookup("rec-1", allow_remote=False))
         except Exception as exc:  # pragma: no cover
             errors.append(exc)
 
@@ -65,14 +65,14 @@ def test_cached_lookup_preserves_negative_caching(monkeypatch):
     _reset_cache_state(monkeypatch, max_size=64)
     calls = {"count": 0}
 
-    def _lookup(_mbid):
+    def _lookup(_mbid, *, dataset_root=None):
         calls["count"] += 1
         return None
 
-    monkeypatch.setattr(community_cache, "lookup_recording", _lookup)
+    monkeypatch.setattr(community_cache, "lookup_recording_local", _lookup)
 
-    first = community_cache.cached_lookup("missing-rec")
-    second = community_cache.cached_lookup("missing-rec")
+    first = community_cache.cached_lookup("missing-rec", allow_remote=False)
+    second = community_cache.cached_lookup("missing-rec", allow_remote=False)
 
     assert first is None
     assert second is None
@@ -82,17 +82,19 @@ def test_cached_lookup_preserves_negative_caching(monkeypatch):
 def test_cached_lookup_enforces_cache_max_size(monkeypatch):
     _reset_cache_state(monkeypatch, max_size=3)
 
-    def _lookup(mbid):
+    def _lookup(mbid, *, dataset_root=None):
         return {"video_id": f"vid-{mbid}"}
 
-    monkeypatch.setattr(community_cache, "lookup_recording", _lookup)
+    monkeypatch.setattr(community_cache, "lookup_recording_local", _lookup)
 
     for idx in range(5):
-        community_cache.cached_lookup(f"rec-{idx}")
+        community_cache.cached_lookup(f"rec-{idx}", allow_remote=False)
 
     keys = list(community_cache._CACHE.keys())
     assert len(keys) == 3
-    assert keys == ["rec-2", "rec-3", "rec-4"]
+    # Keys include dataset_root_key + allow_remote flag prefix; extract just the mbid suffix.
+    mbid_suffixes = [k.rsplit("|", 1)[-1] for k in keys]
+    assert mbid_suffixes == ["rec-2", "rec-3", "rec-4"]
 
 
 def test_rebuild_reverse_index_from_dataset_is_deterministic(tmp_path):

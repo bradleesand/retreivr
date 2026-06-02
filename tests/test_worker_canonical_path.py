@@ -38,6 +38,7 @@ def test_worker_moves_to_canonical_path_and_returns_it(tmp_path, monkeypatch) ->
                 "album": "Album",
                 "date": "2020",
                 "disc_num": 2,
+                "disc_total": 2,
                 "track_num": 3,
                 "title": "Song",
                 "genre": "Pop",

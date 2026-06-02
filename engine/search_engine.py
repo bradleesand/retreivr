@@ -136,7 +136,7 @@ import time
 import urllib.parse
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from yt_dlp import YoutubeDL
 
@@ -150,7 +150,7 @@ from engine.job_queue import (
 )
 from engine import community_cache
 from engine.json_utils import safe_json_dumps
-from engine.paths import DATA_DIR
+from engine.paths import DATA_DIR, DOWNLOADS_DIR
 from engine.search_adapters import default_adapters, youtube_fast_search
 from engine.search_scoring import (
     classify_music_title_variants,
@@ -520,6 +520,8 @@ def ensure_search_tables(conn):
             source_modifier REAL,
             penalty_multiplier REAL,
             final_score REAL,
+            official INTEGER DEFAULT 0,
+            search_cache_seeded INTEGER DEFAULT 0,
             rank INTEGER,
             FOREIGN KEY (item_id) REFERENCES search_items(id)
         )
@@ -532,13 +534,33 @@ def ensure_search_tables(conn):
     existing = {row[1] for row in cur.fetchall()}
     if "canonical_json" not in existing:
         cur.execute("ALTER TABLE search_candidates ADD COLUMN canonical_json TEXT")
+    if "official" not in existing:
+        cur.execute("ALTER TABLE search_candidates ADD COLUMN official INTEGER DEFAULT 0")
+    if "search_cache_seeded" not in existing:
+        cur.execute("ALTER TABLE search_candidates ADD COLUMN search_cache_seeded INTEGER DEFAULT 0")
 
-    # Local search result cache has been removed from discovery/acquisition flows.
-    # Drop legacy table/indexes on startup to keep schema clean.
-    cur.execute("DROP INDEX IF EXISTS idx_search_query_cache_key")
-    cur.execute("DROP INDEX IF EXISTS idx_search_query_cache_video_id")
-    cur.execute("DROP INDEX IF EXISTS idx_search_query_cache_cached_at")
-    cur.execute("DROP TABLE IF EXISTS search_query_cache")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS search_query_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cache_key TEXT NOT NULL,
+            query_text TEXT,
+            query_text_normalized TEXT,
+            media_type TEXT,
+            source TEXT,
+            url TEXT,
+            title TEXT,
+            uploader TEXT,
+            duration_sec INTEGER,
+            raw_meta_json TEXT,
+            candidate_json TEXT NOT NULL,
+            cached_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_key ON search_query_cache (cache_key)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_url ON search_query_cache (url)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_cached_at ON search_query_cache (cached_at)")
 
     cur.execute(
         """
@@ -671,6 +693,8 @@ class SearchJobStore:
                 candidate_rows = []
                 for cand_row in cur.fetchall():
                     candidate_entry = dict(cand_row)
+                    candidate_entry["official"] = bool(candidate_entry.get("official"))
+                    candidate_entry["search_cache_seeded"] = bool(candidate_entry.get("search_cache_seeded"))
                     canonical_raw = candidate_entry.get("canonical_json")
                     if canonical_raw:
                         try:
@@ -870,6 +894,8 @@ class SearchJobStore:
             rows = []
             for row in cur.fetchall():
                 entry = dict(row)
+                entry["official"] = bool(entry.get("official"))
+                entry["search_cache_seeded"] = bool(entry.get("search_cache_seeded"))
                 canonical_raw = entry.get("canonical_json")
                 if canonical_raw:
                     try:
@@ -891,16 +917,185 @@ class SearchJobStore:
             conn.close()
 
     def list_search_cache(self, *, cache_key, max_age_seconds=None, limit=50):
-        return []
+        normalized_key = str(cache_key or "").strip()
+        if not normalized_key:
+            return []
+        max_rows = max(1, int(limit or 50))
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            params = [normalized_key]
+            age_clause = ""
+            if max_age_seconds is not None:
+                try:
+                    max_age = max(0, int(max_age_seconds))
+                except Exception:
+                    max_age = 0
+                if max_age > 0:
+                    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max_age)).replace(microsecond=0).isoformat()
+                    age_clause = " AND cached_at >= ?"
+                    params.append(cutoff)
+            params.append(max_rows)
+            cur.execute(
+                f"""
+                SELECT source, url, title, uploader, duration_sec, raw_meta_json, candidate_json, cached_at
+                FROM search_query_cache
+                WHERE cache_key=?{age_clause}
+                ORDER BY datetime(cached_at) DESC, id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            )
+            rows = []
+            for row in cur.fetchall():
+                entry = dict(row)
+                candidate = {}
+                raw_candidate = entry.get("candidate_json")
+                if raw_candidate:
+                    try:
+                        parsed = json.loads(raw_candidate)
+                        if isinstance(parsed, dict):
+                            candidate = parsed
+                    except Exception:
+                        candidate = {}
+                merged = dict(candidate)
+                merged.setdefault("source", entry.get("source"))
+                merged.setdefault("url", entry.get("url"))
+                merged.setdefault("title", entry.get("title"))
+                merged.setdefault("uploader", entry.get("uploader"))
+                merged.setdefault("duration_sec", entry.get("duration_sec"))
+                merged.setdefault("raw_meta_json", entry.get("raw_meta_json"))
+                merged["search_cache_seeded"] = bool(merged.get("search_cache_seeded", True))
+                rows.append(merged)
+            return rows
+        finally:
+            conn.close()
 
     def replace_search_cache(self, *, cache_key, query_text, media_type, candidates):
-        return
+        normalized_key = str(cache_key or "").strip()
+        if not normalized_key:
+            return
+        normalized_query = str(query_text or "").strip()
+        normalized_query_text = normalized_query.lower()
+        normalized_media_type = str(media_type or "").strip().lower() or "generic"
+        values = []
+        now = _utc_now()
+        for candidate in list(candidates or []):
+            if not isinstance(candidate, dict):
+                continue
+            url = _coerce_http_url(candidate.get("url"))
+            if not url:
+                continue
+            payload = dict(candidate)
+            payload["search_cache_seeded"] = bool(payload.get("search_cache_seeded", True))
+            if "id" in payload:
+                payload.pop("id", None)
+            values.append(
+                (
+                    normalized_key,
+                    normalized_query,
+                    normalized_query_text,
+                    normalized_media_type,
+                    str(candidate.get("source") or "").strip(),
+                    url,
+                    str(candidate.get("title") or "").strip() or None,
+                    str(candidate.get("uploader") or "").strip() or None,
+                    candidate.get("duration_sec"),
+                    candidate.get("raw_meta_json"),
+                    safe_json_dumps(payload),
+                    now,
+                )
+            )
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM search_query_cache WHERE cache_key=?", (normalized_key,))
+            if values:
+                cur.executemany(
+                    """
+                    INSERT INTO search_query_cache (
+                        cache_key, query_text, query_text_normalized, media_type, source, url,
+                        title, uploader, duration_sec, raw_meta_json, candidate_json, cached_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
     def enforce_search_cache_max_entries(self, *, max_entries):
-        return
+        try:
+            max_allowed = max(1, int(max_entries))
+        except Exception:
+            max_allowed = 5000
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM search_query_cache")
+            total = int(cur.fetchone()[0] or 0)
+            overflow = total - max_allowed
+            if overflow <= 0:
+                return
+            cur.execute(
+                """
+                DELETE FROM search_query_cache
+                WHERE id IN (
+                    SELECT id
+                    FROM search_query_cache
+                    ORDER BY datetime(cached_at) ASC, id ASC
+                    LIMIT ?
+                )
+                """,
+                (overflow,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def prune_search_cache_for_url(self, *, url, failure_reason=None, delete=False):
-        return 0
+        normalized_url = _coerce_http_url(url)
+        if not normalized_url:
+            return 0
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, candidate_json FROM search_query_cache WHERE lower(url)=lower(?)",
+                (normalized_url,),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return 0
+            if delete:
+                ids = [int(row["id"]) for row in rows]
+                placeholders = ", ".join("?" for _ in ids)
+                cur.execute(f"DELETE FROM search_query_cache WHERE id IN ({placeholders})", tuple(ids))
+                conn.commit()
+                return len(ids)
+            if failure_reason:
+                updated = 0
+                for row in rows:
+                    payload = {}
+                    raw_candidate = row["candidate_json"]
+                    if raw_candidate:
+                        try:
+                            parsed = json.loads(raw_candidate)
+                            if isinstance(parsed, dict):
+                                payload = parsed
+                        except Exception:
+                            payload = {}
+                    payload["invalidated_reason"] = str(failure_reason)
+                    cur.execute(
+                        "UPDATE search_query_cache SET candidate_json=? WHERE id=?",
+                        (safe_json_dumps(payload), int(row["id"])),
+                    )
+                    updated += 1
+                conn.commit()
+                return updated
+            return 0
+        finally:
+            conn.close()
 
     def reset_candidates_for_item(self, item_id):
         conn = self._connect()
@@ -922,8 +1117,9 @@ class SearchJobStore:
                         id, item_id, source, url, title, uploader, artist_detected,
                         album_detected, track_detected, duration_sec, artwork_url,
                         raw_meta_json, canonical_json, score_artist, score_track, score_album,
-                        score_duration, source_modifier, penalty_multiplier, final_score, rank
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        score_duration, source_modifier, penalty_multiplier, final_score,
+                        official, search_cache_seeded, rank
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         candidate["id"],
@@ -946,6 +1142,8 @@ class SearchJobStore:
                         candidate.get("source_modifier"),
                         candidate.get("penalty_multiplier"),
                         candidate.get("final_score"),
+                        1 if candidate.get("official") else 0,
+                        1 if candidate.get("search_cache_seeded") else 0,
                         candidate.get("rank"),
                     ),
                 )
@@ -1054,6 +1252,17 @@ class SearchResolutionService:
         self.discovery_max_candidates_per_source = self._parse_discovery_max_candidates(
             self.config.get("discovery_max_candidates_per_source", 10)
         )
+        self.search_cache_enabled = self._as_bool(self.config.get("search_cache_enabled", False))
+        self.search_cache_prune_on_failure = self._as_bool(self.config.get("search_cache_prune_on_failure", True))
+        self.search_cache_ttl_days = self._parse_cache_ttl_days(self.config.get("search_cache_ttl_days", 30))
+        try:
+            self.search_cache_seed_limit = max(1, int(self.config.get("search_cache_seed_limit", 30)))
+        except Exception:
+            self.search_cache_seed_limit = 30
+        try:
+            self.search_cache_max_entries = max(50, int(self.config.get("search_cache_max_entries", 5000)))
+        except Exception:
+            self.search_cache_max_entries = 5000
         self._maybe_rebuild_community_reverse_index()
 
     def _as_bool(self, value):
@@ -1853,34 +2062,234 @@ class SearchResolutionService:
         return merged
 
     def _build_search_cache_query(self, item, request_row):
-        return ""
+        if not isinstance(item, dict):
+            return ""
+        if str(item.get("item_type") or "").strip().lower() == "album":
+            parts = [item.get("artist"), item.get("album")]
+        else:
+            parts = [item.get("artist"), item.get("track"), item.get("album")]
+        return " ".join(str(part or "").strip() for part in parts if str(part or "").strip()).strip()
 
     def _normalize_search_cache_query_text(self, query):
-        return ""
+        text = str(query or "").strip().lower()
+        if not text:
+            return ""
+        text = re.sub(r"[^a-z0-9\\s]+", " ", text)
+        tokens = [token for token in text.split() if token]
+        if len(tokens) >= 4 and len(tokens) % 2 == 0:
+            midpoint = len(tokens) // 2
+            if tokens[:midpoint] == tokens[midpoint:]:
+                tokens = tokens[:midpoint]
+        drop = {
+            "official",
+            "video",
+            "music",
+            "lyrics",
+            "lyric",
+            "audio",
+            "hd",
+            "4k",
+            "mv",
+        }
+        normalized = [token for token in tokens if token not in drop]
+        return " ".join(normalized) if normalized else " ".join(tokens)
 
     def _search_cache_key_for_item(self, item, request_row):
-        return "", ""
+        query = self._build_search_cache_query(item, request_row)
+        cache_key = self._search_cache_key_for_query(
+            query,
+            request_row,
+            item_type=str((item or {}).get("item_type") or "track"),
+        )
+        return cache_key, query
 
     def _search_cache_key_for_query(self, query, request_row, *, item_type):
-        return ""
+        normalized_query = self._normalize_search_cache_query_text(query)
+        normalized_media_type = _normalize_media_type((request_row or {}).get("media_type"), default="generic") or "generic"
+        normalized_item_type = str(item_type or "").strip().lower() or "track"
+        source_priority = ",".join(_parse_source_priority((request_row or {}).get("source_priority_json")))
+        key_payload = f"v1|{normalized_item_type}|{normalized_media_type}|{source_priority}|{normalized_query}"
+        return hashlib.sha256(key_payload.encode("utf-8")).hexdigest()
 
     def _search_cache_key_for_query_legacy(self, query, request_row, *, item_type):
-        return ""
+        normalized_query = self._normalize_search_cache_query_text(query)
+        normalized_item_type = str(item_type or "").strip().lower() or "track"
+        key_payload = f"legacy|{normalized_item_type}|{normalized_query}"
+        return hashlib.sha256(key_payload.encode("utf-8")).hexdigest()
 
     def _build_search_cache_alias_query(self, item):
-        return ""
+        if not isinstance(item, dict):
+            return ""
+        title = str(item.get("title") or item.get("track") or "").strip()
+        if title:
+            return title
+        return str(item.get("uploader") or item.get("artist_detected") or "").strip()
 
     def _search_cache_candidates_for_item(self, item, request_row, *, limit):
-        return []
+        if not bool(self.search_cache_enabled):
+            return []
+        cache_key, query = self._search_cache_key_for_item(item, request_row)
+        if not cache_key:
+            return []
+        try:
+            ttl_seconds = None
+            if int(self.search_cache_ttl_days) > 0:
+                ttl_seconds = int(self.search_cache_ttl_days) * 24 * 60 * 60
+            rows = self.store.list_search_cache(cache_key=cache_key, max_age_seconds=ttl_seconds, limit=limit)
+            legacy_key = self._search_cache_key_for_query_legacy(
+                query,
+                request_row,
+                item_type=str((item or {}).get("item_type") or "track"),
+            )
+            if legacy_key and legacy_key != cache_key:
+                rows.extend(
+                    self.store.list_search_cache(cache_key=legacy_key, max_age_seconds=ttl_seconds, limit=limit)
+                )
+        except Exception as exc:
+            _log_event(logging.WARNING, "search_cache_read_failed", error=str(exc))
+            return []
 
+        deduped: list[dict[str, Any]] = []
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            url = _coerce_http_url(row.get("url"))
+            if not url:
+                continue
+            raw_meta = row.get("raw_meta_json")
+            if isinstance(raw_meta, str) and raw_meta.strip():
+                try:
+                    meta = json.loads(raw_meta)
+                except Exception:
+                    meta = {}
+                if isinstance(meta, dict):
+                    try:
+                        age_limit = int(meta.get("age_limit") or 0)
+                    except Exception:
+                        age_limit = 0
+                    availability = str(meta.get("availability") or "").strip().lower()
+                    if age_limit >= 18 or availability in {"needs_auth", "login_required"}:
+                        continue
+            key = (str(row.get("source") or "").strip().lower(), url.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            candidate = dict(row)
+            candidate["url"] = url
+            candidate["search_cache_seeded"] = True
+            candidate.setdefault("official", bool(candidate.get("official")))
+            candidate.setdefault("candidate_id", str(candidate.get("candidate_id") or url))
+            candidate.setdefault("id", uuid4().hex)
+            deduped.append(candidate)
+            if len(deduped) >= max(1, int(limit or 1)):
+                break
+        return deduped
     def _seed_request_from_search_cache(self, request_id):
-        return
+        if not bool(self.search_cache_enabled):
+            return
+        request_row = self.store.get_request_row(request_id)
+        if not request_row:
+            return
+        self.store.create_items_for_request(request_row)
+        items = self.store.list_items(request_id)
+        for item in items:
+            if str(item.get("status") or "").strip().lower() in {"enqueued", "failed", "skipped"}:
+                continue
+            seeded = self._search_cache_candidates_for_item(item, request_row, limit=self.search_cache_seed_limit)
+            if not seeded:
+                continue
+            ranked = rank_candidates(seeded, source_priority=_parse_source_priority(request_row.get("source_priority_json")))
+            self.store.reset_candidates_for_item(item["id"])
+            self.store.insert_candidates(item["id"], ranked)
+            self.store.update_item_status(item["id"], "candidate_found")
 
     def _refresh_search_cache_for_item(self, request_row, item, ranked):
-        return
+        if not bool(self.search_cache_enabled):
+            return
+        if not isinstance(ranked, list) or not ranked:
+            return
+        try:
+            max_seed = max(1, int(self.search_cache_seed_limit))
+        except Exception:
+            max_seed = 30
+        candidates = []
+        for row in ranked:
+            if not isinstance(row, dict):
+                continue
+            url = _coerce_http_url(row.get("url"))
+            if not url:
+                continue
+            payload = dict(row)
+            payload["url"] = url
+            payload["search_cache_seeded"] = bool(payload.get("search_cache_seeded", True))
+            payload.pop("id", None)
+            candidates.append(payload)
+            if len(candidates) >= max_seed:
+                break
+        if not candidates:
+            return
+        cache_key, query = self._search_cache_key_for_item(item, request_row)
+        if not cache_key:
+            return
+        media_type = _normalize_media_type((request_row or {}).get("media_type"), default="generic") or "generic"
+        try:
+            self.store.replace_search_cache(
+                cache_key=cache_key,
+                query_text=query,
+                media_type=media_type,
+                candidates=candidates,
+            )
+            legacy_key = self._search_cache_key_for_query_legacy(
+                query,
+                request_row,
+                item_type=str((item or {}).get("item_type") or "track"),
+            )
+            if legacy_key and legacy_key != cache_key:
+                self.store.replace_search_cache(
+                    cache_key=legacy_key,
+                    query_text=query,
+                    media_type=media_type,
+                    candidates=candidates,
+                )
+            title_alias = ""
+            best = candidates[0] if candidates else {}
+            if isinstance(best, dict):
+                title_alias = self._build_search_cache_alias_query(best)
+            if title_alias:
+                alias_key = self._search_cache_key_for_query(
+                    title_alias,
+                    request_row,
+                    item_type=str((item or {}).get("item_type") or "track"),
+                )
+                if alias_key:
+                    self.store.replace_search_cache(
+                        cache_key=alias_key,
+                        query_text=title_alias,
+                        media_type=media_type,
+                        candidates=candidates,
+                    )
+            self.store.enforce_search_cache_max_entries(max_entries=self.search_cache_max_entries)
+        except Exception as exc:
+            _log_event(logging.WARNING, "search_cache_write_failed", error=str(exc))
 
     def invalidate_search_cache_entry(self, *, url, reason=None):
-        return 0
+        if not bool(self.search_cache_enabled):
+            return 0
+        if not bool(self.search_cache_prune_on_failure):
+            return 0
+        try:
+            return int(
+                self.store.prune_search_cache_for_url(
+                    url=url,
+                    failure_reason=reason,
+                    delete=True,
+                )
+                or 0
+            )
+        except Exception as exc:
+            _log_event(logging.WARNING, "search_cache_prune_failed", error=str(exc))
+            return 0
 
     def _annotate_candidate_with_community_reverse_lookup(self, candidate):
         if not isinstance(candidate, dict):
@@ -2972,6 +3381,16 @@ class SearchResolutionService:
             )
             return None
         request_id = self.store.create_request(payload)
+        if bool(self.search_cache_enabled):
+            try:
+                self._seed_request_from_search_cache(request_id)
+            except Exception as exc:
+                _log_event(
+                    logging.WARNING,
+                    "search_cache_seed_failed",
+                    request_id=request_id,
+                    error=str(exc),
+                )
         return request_id
 
     def get_search_request(self, request_id):
@@ -3085,7 +3504,13 @@ class SearchResolutionService:
                 merged = dict(base or {})
                 incoming_candidate = dict(incoming or {})
                 for key, value in incoming_candidate.items():
-                    if key in {"community_seeded", "mb_injected", "community_verified_transport"}:
+                    if key in {
+                        "community_seeded",
+                        "mb_injected",
+                        "community_verified_transport",
+                        "search_cache_seeded",
+                        "official",
+                    }:
                         merged[key] = bool(merged.get(key)) or bool(value)
                         continue
                     if _is_blank(merged.get(key)) and not _is_blank(value):
@@ -3117,11 +3542,6 @@ class SearchResolutionService:
                 return merged
 
             def _append_or_merge_candidate(candidate):
-                # For Home generic/video discovery, preserve per-source candidates as-is.
-                # Do not merge across identities; users should see each adapter's results.
-                if request_media_type in {"generic", "video"}:
-                    scored.append(candidate)
-                    return
                 identity = _candidate_identity(candidate)
                 if not identity:
                     scored.append(candidate)
@@ -3131,6 +3551,17 @@ class SearchResolutionService:
                         scored[idx] = _merge_candidate(existing, candidate)
                         return
                 scored.append(candidate)
+
+            # Seed from local search cache before adapter fan-out.
+            seeded_candidates = self._search_cache_candidates_for_item(
+                item,
+                request_row,
+                limit=self.search_cache_seed_limit,
+            )
+            for seeded in seeded_candidates:
+                seeded.setdefault("id", uuid4().hex)
+                seeded.setdefault("candidate_id", str(seeded.get("candidate_id") or seeded.get("url") or seeded["id"]))
+                _append_or_merge_candidate(seeded)
 
             use_lightweight_discovery = (
                 bool(self.lightweight_discovery_enabled) and request_media_type in {"generic", "video"}
@@ -3379,6 +3810,7 @@ class SearchResolutionService:
             self.store.reset_candidates_for_item(item["id"])
             self.store.insert_candidates(item["id"], ranked)
             self.store.update_item_status(item["id"], "candidate_found")
+            self._refresh_search_cache_for_item(request_row, item, ranked)
             _log_event(logging.INFO, "item_candidate_found", request_id=request_id, item_id=item["id"])
 
             min_score = float(request_row.get("min_match_score") or 0.92)
@@ -3486,7 +3918,7 @@ class SearchResolutionService:
                     url=chosen["url"],
                     input_url=chosen.get("url"),
                     destination=destination_dir,
-                    base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
+                    base_dir=(self.paths.single_downloads_dir if self.paths is not None else str(DOWNLOADS_DIR)),
                     final_format_override=final_format_override,
                     resolved_metadata=(expected_music_metadata if expected_music_metadata else canonical_for_job),
                     trace_id=trace_id,
@@ -3743,7 +4175,7 @@ class SearchResolutionService:
                 url=candidate_url,
                 input_url=candidate_url,
                 destination=destination_dir,
-                base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
+                base_dir=(self.paths.single_downloads_dir if self.paths is not None else str(DOWNLOADS_DIR)),
                 final_format_override=final_format_override,
                 resolved_metadata=(expected_music_metadata if expected_music_metadata else canonical_payload),
                 output_template_overrides=(output_template_overrides or None),

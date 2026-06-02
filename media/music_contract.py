@@ -44,7 +44,7 @@ def coerce_canonical_music_metadata(payload):
     source = payload if isinstance(payload, dict) else {}
     track_num = parse_first_positive_int(source.get("track_num") or source.get("track_number"))
     disc_num = parse_first_positive_int(source.get("disc_num") or source.get("disc_number"))
-    return CanonicalMetadata(
+    metadata = CanonicalMetadata(
         title=str(source.get("title") or source.get("track") or "Unknown Title"),
         artist=str(source.get("artist") or "Unknown Artist"),
         album=str(source.get("album") or "Unknown Album"),
@@ -62,3 +62,7 @@ def coerce_canonical_music_metadata(payload):
         artwork=source.get("artwork"),
         lyrics=(str(source.get("lyrics")).strip() if source.get("lyrics") else None),
     )
+    disc_total = parse_first_positive_int(source.get("disc_total"))
+    if disc_total is not None:
+        metadata.disc_total = disc_total  # type: ignore[attr-defined]
+    return metadata

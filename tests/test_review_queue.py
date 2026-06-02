@@ -179,7 +179,14 @@ def test_accept_review_queue_item_moves_file_and_promotes_parent_job(tmp_path: P
     )
     review_queue.record_completed_review_item(db_path, review_job, str(file_path), meta={"title": "Song", "duration_sec": 201})
 
-    result = review_queue.accept_review_queue_items(db_path, ["review:rec-1:cand-1"])
+    recorded_backfill: list[tuple[str, dict, str]] = []
+    original_backfill = review_queue._backfill_resolution_for_accepted_review
+    review_queue._backfill_resolution_for_accepted_review = lambda path, item, final_path: recorded_backfill.append((path, dict(item), str(final_path))) or {"status": "updated"}
+
+    try:
+        result = review_queue.accept_review_queue_items(db_path, ["review:rec-1:cand-1"])
+    finally:
+        review_queue._backfill_resolution_for_accepted_review = original_backfill
     assert result["accepted"] == 1
     accepted_item = review_queue.get_review_queue_item(db_path, "review:rec-1:cand-1")
     assert accepted_item is not None
@@ -190,6 +197,10 @@ def test_accept_review_queue_item_moves_file_and_promotes_parent_job(tmp_path: P
     assert not file_path.exists()
     assert not (quarantine_root / "Artist" / "Album (2024)").exists()
     assert not (quarantine_root / "Artist").exists()
+    assert len(recorded_backfill) == 1
+    assert recorded_backfill[0][0] == db_path
+    assert recorded_backfill[0][1]["recording_mbid"] == "rec-1"
+    assert recorded_backfill[0][2] == str(final_path)
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -252,3 +263,64 @@ def test_reject_review_queue_item_deletes_quarantine_file(tmp_path: Path) -> Non
     assert rejected_item is not None
     assert rejected_item["status"] == review_queue.REVIEW_STATUS_REJECTED
     assert rejected_item["file_path"] is None
+
+
+def test_accept_tag_repair_review_item_updates_existing_file_in_place(tmp_path: Path, monkeypatch) -> None:
+    _, review_queue = _load_review_modules()
+    db_path = str(tmp_path / "db.sqlite")
+    file_path = tmp_path / "Music" / "Artist" / "Album" / "01 - Song.mp3"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(b"audio-data")
+
+    item = review_queue.record_tag_repair_review_item(
+        db_path,
+        str(file_path),
+        existing_tags={"title": "01 - Song"},
+        proposed_tags={"title": "Song", "artist": "Artist", "album": "Album"},
+        reason="missing_canonical_mbid",
+    )
+    applied = {}
+
+    def _apply(path, tags, artwork, **kwargs):
+        applied["path"] = path
+        applied["tags"] = tags
+        applied["artwork"] = artwork
+        applied["kwargs"] = kwargs
+
+    monkeypatch.setattr("metadata.tagger.apply_tags", _apply)
+
+    result = review_queue.accept_review_queue_items(db_path, [item["id"]])
+
+    assert result["accepted"] == 1
+    assert file_path.exists() is True
+    assert applied["path"] == str(file_path)
+    assert applied["tags"]["title"] == "Song"
+    accepted_item = review_queue.get_review_queue_item(db_path, item["id"])
+    assert accepted_item is not None
+    assert accepted_item["status"] == review_queue.REVIEW_STATUS_ACCEPTED
+    assert accepted_item["file_path"] == str(file_path)
+
+
+def test_reject_tag_repair_review_item_keeps_existing_file(tmp_path: Path) -> None:
+    _, review_queue = _load_review_modules()
+    db_path = str(tmp_path / "db.sqlite")
+    file_path = tmp_path / "Music" / "Artist" / "Album" / "01 - Song.mp3"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(b"audio-data")
+
+    item = review_queue.record_tag_repair_review_item(
+        db_path,
+        str(file_path),
+        existing_tags={"title": ""},
+        proposed_tags={"title": "Song"},
+        reason="missing_canonical_mbid",
+    )
+
+    result = review_queue.reject_review_queue_items(db_path, [item["id"]])
+
+    assert result["rejected"] == 1
+    assert file_path.exists() is True
+    rejected_item = review_queue.get_review_queue_item(db_path, item["id"])
+    assert rejected_item is not None
+    assert rejected_item["status"] == review_queue.REVIEW_STATUS_REJECTED
+    assert rejected_item["file_path"] == str(file_path)

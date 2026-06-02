@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sqlite3
 import sys
 
 from metadata.importers.base import TrackIntent
@@ -55,6 +56,7 @@ assert _SPEC and _SPEC.loader
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 process_imported_tracks = _MODULE.process_imported_tracks
+mark_stale_import_batches_abandoned = _MODULE.mark_stale_import_batches_abandoned
 
 
 class FakeMusicBrainzService:
@@ -175,6 +177,7 @@ def _spy_job_payload_builder(*, config, **kwargs):
         "output_template": output_template,
         "resolved_destination": output_template.get("output_dir"),
         "canonical_id": kwargs.get("canonical_id"),
+        "force_requeue": bool(kwargs.get("force_requeue")),
     }
 
 
@@ -312,6 +315,71 @@ def test_import_pipeline_uses_single_batch_id_for_all_enqueued_items() -> None:
     second = queue_store.enqueued[1]["output_template"]["import_batch_id"]
     assert first == result.import_batch_id
     assert second == result.import_batch_id
+
+
+def test_import_pipeline_persists_items_as_resolve_queue_and_enqueues_streaming(tmp_path) -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {"recording-list": [{"id": "mbid-stream-1", "title": "One", "ext:score": "96", "release-list": [{"id": "release-stream-1"}]}]},
+            {"recording-list": []},
+        ]
+    )
+    queue_store = FakeQueueStore()
+    queue_store.db_path = str(tmp_path / "queue.sqlite")
+    snapshots: list[dict] = []
+
+    result = process_imported_tracks(
+        [
+            TrackIntent(artist="Artist", title="One", album="Album", raw_line="", source_format="apple_xml"),
+            TrackIntent(artist="Artist", title="Missing", album="Album", raw_line="", source_format="apple_xml"),
+        ],
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+            "progress_callback": lambda snapshot: snapshots.append(dict(snapshot)),
+        },
+    )
+
+    assert result.resolved_count == 1
+    assert result.enqueued_count == 1
+    assert result.unresolved_count == 1
+    assert any(
+        snapshot.get("phase") == "resolving"
+        and snapshot.get("enqueued_count") == 1
+        for snapshot in snapshots
+    )
+
+    conn = sqlite3.connect(queue_store.db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT source_index, item_state, source_resolution_state, outcome
+            FROM import_batch_items
+            WHERE batch_id=?
+            ORDER BY source_index
+            """,
+            (result.import_batch_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [dict(row) for row in rows] == [
+        {
+            "source_index": 1,
+            "item_state": "queued_for_download",
+            "source_resolution_state": "queued_for_source_resolution",
+            "outcome": "resolved_and_enqueued",
+        },
+        {
+            "source_index": 2,
+            "item_state": "unresolved_no_candidate",
+            "source_resolution_state": "not_started",
+            "outcome": "unresolved_no_candidate",
+        },
+    ]
 
 
 def test_import_pipeline_dedupes_exact_track_lookup_before_mb_binding() -> None:
@@ -488,14 +556,66 @@ def test_import_pipeline_progress_callback_reports_completed_work_units() -> Non
     assert snapshots
     assert snapshots[0]["phase"] == "resolving"
     assert snapshots[0]["processed_tracks"] == 0
-    assert snapshots[1]["processed_tracks"] == 1
-    assert snapshots[2]["processed_tracks"] == 2
+    resolution_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.get("phase") == "resolving" and snapshot.get("resolution_total_tracks")
+    ]
+    assert resolution_snapshots
+    assert any(
+        snapshot["resolution_total_tracks"] == 2
+        and snapshot["resolution_processed_tracks"] == 2
+        for snapshot in resolution_snapshots
+    )
+    enqueue_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.get("phase") == "enqueueing"
+    ]
+    assert enqueue_snapshots[-1]["processed_tracks"] == 2
+    assert any(
+        snapshot.get("phase") == "resolving"
+        and snapshot.get("current_phase_detail") == "metadata_resolved_streaming"
+        and snapshot.get("enqueued_count") == 1
+        for snapshot in snapshots
+    )
     assert snapshots[-1]["phase"] == "finalizing"
     assert snapshots[-1]["processed_tracks"] == 2
     assert snapshots[-1]["resolved_count"] == result.resolved_count
     assert snapshots[-1]["unresolved_count"] == result.unresolved_count
     assert snapshots[-1]["enqueued_count"] == result.enqueued_count
     assert snapshots[-1]["failed_count"] == result.failed_count
+
+
+def test_import_pipeline_marks_stale_batches_abandoned(tmp_path) -> None:
+    db_path = tmp_path / "imports.sqlite"
+    import_id = "stale-import-1"
+    _MODULE._persist_import_batch(
+        db_path=str(db_path),
+        batch_id=import_id,
+        source_format="apple_xml",
+        phase="resolving",
+        current_phase_detail="phase_1_initial_resolution",
+        started_at="2026-05-26T15:11:30+00:00",
+        finished_at=None,
+        total_tracks=119,
+        processed_tracks=0,
+        resolved_count=0,
+        unresolved_count=0,
+        enqueued_count=0,
+        duplicate_skipped_count=0,
+        failed_count=0,
+        top_rejection_reasons={},
+        selected_bucket_counts={},
+    )
+
+    assert mark_stale_import_batches_abandoned(str(db_path)) == 1
+    summary = _MODULE.get_import_batch_summary(str(db_path), import_id)
+
+    assert summary["phase"] == "failed"
+    assert summary["current_phase_detail"] == "abandoned_after_restart"
+    assert summary["finished_at"]
+    assert summary["failed_count"] == 119
 
 
 def test_import_pipeline_skips_enqueue_when_canonical_job_already_exists() -> None:
@@ -524,14 +644,12 @@ def test_import_pipeline_skips_enqueue_when_canonical_job_already_exists() -> No
         mb_release_id="release-skip-1",
         disc_number=1,
     )
-    queue_store.existing_by_canonical_id[canonical_id] = type(
-        "ExistingJob",
-        (),
-        {
-            "status": "completed",
-            "file_path": "/downloads/Music/Fleetwood Mac/Album (2011)/01 - Dreams.m4a",
-        },
-    )()
+    queue_store.duplicate_classifications[canonical_id] = {
+        "job_id": "existing-job-skip",
+        "status": "completed",
+        "classification": "completed_valid",
+        "stale": False,
+    }
     intents = [
         TrackIntent(
             artist="Fleetwood Mac",

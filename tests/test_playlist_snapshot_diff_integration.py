@@ -56,8 +56,8 @@ def test_reordered_playlist_produces_no_new_jobs(tmp_path: Path) -> None:
     assert result["moved_count"] == 2
     assert result["enqueued"] == 0
     assert enqueued == []
-    assert result["run_summary"]["added"] == 0
-    assert result["run_summary"]["completed"] == 0
+    assert result["run_summary"]["enqueued"] == 0
+    assert result["run_summary"]["enqueue_failed"] == 0
 
 
 def test_removed_track_does_not_delete_local_files_unless_explicitly_configured(
@@ -135,4 +135,4 @@ def test_crash_restart_recovery_is_idempotent_after_snapshot_persist(tmp_path: P
     assert second_result["status"] == "unchanged"
     assert second_result["enqueued"] == 0
     assert second_enqueued == []
-    assert second_result["run_summary"]["completed"] == 0
+    assert second_result["run_summary"]["enqueued"] == 0

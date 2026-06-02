@@ -27,8 +27,17 @@ def test_single_disc_album_with_year() -> None:
     assert path == Path("/library/Artist Name/Album Name (2024)/01 - Track Title.mp3")
 
 
-def test_multi_disc_album() -> None:
+def test_disc_number_without_disc_total_stays_flat() -> None:
     path = build_music_path(Path("/library"), _metadata(disc_num=2, track_num=7), "flac")
+
+    assert path == Path("/library/Artist Name/Album Name (2024)/07 - Track Title.flac")
+
+
+def test_multi_disc_album() -> None:
+    metadata = _metadata(disc_num=2, track_num=7)
+    metadata.disc_total = 2  # type: ignore[attr-defined]
+
+    path = build_music_path(Path("/library"), metadata, "flac")
 
     assert path == Path("/library/Artist Name/Album Name (2024)/Disc 2/07 - Track Title.flac")
 
@@ -51,13 +60,13 @@ def test_missing_disc_num_defaults_to_disc_1() -> None:
     assert path == Path("/library/Artist Name/Album Name (2024)/01 - Track Title.mp3")
 
 
-def test_missing_track_num_defaults_to_00() -> None:
+def test_missing_track_num_keeps_title_only_filename() -> None:
     metadata = _metadata()
     metadata.track_num = None  # type: ignore[assignment]
 
     path = build_music_path(Path("/library"), metadata, "mp3")
 
-    assert path == Path("/library/Artist Name/Album Name (2024)/00 - Track Title.mp3")
+    assert path == Path("/library/Artist Name/Album Name (2024)/Track Title.mp3")
 
 
 def test_unicode_characters_are_preserved() -> None:

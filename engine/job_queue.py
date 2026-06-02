@@ -31,6 +31,7 @@ from engine.community_publish_worker import append_publish_proposal_to_outbox, n
 from engine.music_export import run_music_exports
 from engine.resolution_api import upsert_local_acquired_mapping
 from engine.music_title_normalization import has_live_intent, relaxed_search_title
+from engine.download_defaults import normalize_download_media_mode, resolve_effective_download_settings
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
 from media.music_contract import format_zero_padded_track_number, parse_first_positive_int
@@ -127,6 +128,15 @@ _FORMAT_VIDEO_MP4_PREFERRED = (
 _FORMAT_AUDIO = "bestaudio/best"
 
 _AUDIO_FORMATS = {"mp3", "m4a", "flac"}
+LONG_TERM_RETRY_STATUS_DEFERRED = "deferred"
+LONG_TERM_RETRY_STATUS_RETRYING = "retrying"
+LONG_TERM_RETRY_STATUS_REVIEW_READY = "review_ready"
+LONG_TERM_RETRY_STATUS_RESOLVED = "resolved"
+LONG_TERM_RETRY_STATUS_ABANDONED = "abandoned"
+_LONG_TERM_RETRY_ACTIVE_STATUSES = {
+    LONG_TERM_RETRY_STATUS_DEFERRED,
+    LONG_TERM_RETRY_STATUS_RETRYING,
+}
 
 _AUDIO_TITLE_CLEAN_RE = re.compile(
     r"\s*[\(\[\{][^)\]\}]*?(official|music video|video|lyric|audio|visualizer|full video|hd|4k)[^)\]\}]*?[\)\]\}]\s*",
@@ -565,6 +575,42 @@ def ensure_music_candidate_failures_table(conn):
     conn.commit()
 
 
+def ensure_long_term_retry_table(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS long_term_retry_queue (
+            job_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            media_intent TEXT,
+            recording_mbid TEXT,
+            release_mbid TEXT,
+            release_group_mbid TEXT,
+            artist TEXT,
+            track TEXT,
+            album TEXT,
+            first_failed_at TEXT NOT NULL,
+            last_failed_at TEXT NOT NULL,
+            last_attempted_at TEXT,
+            next_attempt_at TEXT,
+            deferred_attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            last_review_ready_at TEXT,
+            last_resolved_at TEXT
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_long_term_retry_status_due "
+        "ON long_term_retry_queue (status, next_attempt_at)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_long_term_retry_recording "
+        "ON long_term_retry_queue (recording_mbid, status)"
+    )
+    conn.commit()
+
+
 def is_music_media_type(value):
     if value is None:
         return False
@@ -868,6 +914,303 @@ class DownloadJobStore:
             return cur.fetchone() is not None
         finally:
             conn.close()
+
+    def get_job(self, job_id):
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM download_jobs WHERE id=? LIMIT 1", (job_id,))
+            row = cur.fetchone()
+            return self._row_to_job(row)
+        finally:
+            conn.close()
+
+    def upsert_long_term_retry_candidate(
+        self,
+        job,
+        *,
+        error_message,
+        retry_after_hours,
+    ):
+        if not job:
+            return
+        recording_mbid, release_mbid = _extract_music_binding_ids(job)
+        payload = job.output_template if isinstance(job.output_template, dict) else {}
+        canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
+        release_group_mbid = str(
+            payload.get("mb_release_group_id")
+            or payload.get("release_group_id")
+            or canonical.get("mb_release_group_id")
+            or canonical.get("release_group_id")
+            or ""
+        ).strip() or None
+        artist = str(canonical.get("artist") or payload.get("artist") or "").strip() or None
+        track = str(canonical.get("track") or canonical.get("title") or payload.get("track") or "").strip() or None
+        album = str(canonical.get("album") or payload.get("album") or "").strip() or None
+        now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        now_iso = now_dt.isoformat()
+        try:
+            hours = max(1, int(retry_after_hours))
+        except Exception:
+            hours = 24
+        next_attempt_at = (now_dt + timedelta(hours=hours)).isoformat()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            ensure_long_term_retry_table(conn)
+            cur.execute(
+                """
+                INSERT INTO long_term_retry_queue (
+                    job_id,
+                    status,
+                    media_intent,
+                    recording_mbid,
+                    release_mbid,
+                    release_group_mbid,
+                    artist,
+                    track,
+                    album,
+                    first_failed_at,
+                    last_failed_at,
+                    last_attempted_at,
+                    next_attempt_at,
+                    deferred_attempt_count,
+                    last_error,
+                    last_review_ready_at,
+                    last_resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 1, ?, NULL, NULL)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    status=excluded.status,
+                    media_intent=excluded.media_intent,
+                    recording_mbid=excluded.recording_mbid,
+                    release_mbid=excluded.release_mbid,
+                    release_group_mbid=excluded.release_group_mbid,
+                    artist=excluded.artist,
+                    track=excluded.track,
+                    album=excluded.album,
+                    last_failed_at=excluded.last_failed_at,
+                    next_attempt_at=excluded.next_attempt_at,
+                    deferred_attempt_count=long_term_retry_queue.deferred_attempt_count + 1,
+                    last_error=excluded.last_error,
+                    last_review_ready_at=NULL,
+                    last_resolved_at=NULL
+                """,
+                (
+                    job.id,
+                    LONG_TERM_RETRY_STATUS_DEFERRED,
+                    str(getattr(job, "media_intent", "") or "").strip() or None,
+                    recording_mbid,
+                    release_mbid,
+                    release_group_mbid,
+                    artist,
+                    track,
+                    album,
+                    now_iso,
+                    now_iso,
+                    next_attempt_at,
+                    str(error_message or "")[:2048] or None,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_long_term_retry_status(self, job_id, *, status, note=None):
+        if not job_id:
+            return
+        now_iso = utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            ensure_long_term_retry_table(conn)
+            fields = {
+                LONG_TERM_RETRY_STATUS_REVIEW_READY: ("last_review_ready_at", now_iso),
+                LONG_TERM_RETRY_STATUS_RESOLVED: ("last_resolved_at", now_iso),
+                LONG_TERM_RETRY_STATUS_ABANDONED: ("last_resolved_at", now_iso),
+            }
+            time_column, time_value = fields.get(status, (None, None))
+            if time_column:
+                cur.execute(
+                    f"""
+                    UPDATE long_term_retry_queue
+                    SET status=?, {time_column}=?, last_error=COALESCE(?, last_error)
+                    WHERE job_id=?
+                    """,
+                    (status, time_value, str(note or "")[:2048] or None, job_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE long_term_retry_queue
+                    SET status=?, last_error=COALESCE(?, last_error)
+                    WHERE job_id=?
+                    """,
+                    (status, str(note or "")[:2048] or None, job_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def claim_due_long_term_retries(
+        self,
+        *,
+        limit,
+        now_iso=None,
+        max_attempt_count=0,
+    ):
+        now_iso = str(now_iso or utc_now())
+        try:
+            limit_value = max(1, int(limit))
+        except Exception:
+            limit_value = 10
+        try:
+            max_attempt_value = int(max_attempt_count or 0)
+        except Exception:
+            max_attempt_value = 0
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            ensure_long_term_retry_table(conn)
+            cur.execute("BEGIN IMMEDIATE")
+            params: list[object] = [LONG_TERM_RETRY_STATUS_DEFERRED, now_iso]
+            max_clause = ""
+            if max_attempt_value > 0:
+                max_clause = " AND deferred_attempt_count < ?"
+                params.append(max_attempt_value)
+            params.append(limit_value)
+            cur.execute(
+                f"""
+                SELECT *
+                FROM long_term_retry_queue
+                WHERE status=?
+                  AND next_attempt_at IS NOT NULL
+                  AND next_attempt_at<=?
+                  {max_clause}
+                ORDER BY next_attempt_at ASC, first_failed_at ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            if not rows:
+                conn.commit()
+                return []
+            now_mark = utc_now()
+            for row in rows:
+                cur.execute(
+                    """
+                    UPDATE long_term_retry_queue
+                    SET status=?, last_attempted_at=?, next_attempt_at=NULL
+                    WHERE job_id=? AND status=?
+                    """,
+                    (
+                        LONG_TERM_RETRY_STATUS_RETRYING,
+                        now_mark,
+                        row.get("job_id"),
+                        LONG_TERM_RETRY_STATUS_DEFERRED,
+                    ),
+                )
+            conn.commit()
+            return rows
+        finally:
+            conn.close()
+
+    def abandon_exhausted_long_term_retries(self, *, max_attempt_count):
+        try:
+            max_attempt_value = int(max_attempt_count or 0)
+        except Exception:
+            max_attempt_value = 0
+        if max_attempt_value <= 0:
+            return 0
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            ensure_long_term_retry_table(conn)
+            cur.execute(
+                """
+                UPDATE long_term_retry_queue
+                SET status=?, last_resolved_at=?, last_error=COALESCE(last_error, ?)
+                WHERE status=?
+                  AND deferred_attempt_count >= ?
+                """,
+                (
+                    LONG_TERM_RETRY_STATUS_ABANDONED,
+                    utc_now(),
+                    "max_deferred_attempts_reached",
+                    LONG_TERM_RETRY_STATUS_DEFERRED,
+                    max_attempt_value,
+                ),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+        finally:
+            conn.close()
+
+    def summarize_long_term_retry_queue(self, *, now_iso=None):
+        now_iso = str(now_iso or utc_now())
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            ensure_long_term_retry_table(conn)
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS deferred_count,
+                    SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS retrying_count,
+                    SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS review_ready_count,
+                    SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS resolved_count,
+                    SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS abandoned_count,
+                    SUM(CASE WHEN status=? AND next_attempt_at IS NOT NULL AND next_attempt_at<=? THEN 1 ELSE 0 END) AS due_count,
+                    MIN(CASE WHEN status=? AND next_attempt_at IS NOT NULL THEN next_attempt_at END) AS next_attempt_at
+                FROM long_term_retry_queue
+                """,
+                (
+                    LONG_TERM_RETRY_STATUS_DEFERRED,
+                    LONG_TERM_RETRY_STATUS_RETRYING,
+                    LONG_TERM_RETRY_STATUS_REVIEW_READY,
+                    LONG_TERM_RETRY_STATUS_RESOLVED,
+                    LONG_TERM_RETRY_STATUS_ABANDONED,
+                    LONG_TERM_RETRY_STATUS_DEFERRED,
+                    now_iso,
+                    LONG_TERM_RETRY_STATUS_DEFERRED,
+                ),
+            )
+            row = cur.fetchone() or {}
+            return {
+                "total": int((row["total"] if isinstance(row, sqlite3.Row) else row.get("total")) or 0),
+                "deferred": int((row["deferred_count"] if isinstance(row, sqlite3.Row) else row.get("deferred_count")) or 0),
+                "retrying": int((row["retrying_count"] if isinstance(row, sqlite3.Row) else row.get("retrying_count")) or 0),
+                "review_ready": int((row["review_ready_count"] if isinstance(row, sqlite3.Row) else row.get("review_ready_count")) or 0),
+                "resolved": int((row["resolved_count"] if isinstance(row, sqlite3.Row) else row.get("resolved_count")) or 0),
+                "abandoned": int((row["abandoned_count"] if isinstance(row, sqlite3.Row) else row.get("abandoned_count")) or 0),
+                "due": int((row["due_count"] if isinstance(row, sqlite3.Row) else row.get("due_count")) or 0),
+                "next_attempt_at": (row["next_attempt_at"] if isinstance(row, sqlite3.Row) else row.get("next_attempt_at")),
+            }
+        finally:
+            conn.close()
+
+    def requeue_failed_job(self, job_id):
+        job = self.get_job(job_id)
+        if not job or not self._is_requeueable_duplicate(job):
+            return False
+        output_template_json = safe_json_dumps(job.output_template) if job.output_template else None
+        return self._requeue_existing_job(
+            job_id=job.id,
+            origin=job.origin,
+            origin_id=job.origin_id,
+            media_type=job.media_type,
+            media_intent=job.media_intent,
+            source=job.source,
+            url=job.url,
+            input_url=job.input_url,
+            canonical_url=job.canonical_url,
+            external_id=job.external_id,
+            max_attempts=job.max_attempts,
+            output_template_json=output_template_json,
+            destination=job.resolved_destination,
+            canonical_id=job.canonical_id,
+        )
 
     def find_active_job(self, origin, origin_id, url):
         conn = self._connect()
@@ -2144,6 +2487,7 @@ class DownloadWorkerEngine:
             ensure_download_jobs_table(conn)
             ensure_downloads_table(conn)
             ensure_music_candidate_failures_table(conn)
+            ensure_long_term_retry_table(conn)
         finally:
             conn.close()
         self._locks = {}
@@ -2207,6 +2551,140 @@ class DownloadWorkerEngine:
         except Exception:
             value = _MUSIC_CANDIDATE_FAILURE_MIN_COUNT
         return max(1, min(value, 10))
+
+    def _long_term_retry_enabled(self) -> bool:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        value = cfg.get("long_term_retry_enabled")
+        if value is None:
+            return True
+        return bool(value)
+
+    def _long_term_retry_interval_hours(self) -> int:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        raw = cfg.get("long_term_retry_interval_hours")
+        try:
+            value = int(raw) if raw is not None else 24
+        except Exception:
+            value = 24
+        return max(1, min(value, 24 * 30))
+
+    def _long_term_retry_batch_size(self) -> int:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        raw = cfg.get("long_term_retry_batch_size")
+        try:
+            value = int(raw) if raw is not None else 10
+        except Exception:
+            value = 10
+        return max(1, min(value, 100))
+
+    def _long_term_retry_max_attempts(self) -> int:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        raw = cfg.get("long_term_retry_max_attempts")
+        try:
+            value = int(raw) if raw is not None else 0
+        except Exception:
+            value = 0
+        return max(0, min(value, 3650))
+
+    def _long_term_retry_scheduler_minutes(self) -> int:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        raw = cfg.get("long_term_retry_poll_minutes")
+        try:
+            value = int(raw) if raw is not None else 60
+        except Exception:
+            value = 60
+        return max(1, min(value, 24 * 60))
+
+    def _job_eligible_for_long_term_retry(self, job, *, error_message: str | None = None) -> bool:
+        if not self._long_term_retry_enabled():
+            return False
+        if str(getattr(job, "media_intent", "") or "").strip().lower() != "music_track":
+            return False
+        reason = str(error_message or "").strip().lower()
+        if not reason:
+            return True
+        if any(token in reason for token in ("binding_missing", "metadata_missing", "cancelled", "canceled")):
+            return False
+        return True
+
+    def _note_long_term_retry_failure(self, job, *, error_message: str | None = None) -> None:
+        if not self._job_eligible_for_long_term_retry(job, error_message=error_message):
+            return
+        try:
+            self.store.upsert_long_term_retry_candidate(
+                job,
+                error_message=error_message,
+                retry_after_hours=self._long_term_retry_interval_hours(),
+            )
+            _log_event(
+                logging.INFO,
+                "music_long_term_retry_promoted",
+                job_id=getattr(job, "id", None),
+                trace_id=getattr(job, "trace_id", None),
+                media_intent=getattr(job, "media_intent", None),
+                error_message=str(error_message or "")[:240],
+            )
+        except Exception:
+            logger.exception("[MUSIC] failed promoting job to long-term retry job_id=%s", getattr(job, "id", None))
+
+    def _record_job_failure(self, job, *, error_message, retryable, retry_delay_seconds):
+        status = self.store.record_failure(
+            job,
+            error_message=error_message,
+            retryable=retryable,
+            retry_delay_seconds=retry_delay_seconds,
+        )
+        if status == JOB_STATUS_FAILED:
+            self._note_long_term_retry_failure(job, error_message=error_message)
+        return status
+
+    def process_long_term_retry_once(self) -> dict[str, object]:
+        batch_size = self._long_term_retry_batch_size()
+        max_attempts = self._long_term_retry_max_attempts()
+        abandoned_exhausted = self.store.abandon_exhausted_long_term_retries(
+            max_attempt_count=max_attempts,
+        )
+        claimed = self.store.claim_due_long_term_retries(
+            limit=batch_size,
+            max_attempt_count=max_attempts,
+        )
+        summary: dict[str, object] = {
+            "status": "ok",
+            "claimed": len(claimed),
+            "requeued": 0,
+            "abandoned": abandoned_exhausted,
+            "errors": 0,
+            "job_ids": [],
+        }
+        for row in claimed:
+            job_id = str(row.get("job_id") or "").strip()
+            if not job_id:
+                continue
+            try:
+                if self.store.requeue_failed_job(job_id):
+                    summary["requeued"] = int(summary.get("requeued") or 0) + 1
+                    summary["job_ids"].append(job_id)
+                    _log_event(logging.INFO, "music_long_term_retry_requeued", job_id=job_id)
+                else:
+                    self.store.update_long_term_retry_status(
+                        job_id,
+                        status=LONG_TERM_RETRY_STATUS_ABANDONED,
+                        note="requeue_failed_or_job_missing",
+                    )
+                    summary["abandoned"] = int(summary.get("abandoned") or 0) + 1
+            except Exception as exc:
+                summary["errors"] = int(summary.get("errors") or 0) + 1
+                logger.exception("[MUSIC] long-term retry requeue failed job_id=%s", job_id)
+                try:
+                    self.store.upsert_long_term_retry_candidate(
+                        self.store.get_job(job_id),
+                        error_message=f"long_term_retry_requeue_failed:{exc}",
+                        retry_after_hours=self._long_term_retry_interval_hours(),
+                    )
+                except Exception:
+                    logger.exception("[MUSIC] failed rescheduling long-term retry job_id=%s", job_id)
+        summary["queue"] = self.store.summarize_long_term_retry_queue()
+        return summary
 
     def _blocked_music_candidate_ids(self, recording_mbid: str | None) -> set[str]:
         if not self._music_candidate_cooldown_enabled():
@@ -2886,7 +3364,7 @@ class DownloadWorkerEngine:
             duration_hint_sec = None
         if not recording_mbid or not release_mbid:
             if persist_failures:
-                self.store.record_failure(
+                self._record_job_failure(
                     job,
                     error_message="music_track_binding_missing",
                     retryable=False,
@@ -2897,7 +3375,7 @@ class DownloadWorkerEngine:
         if not artist or not track:
             logging.error("Music track search failed")
             if persist_failures:
-                self.store.record_failure(
+                self._record_job_failure(
                     job,
                     error_message="music_track_metadata_missing",
                     retryable=False,
@@ -3028,7 +3506,7 @@ class DownloadWorkerEngine:
                     retryable=retryable,
                 )
                 if persist_failures:
-                    self.store.record_failure(
+                    self._record_job_failure(
                         job,
                         error_message=f"music_track_adapter_search_exception:{exc}",
                         retryable=retryable,
@@ -3137,10 +3615,15 @@ class DownloadWorkerEngine:
                 "no_candidates_retrieved",
             }
             if review_job_enqueued:
+                self.store.update_long_term_retry_status(
+                    job.id,
+                    status=LONG_TERM_RETRY_STATUS_REVIEW_READY,
+                    note=failure_reason,
+                )
                 retryable_no_candidate = False
             logging.error("Music track search failed")
             if persist_failures:
-                self.store.record_failure(
+                self._record_job_failure(
                     job,
                     error_message=failure_reason,
                     retryable=retryable_no_candidate,
@@ -3986,7 +4469,7 @@ class DownloadWorkerEngine:
                                 persist_exc,
                             )
                             try:
-                                self.store.record_failure(
+                                self._record_job_failure(
                                     job,
                                     error_message=f"cancel_persistence_failed:{persist_exc}",
                                     retryable=False,
@@ -4085,7 +4568,7 @@ class DownloadWorkerEngine:
                 logger.info(f"[WORKER] processing music_track: {job}")
                 recording_mbid, release_mbid = _extract_music_binding_ids(job)
                 if not recording_mbid or not release_mbid:
-                    self.store.record_failure(
+                    self._record_job_failure(
                         job,
                         error_message="music_track_binding_missing",
                         retryable=False,
@@ -4107,7 +4590,7 @@ class DownloadWorkerEngine:
                     trace_id=job.trace_id,
                     source=job.source,
                 )
-                self.store.record_failure(
+                self._record_job_failure(
                     job,
                     error_message=f"adapter_missing:{job.source}",
                     retryable=False,
@@ -4214,6 +4697,11 @@ class DownloadWorkerEngine:
                     status=current_status,
                 )
                 return
+            self.store.update_long_term_retry_status(
+                job.id,
+                status=LONG_TERM_RETRY_STATUS_RESOLVED,
+                note=final_path,
+            )
             self._clear_music_candidate_cooldown(job)
             if str(getattr(job, "media_intent", "") or "").strip().lower() == "music_track":
                 try:
@@ -4257,7 +4745,7 @@ class DownloadWorkerEngine:
                         persist_exc,
                     )
                     try:
-                        self.store.record_failure(
+                        self._record_job_failure(
                             job,
                             error_message=f"cancel_persistence_failed:{persist_exc}",
                             retryable=False,
@@ -4303,7 +4791,7 @@ class DownloadWorkerEngine:
                 failure_domain = "download_execution"
             candidate_id = getattr(job, "external_id", None) or extract_video_id(getattr(job, "url", None))
             try:
-                new_status = self.store.record_failure(
+                new_status = self._record_job_failure(
                     job,
                     error_message=error_message,
                     retryable=retryable,
@@ -4692,6 +5180,9 @@ def _release_fields_from_template(output_template, canonical):
     disc_number = _normalize_positive_int(
         _extract_release_value(output_template, canonical, "disc_number", "disc", "disc_num")
     )
+    disc_total = _normalize_positive_int(
+        _extract_release_value(output_template, canonical, "disc_total")
+    )
     mb_release_id = _extract_release_value(output_template, canonical, "mb_release_id", "release_id")
     mb_release_group_id = _extract_release_value(
         output_template,
@@ -4704,6 +5195,7 @@ def _release_fields_from_template(output_template, canonical):
         "release_date": release_date,
         "track_number": track_number,
         "disc_number": disc_number,
+        "disc_total": disc_total,
         "mb_release_id": mb_release_id,
         "mb_release_group_id": mb_release_group_id,
     }
@@ -4825,10 +5317,12 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
 
     track_number = None
     disc_number = None
+    disc_total = None
     matched_track = {}
     media = selected_release_data.get("medium-list", [])
     if not isinstance(media, list):
         media = []
+    disc_total = len([medium for medium in media if isinstance(medium, dict)]) or None
     for medium in media:
         if not isinstance(medium, dict):
             continue
@@ -4879,6 +5373,7 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
         "release_date": year_only,
         "track_number": track_number,
         "disc_number": disc_number,
+        "disc_total": disc_total,
         "mb_release_id": selected_release,
         "mb_release_group_id": selected_release_group_id,
         "track_aliases": title_aliases,
@@ -4893,6 +5388,7 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
         release_group_mbid=selected_release_group_id,
         track_number=track_number,
         disc_number=disc_number,
+        disc_total=disc_total,
         release_date=year_only,
     )
     return enriched
@@ -4939,6 +5435,7 @@ def _ensure_release_enriched(job):
             "release_date",
             "track_number",
             "disc_number",
+            "disc_total",
             "mb_release_id",
             "mb_release_group_id",
             "track_aliases",
@@ -5185,15 +5682,16 @@ def build_output_template(config, *, playlist_entry=None, destination=None, base
     base_dir = base_dir or "."
     config = config or {}
     entry = playlist_entry if isinstance(playlist_entry, dict) else {}
-    output_dir = destination or entry.get("folder") or entry.get("directory")
-    if not output_dir:
-        # Prefer the correct default folder based on media type intent.
-        # If the run is not explicitly music/audio, do NOT default into the music folder.
-        media_type = str(entry.get("media_type") or entry.get("media") or "").strip().lower()
-        if media_type in {"music", "audio"}:
-            output_dir = config.get("music_download_folder") or config.get("single_download_folder") or base_dir
-        else:
-            output_dir = config.get("single_download_folder") or config.get("music_download_folder") or base_dir
+    entry_media_mode = str(entry.get("media_mode") or "").strip().lower()
+    entry_media_type = str(entry.get("media_type") or entry.get("media") or "").strip().lower()
+    effective_defaults = resolve_effective_download_settings(
+        config,
+        media_mode=normalize_download_media_mode(entry_media_mode, media_type=entry_media_type),
+        destination=destination or entry.get("folder") or entry.get("directory"),
+        final_format_override=entry.get("final_format"),
+        fallback_destination=base_dir,
+    )
+    output_dir = effective_defaults.get("destination")
     output_dir = resolve_dir(output_dir, base_dir)
 
     final_format = (
@@ -5806,6 +6304,8 @@ def build_ytdlp_opts(context):
                 opts["format"] = _FORMAT_VIDEO
             if video_container_target in {"mp4", "mkv"}:
                 opts["merge_output_format"] = video_container_target
+            if video_container_target == "mp4":
+                opts["recodevideo"] = "mp4"
 
     # Only lock down format-related overrides when the target_format was actually applied
     # (audio codec in audio_mode, or video container preference in video mode).
@@ -7047,6 +7547,20 @@ def preview_direct_url(url, config):
                 continue
         return oembed_title, oembed_author, oembed_thumbnail
 
+    source = resolve_source(url)
+    video_id = extract_video_id(url)
+    if source in {"youtube", "youtube_music"} and video_id:
+        oembed_title, oembed_author, oembed_thumbnail = _youtube_oembed_fallback(url, video_id)
+        if oembed_title or oembed_author or oembed_thumbnail:
+            return {
+                "title": oembed_title or f"YouTube Video ({video_id})",
+                "uploader": oembed_author or "YouTube",
+                "thumbnail_url": oembed_thumbnail or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                "url": url,
+                "source": source,
+                "duration_sec": None,
+            }
+
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -7055,7 +7569,6 @@ def preview_direct_url(url, config):
         uploader = meta.get("channel") or meta.get("artist")
         thumb = meta.get("thumbnail_url")
         if not (title and uploader):
-            video_id = extract_video_id(url)
             oembed_title, oembed_author, oembed_thumbnail = _youtube_oembed_fallback(url, video_id)
             title = title or oembed_title or (f"YouTube Video ({video_id})" if video_id else "YouTube Video")
             uploader = uploader or oembed_author or "YouTube"
@@ -7158,9 +7671,8 @@ def sanitize_for_filesystem(name, maxlen=180):
 
 def pretty_filename(title, channel, upload_date):
     safe_title = sanitize_for_filesystem(title or "")
-    safe_channel = sanitize_for_filesystem(channel or "")
-    if safe_channel:
-        return f"{safe_title} - {safe_channel}".strip(" -")
+    _ = channel
+    _ = upload_date
     return safe_title or "media"
 
 
@@ -7231,7 +7743,8 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None, require_
     _ = template
     _ = fallback_id
 
-    track_label = f"{track_number} - {track or 'media'}.{ext}"
+    _ = track_number
+    track_label = f"{track or 'media'}.{ext}"
     return build_music_relative_layout(
         album_artist=album_artist,
         album_folder=album_folder,
@@ -7250,23 +7763,9 @@ def build_output_filename(meta, fallback_id, ext, template, audio_mode, *, enfor
             fallback_id=fallback_id,
             require_release_metadata=bool(enforce_music_contract),
         )
-    if template:
-        try:
-            rendered = template % {
-                "title": sanitize_for_filesystem(meta.get("title") or fallback_id),
-                "uploader": sanitize_for_filesystem(meta.get("channel") or ""),
-                "upload_date": "",
-                "ext": ext,
-                "id": "",
-            }
-            if rendered:
-                # Guard against template artifacts when optional fields are blank
-                # (e.g. "<id> - - .mp4" or "Title - Channel - .mp4").
-                if re.search(r"\s-\s-", rendered) or re.search(r"\s-\s*\.[A-Za-z0-9]+$", rendered):
-                    return f"{pretty_filename(meta.get('title') or fallback_id, meta.get('channel'), meta.get('upload_date'))}.{ext}"
-                return rendered
-        except Exception:
-            pass
+    # Final video filenames are title-only by convention. yt-dlp may still use
+    # IDs in temporary filenames, but the retained artifact is renamed here.
+    _ = template
     return f"{pretty_filename(meta.get('title') or fallback_id, meta.get('channel'), meta.get('upload_date'))}.{ext}"
 
 

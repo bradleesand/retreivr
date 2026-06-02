@@ -48,7 +48,7 @@ def test_worker_prefers_album_run_artwork_url_over_per_track_release(monkeypatch
     monkeypatch.setattr(
         worker.matcher,
         "select_best_match",
-        lambda source, candidates, duration: ({"artist": "Artist", "title": "Song", "release_id": "release-per-track"}, 99),
+        lambda source, candidates, duration: ({"artist": "Artist", "title": "Song", "release_id": "release-per-track"}, 99, {}),
     )
 
     calls = {"url": 0, "release": 0}
@@ -100,7 +100,7 @@ def test_worker_applies_album_run_artwork_even_when_match_confidence_fails(monke
     monkeypatch.setattr(worker.matcher, "parse_source", lambda meta, file_path: {"artist": "Artist", "title": "Song"})
     monkeypatch.setattr(worker.matcher, "get_duration_seconds", lambda file_path: 200)
     monkeypatch.setattr(worker.musicbrainz_provider, "search_recordings", lambda *args, **kwargs: [])
-    monkeypatch.setattr(worker.matcher, "select_best_match", lambda source, candidates, duration: ({}, 12))
+    monkeypatch.setattr(worker.matcher, "select_best_match", lambda source, candidates, duration: ({}, 12, {}))
     monkeypatch.setattr(
         worker.artwork_provider,
         "fetch_artwork_from_url",
@@ -149,7 +149,7 @@ def test_worker_falls_back_to_release_group_cover_when_release_cover_missing(mon
     monkeypatch.setattr(
         worker.matcher,
         "select_best_match",
-        lambda source, candidates, duration: ({"artist": "Artist", "title": "Song", "release_id": "release-per-track"}, 99),
+        lambda source, candidates, duration: ({"artist": "Artist", "title": "Song", "release_id": "release-per-track"}, 99, {}),
     )
 
     class _FakeMBService:

@@ -120,10 +120,15 @@ def test_api_put_config_hot_applies_watcher_enable_toggle(monkeypatch) -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         module.app.state.config_path = os.path.join(tmpdir, "config.json")
+        module.app.state.scheduler = None
 
+        monkeypatch.setattr(module, "_require_admin_session", lambda *_a, **_k: None)
         monkeypatch.setattr(module, "validate_config", lambda _payload: [])
         monkeypatch.setattr(module, "_strip_deprecated_fields", lambda payload: payload)
         monkeypatch.setattr(module, "_apply_spotify_schedule", lambda _payload: None)
+        monkeypatch.setattr(module, "_apply_community_publish_schedule", lambda _payload: None)
+        monkeypatch.setattr(module, "_apply_resolution_cache_sync_schedule", lambda _payload: None)
+        monkeypatch.setattr(module, "_apply_long_term_retry_schedule", lambda _payload: None)
         monkeypatch.setattr(module, "_merge_schedule_config", lambda value: value or {})
         monkeypatch.setattr(module, "_apply_schedule_config", lambda _schedule: None)
 
@@ -142,8 +147,8 @@ def test_api_put_config_hot_applies_watcher_enable_toggle(monkeypatch) -> None:
         monkeypatch.setattr(module, "_enable_watcher_runtime", _fake_enable)
         monkeypatch.setattr(module, "_disable_watcher_runtime", _fake_disable)
 
-        asyncio.run(module.api_put_config({"enable_watcher": True, "watch_policy": policy}))
-        asyncio.run(module.api_put_config({"enable_watcher": False, "watch_policy": policy}))
+        asyncio.run(module.api_put_config(SimpleNamespace(), {"enable_watcher": True, "watch_policy": policy}))
+        asyncio.run(module.api_put_config(SimpleNamespace(), {"enable_watcher": False, "watch_policy": policy}))
 
     assert calls["enable"] == 1
     assert calls["disable"] == 1

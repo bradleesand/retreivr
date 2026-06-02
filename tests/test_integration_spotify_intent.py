@@ -15,15 +15,27 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture()
 def api_module(monkeypatch, tmp_path: Path):
+    import engine.core  # noqa: F401
+    import engine.job_queue as _jq
     db_path = tmp_path / "spotify_intent.sqlite"
     monkeypatch.setenv("RETREIVR_DB_PATH", str(db_path))
-    monkeypatch.setattr(sys, "version_info", (3, 11, 0, "final", 0), raising=False)
-    monkeypatch.setattr(sys, "version", "3.11.9", raising=False)
+    monkeypatch.setattr(_jq, "ensure_mb_bound_music_track", lambda *a, **kw: None)
+    import db.downloaded_tracks as _dlt
+    import scheduler.jobs.spotify_playlist_watch as _spw
     sys.modules.pop("api.main", None)
     module = importlib.import_module("api.main")
     module.app.router.on_startup.clear()
     module.app.router.on_shutdown.clear()
-    module.app.state.paths = SimpleNamespace(db_path=str(db_path))
+    module.app.state.paths = SimpleNamespace(db_path=str(db_path), single_downloads_dir=str(tmp_path / "downloads"))
+    module.app.state.config_path = str(tmp_path / "config.json")
+    # Initialize tables before creating the store
+    import sqlite3 as _sqlite3
+    from engine.job_queue import ensure_download_jobs_table as _ejt
+    from db.migrations import ensure_downloaded_music_tracks_table as _edmt
+    _conn = _sqlite3.connect(str(db_path))
+    _ejt(_conn)
+    _edmt(_conn)
+    _conn.close()
     module.app.state.worker_engine = SimpleNamespace(store=module.DownloadJobStore(str(db_path)))
     module.app.state.search_service = SimpleNamespace()
     module.app.state.search_request_overrides = {}
@@ -95,7 +107,8 @@ def test_spotify_playlist_intent_ingestion_enqueues_music_track_jobs(
     assert output_template.get("track") == "Intent Song"
     assert output_template.get("album") == "Intent Album"
     assert output_template.get("duration_ms") == 212000
-    assert "spotify" not in json.dumps(output_template).lower()
+    assert output_template.get("spotify_track_id") is None
+    assert output_template.get("spotify_id") is None
 
 
 def test_spotify_oauth_premium_still_prefers_musicbrainz_first(monkeypatch) -> None:

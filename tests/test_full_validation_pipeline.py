@@ -35,6 +35,8 @@ class _MockDownloader:
 def test_full_pipeline_validation_failure_does_not_enable_idempotent_skip(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "validation_pipeline.sqlite"
     monkeypatch.setenv("RETREIVR_DB_PATH", str(db_path))
+    import db.downloaded_tracks as _dlt
+    import scheduler.jobs.spotify_playlist_watch as _spw
 
     # Force worker validation to fail before tagging/recording.
     monkeypatch.setattr("download.worker.validate_duration", lambda *_args, **_kwargs: False)

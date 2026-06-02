@@ -152,17 +152,31 @@ def _process_item(item):
     artwork = None
     if config.get("embed_artwork"):
         max_size_px = config.get("max_artwork_size_px", 1500)
+        artwork_cache_config = config.get("artwork_cache") if isinstance(config.get("artwork_cache"), dict) else {}
+        artwork_cache_kwargs = {}
+        if "enabled" in artwork_cache_config:
+            artwork_cache_kwargs["cache_enabled"] = artwork_cache_config.get("enabled")
+        elif "artwork_cache_enabled" in config:
+            artwork_cache_kwargs["cache_enabled"] = config.get("artwork_cache_enabled")
+        cache_dir = artwork_cache_config.get("cache_dir") or config.get("artwork_cache_dir")
+        if cache_dir:
+            artwork_cache_kwargs["cache_dir"] = cache_dir
+        cache_max_mb = artwork_cache_config.get("max_size_mb", config.get("artwork_cache_max_mb"))
+        if cache_max_mb is not None:
+            artwork_cache_kwargs["cache_max_mb"] = cache_max_mb
         artwork_url = str(meta.get("artwork_url") or "").strip()
         thumbnail_url = str(meta.get("thumbnail_url") or "").strip()
         if artwork_url:
             artwork = artwork_provider.fetch_artwork_from_url(
                 artwork_url,
                 max_size_px=max_size_px,
+                **artwork_cache_kwargs,
             )
         if artwork is None and release_id:
             artwork = artwork_provider.fetch_artwork(
                 release_id,
                 max_size_px=max_size_px,
+                **artwork_cache_kwargs,
             )
         if artwork is None and release_group_id:
             try:
@@ -176,11 +190,13 @@ def _process_item(item):
                 artwork = artwork_provider.fetch_artwork_from_url(
                     group_cover_url,
                     max_size_px=max_size_px,
+                    **artwork_cache_kwargs,
                 )
         if artwork is None and thumbnail_url and thumbnail_url != artwork_url:
             artwork = artwork_provider.fetch_artwork_from_url(
                 thumbnail_url,
                 max_size_px=max_size_px,
+                **artwork_cache_kwargs,
             )
 
     display_artist = tags.get("artist") or "-"

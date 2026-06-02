@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import os
+import re
 import sqlite3
+import urllib.parse
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +24,7 @@ _REVIEW_STATUSES = {
     REVIEW_STATUS_REJECTED,
 }
 _REVIEW_SENTINEL_PLAYLIST_ID = "__review_accept__"
+TAG_REPAIR_REVIEW_INTENT = "music_tag_repair_review"
 
 
 def utc_now_iso() -> str:
@@ -286,6 +291,121 @@ def record_completed_review_item(db_path: str, job, file_path: str, *, meta: dic
         conn.close()
 
 
+def record_tag_repair_review_item(
+    db_path: str,
+    file_path: str,
+    *,
+    existing_tags: dict[str, Any] | None = None,
+    proposed_tags: dict[str, Any] | None = None,
+    reason: str = "missing_canonical_metadata",
+) -> dict[str, Any]:
+    """Add an existing local file to the review queue for in-place tag repair."""
+    normalized_path = os.path.abspath(str(file_path or "").strip())
+    if not normalized_path:
+        raise ValueError("file_path required")
+    proposed = proposed_tags if isinstance(proposed_tags, dict) else {}
+    existing = existing_tags if isinstance(existing_tags, dict) else {}
+    digest = hashlib.sha256(normalized_path.encode("utf-8")).hexdigest()[:24]
+    item_id = f"tagrepair:{digest}"
+    now = utc_now_iso()
+    file_size_bytes = None
+    try:
+        file_size_bytes = int(os.path.getsize(normalized_path))
+    except OSError:
+        file_size_bytes = None
+    mime_type, _ = mimetypes.guess_type(normalized_path)
+    candidate_details = {
+        "review_kind": "tag_repair",
+        "existing_tags": existing,
+        "proposed_tags": proposed,
+        "file_path": normalized_path,
+    }
+    payload = {
+        "id": item_id,
+        "job_id": item_id,
+        "parent_job_id": None,
+        "status": REVIEW_STATUS_PENDING,
+        "media_type": "music",
+        "media_intent": TAG_REPAIR_REVIEW_INTENT,
+        "source": "local_library",
+        "candidate_url": None,
+        "candidate_id": digest,
+        "failure_reason": str(reason or "missing_canonical_metadata").strip() or "missing_canonical_metadata",
+        "top_failed_gate": "manual_metadata_review",
+        "nearest_pass_margin_json": "{}",
+        "candidate_details_json": _json_dumps(candidate_details) or "{}",
+        "canonical_metadata_json": _json_dumps(proposed) or "{}",
+        "target_destination": None,
+        "quarantine_root": os.path.dirname(normalized_path),
+        "file_path": normalized_path,
+        "filename": os.path.basename(normalized_path),
+        "mime_type": mime_type or "application/octet-stream",
+        "file_size_bytes": file_size_bytes,
+        "duration_ms": _safe_int(existing.get("duration_ms") or proposed.get("duration_ms")),
+        "bitrate_kbps": _safe_int(existing.get("bitrate_kbps") or proposed.get("bitrate_kbps")),
+        "artist": str(proposed.get("artist") or existing.get("artist") or "").strip() or None,
+        "album": str(proposed.get("album") or existing.get("album") or "").strip() or None,
+        "track": str(proposed.get("title") or proposed.get("track") or existing.get("title") or "").strip() or None,
+        "album_artist": str(proposed.get("album_artist") or existing.get("album_artist") or "").strip() or None,
+        "recording_mbid": str(proposed.get("recording_id") or proposed.get("recording_mbid") or "").strip() or None,
+        "mb_release_id": str(proposed.get("mb_release_id") or "").strip() or None,
+        "trace_id": None,
+        "created_at": now,
+        "updated_at": now,
+        "resolved_at": None,
+        "accepted_at": None,
+        "rejected_at": None,
+        "resolution_note": None,
+    }
+    conn = _connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO review_queue_items (
+                id, job_id, parent_job_id, status, media_type, media_intent,
+                source, candidate_url, candidate_id, failure_reason, top_failed_gate,
+                nearest_pass_margin_json, candidate_details_json, canonical_metadata_json,
+                target_destination, quarantine_root, file_path, filename, mime_type,
+                file_size_bytes, duration_ms, bitrate_kbps, artist, album, track,
+                album_artist, recording_mbid, mb_release_id, trace_id,
+                created_at, updated_at, resolved_at, accepted_at, rejected_at, resolution_note
+            ) VALUES (
+                :id, :job_id, :parent_job_id, :status, :media_type, :media_intent,
+                :source, :candidate_url, :candidate_id, :failure_reason, :top_failed_gate,
+                :nearest_pass_margin_json, :candidate_details_json, :canonical_metadata_json,
+                :target_destination, :quarantine_root, :file_path, :filename, :mime_type,
+                :file_size_bytes, :duration_ms, :bitrate_kbps, :artist, :album, :track,
+                :album_artist, :recording_mbid, :mb_release_id, :trace_id,
+                :created_at, :updated_at, :resolved_at, :accepted_at, :rejected_at, :resolution_note
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                status=CASE WHEN review_queue_items.status = 'pending' THEN 'pending' ELSE excluded.status END,
+                failure_reason=excluded.failure_reason,
+                top_failed_gate=excluded.top_failed_gate,
+                candidate_details_json=excluded.candidate_details_json,
+                canonical_metadata_json=excluded.canonical_metadata_json,
+                file_path=excluded.file_path,
+                filename=excluded.filename,
+                mime_type=excluded.mime_type,
+                file_size_bytes=excluded.file_size_bytes,
+                artist=excluded.artist,
+                album=excluded.album,
+                track=excluded.track,
+                album_artist=excluded.album_artist,
+                recording_mbid=excluded.recording_mbid,
+                mb_release_id=excluded.mb_release_id,
+                updated_at=excluded.updated_at
+            """,
+            payload,
+        )
+        conn.commit()
+        cur.execute("SELECT * FROM review_queue_items WHERE id=?", (item_id,))
+        return _row_to_item(cur.fetchone()) or payload
+    finally:
+        conn.close()
+
+
 def list_review_queue_items(db_path: str, *, status: str = REVIEW_STATUS_PENDING, limit: int = 200) -> dict[str, Any]:
     normalized_status = _normalize_status(status)
     max_rows = max(1, min(int(limit or 200), 2000))
@@ -443,6 +563,89 @@ def _record_review_isrc(item: dict[str, Any], final_path: str) -> None:
         return
 
 
+def _extract_video_id(url: str | None) -> str | None:
+    normalized = str(url or "").strip()
+    if not normalized:
+        return None
+    if "youtube.com" in normalized:
+        match = re.search(r"v=([a-zA-Z0-9_-]{6,})", normalized)
+        if match:
+            return match.group(1)
+    if "youtu.be" in normalized:
+        parsed = urllib.parse.urlparse(normalized)
+        if parsed.path:
+            return parsed.path.lstrip("/").split("/")[0]
+    return None
+
+
+def _backfill_resolution_for_accepted_review(db_path: str, item: dict[str, Any], final_path: str) -> dict[str, Any]:
+    from engine.resolution_api import upsert_local_acquired_mapping
+    from engine.search_engine import resolve_search_db_path
+
+    recording_mbid = str(item.get("recording_mbid") or "").strip()
+    candidate_url = str(item.get("candidate_url") or "").strip()
+    source = str(item.get("source") or "").strip().lower()
+    if not recording_mbid or not candidate_url or not source:
+        return {"status": "skipped", "reason": "missing_mapping_fields"}
+
+    duration_seconds = None
+    duration_ms = _safe_int(item.get("duration_ms"))
+    if duration_ms is not None and duration_ms > 0:
+        duration_seconds = max(1, duration_ms // 1000)
+    bitrate_kbps = _safe_int(item.get("bitrate_kbps"))
+    media_format = str(os.path.splitext(str(final_path or "").strip())[1] or "").lstrip(".").lower() or None
+    source_id = str(item.get("candidate_id") or "").strip() or _extract_video_id(candidate_url)
+    search_db_path = resolve_search_db_path(db_path, config=None)
+
+    result = upsert_local_acquired_mapping(
+        search_db_path,
+        mbid=recording_mbid,
+        source_url=candidate_url,
+        source=source,
+        node_id="review_accept",
+        duration_seconds=duration_seconds,
+        media_format=media_format,
+        bitrate_kbps=bitrate_kbps,
+        file_hash=None,
+        resolution_method="review_accept",
+        source_id=source_id or None,
+        raw_payload={
+            "accepted_from_review": True,
+            "review_parent_job_id": str(item.get("parent_job_id") or "").strip() or None,
+            "review_job_id": str(item.get("job_id") or "").strip() or None,
+            "candidate_id": str(item.get("candidate_id") or "").strip() or None,
+            "final_path": str(final_path or "").strip() or None,
+        },
+    )
+    normalized = result if isinstance(result, dict) else {"status": "updated"}
+    logging.info(
+        "review_accept_resolution_backfill recording_mbid=%s source=%s source_url=%s status=%s",
+        recording_mbid,
+        source,
+        candidate_url,
+        str(normalized.get("status") or "updated"),
+    )
+    return normalized
+
+
+def _accept_tag_repair_review_item(item: dict[str, Any]) -> str:
+    from metadata.tagger import apply_tags
+
+    file_path = str(item.get("file_path") or "").strip()
+    if not file_path or not os.path.isfile(file_path):
+        raise FileNotFoundError(file_path)
+    canonical = item.get("canonical_metadata") if isinstance(item.get("canonical_metadata"), dict) else {}
+    details = item.get("candidate_details") if isinstance(item.get("candidate_details"), dict) else {}
+    proposed = details.get("proposed_tags") if isinstance(details.get("proposed_tags"), dict) else {}
+    tags = {**proposed, **canonical}
+    if not str(tags.get("title") or tags.get("track") or "").strip():
+        raise RuntimeError("tag_repair_missing_title")
+    if tags.get("track") and not tags.get("title"):
+        tags["title"] = tags.get("track")
+    apply_tags(file_path, tags, artwork=None, allow_overwrite=True, dry_run=False)
+    return file_path
+
+
 def accept_review_queue_items(db_path: str, item_ids: list[str]) -> dict[str, Any]:
     requested = [str(item_id or "").strip() for item_id in (item_ids or []) if str(item_id or "").strip()]
     if not requested:
@@ -464,12 +667,38 @@ def accept_review_queue_items(db_path: str, item_ids: list[str]) -> dict[str, An
                 errors.append(f"{item_id}:not_pending")
                 continue
             try:
+                if str(item.get("media_intent") or "") == TAG_REPAIR_REVIEW_INTENT:
+                    final_path = _accept_tag_repair_review_item(item)
+                    cur.execute(
+                        """
+                        UPDATE review_queue_items
+                        SET status=?,
+                            file_path=?,
+                            updated_at=?,
+                            resolved_at=?,
+                            accepted_at=?,
+                            resolution_note=?
+                        WHERE id=?
+                        """,
+                        (
+                            REVIEW_STATUS_ACCEPTED,
+                            final_path,
+                            now,
+                            now,
+                            now,
+                            "accepted_tag_repair",
+                            item_id,
+                        ),
+                    )
+                    accepted_items.append({"id": item_id, "file_path": final_path})
+                    continue
                 original_file_path = str(item.get("file_path") or "").strip() or None
                 quarantine_root = str(item.get("quarantine_root") or "").strip() or None
                 final_path, final_destination = _move_review_file_to_library(item)
                 _cleanup_empty_review_dirs(original_file_path, quarantine_root)
                 _record_history_for_accepted_review(db_path, item, final_path)
                 _record_review_isrc(item, final_path)
+                _backfill_resolution_for_accepted_review(db_path, item, final_path)
                 review_job_id = str(item.get("job_id") or "").strip()
                 parent_job_id = str(item.get("parent_job_id") or "").strip()
                 candidate_url = str(item.get("candidate_url") or "").strip() or None
@@ -544,35 +773,50 @@ def reject_review_queue_items(db_path: str, item_ids: list[str]) -> dict[str, An
                 continue
             file_path = str(item.get("file_path") or "").strip()
             try:
-                if file_path and os.path.exists(file_path):
+                if str(item.get("media_intent") or "") != TAG_REPAIR_REVIEW_INTENT and file_path and os.path.exists(file_path):
                     os.remove(file_path)
-                _cleanup_empty_review_dirs(file_path, item.get("quarantine_root"))
+                if str(item.get("media_intent") or "") != TAG_REPAIR_REVIEW_INTENT:
+                    _cleanup_empty_review_dirs(file_path, item.get("quarantine_root"))
             except Exception as exc:
                 errors.append(f"{item_id}:delete_failed:{exc}")
                 continue
             review_job_id = str(item.get("job_id") or "").strip()
-            if review_job_id:
+            if review_job_id and str(item.get("media_intent") or "") != TAG_REPAIR_REVIEW_INTENT:
                 _update_download_job_path(cur, job_id=review_job_id, file_path=None, last_error="review_rejected")
-            cur.execute(
-                """
-                UPDATE review_queue_items
-                SET status=?,
-                    file_path=NULL,
-                    updated_at=?,
-                    resolved_at=?,
-                    rejected_at=?,
-                    resolution_note=?
-                WHERE id=?
-                """,
-                (
-                    REVIEW_STATUS_REJECTED,
-                    now,
-                    now,
-                    now,
-                    "rejected_by_operator",
-                    item_id,
-                ),
-            )
+            if str(item.get("media_intent") or "") == TAG_REPAIR_REVIEW_INTENT:
+                cur.execute(
+                    """
+                    UPDATE review_queue_items
+                    SET status=?,
+                        updated_at=?,
+                        resolved_at=?,
+                        rejected_at=?,
+                        resolution_note=?
+                    WHERE id=?
+                    """,
+                    (REVIEW_STATUS_REJECTED, now, now, now, "rejected_by_operator", item_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE review_queue_items
+                    SET status=?,
+                        file_path=NULL,
+                        updated_at=?,
+                        resolved_at=?,
+                        rejected_at=?,
+                        resolution_note=?
+                    WHERE id=?
+                    """,
+                    (
+                        REVIEW_STATUS_REJECTED,
+                        now,
+                        now,
+                        now,
+                        "rejected_by_operator",
+                        item_id,
+                    ),
+                )
             rejected_items.append({"id": item_id})
         conn.commit()
         return {"rejected": len(rejected_items), "errors": errors, "items": rejected_items}

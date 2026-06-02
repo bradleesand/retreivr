@@ -1,33 +1,39 @@
 from __future__ import annotations
 
-import importlib
-import sys
 from types import SimpleNamespace
 
 import pytest
 
+from fastapi import HTTPException
 
-pytest.importorskip("fastapi")
-
-
-def _load_module(monkeypatch):
-    monkeypatch.setattr(sys, "version_info", (3, 11, 0, "final", 0), raising=False)
-    monkeypatch.setattr(sys, "version", "3.11.9", raising=False)
-    sys.modules.pop("api.main", None)
-    return importlib.import_module("api.main")
+from api.intent_queue import IntentQueueAdapter
 
 
-def test_intent_queue_adapter_enqueues_resolved_media_payload(monkeypatch) -> None:
-    module = _load_module(monkeypatch)
+@pytest.fixture(autouse=True)
+def _stub_mb_enrichment(monkeypatch):
+    import engine.job_queue as jq
+
+    monkeypatch.setattr(jq, "ensure_mb_bound_music_track", lambda *a, **kw: None)
+
+
+def _build_adapter(*, store, config=None):
+    state = SimpleNamespace(
+        worker_engine=SimpleNamespace(store=store),
+        config_path="/does/not/matter.json",
+        paths=SimpleNamespace(single_downloads_dir="/tmp/downloads"),
+    )
+    return IntentQueueAdapter(state=state, config_loader=lambda _path: dict(config or {}))
+
+
+def test_intent_queue_adapter_enqueues_resolved_media_payload() -> None:
     captured = []
 
     class _Store:
         def enqueue_job(self, **kwargs):
             captured.append(kwargs)
-            return "job-1"
+            return ("job-1", True, None)
 
-    module.app.state.worker_engine = SimpleNamespace(store=_Store())
-    adapter = module._IntentQueueAdapter()
+    adapter = _build_adapter(store=_Store())
     adapter.enqueue(
         {
             "playlist_id": "pl-1",
@@ -58,17 +64,15 @@ def test_intent_queue_adapter_enqueues_resolved_media_payload(monkeypatch) -> No
     assert job["output_template"]["track"] == "Song"
 
 
-def test_intent_queue_adapter_converts_watch_payload_to_music_track_job(monkeypatch) -> None:
-    module = _load_module(monkeypatch)
+def test_intent_queue_adapter_converts_watch_payload_to_music_track_job() -> None:
     captured = []
 
     class _Store:
         def enqueue_job(self, **kwargs):
             captured.append(kwargs)
-            return "job-2"
+            return ("job-2", True, None)
 
-    module.app.state.worker_engine = SimpleNamespace(store=_Store())
-    adapter = module._IntentQueueAdapter()
+    adapter = _build_adapter(store=_Store())
     adapter.enqueue(
         {
             "playlist_id": "pl-2",
@@ -92,31 +96,29 @@ def test_intent_queue_adapter_converts_watch_payload_to_music_track_job(monkeypa
     assert job["output_template"]["album"] == "Example Album"
 
 
-def test_intent_queue_adapter_skips_non_searchable_payload(monkeypatch, caplog) -> None:
-    module = _load_module(monkeypatch)
-
+def test_intent_queue_adapter_skips_non_searchable_payload(caplog) -> None:
     class _Store:
         def enqueue_job(self, **kwargs):  # pragma: no cover - should not be called
             raise AssertionError("enqueue_job should not be called")
 
-    module.app.state.worker_engine = SimpleNamespace(store=_Store())
-    adapter = module._IntentQueueAdapter()
-    adapter.enqueue({"playlist_id": "pl-3"})
+    adapter = _build_adapter(store=_Store())
+    with pytest.raises(HTTPException):
+        adapter.enqueue({"playlist_id": "pl-3"})
 
     assert "no media URL or searchable artist/title available" in caplog.text
 
 
-def test_intent_queue_adapter_music_track_prefers_mb_canonical_id(monkeypatch) -> None:
-    module = _load_module(monkeypatch)
+def test_intent_queue_adapter_music_track_prefers_mb_canonical_id() -> None:
+    from engine.canonical_ids import build_music_track_canonical_id
+
     captured = []
 
     class _Store:
         def enqueue_job(self, **kwargs):
             captured.append(kwargs)
-            return "job-3"
+            return ("job-3", True, None)
 
-    module.app.state.worker_engine = SimpleNamespace(store=_Store())
-    adapter = module._IntentQueueAdapter()
+    adapter = _build_adapter(store=_Store())
     adapter.enqueue(
         {
             "playlist_id": "pl-4",
@@ -133,7 +135,7 @@ def test_intent_queue_adapter_music_track_prefers_mb_canonical_id(monkeypatch) -
     )
 
     assert len(captured) == 1
-    assert captured[0]["canonical_id"] == module._build_music_track_canonical_id(
+    assert captured[0]["canonical_id"] == build_music_track_canonical_id(
         "Artist",
         "Album",
         7,
