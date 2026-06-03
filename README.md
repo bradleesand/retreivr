@@ -54,6 +54,9 @@ Retreivr is not a streaming server. It is the acquisition layer.
 ### Movies & TV
 ![Movies & TV browse and saved titles](docs/img/img-06-movies-tv.png)
 
+### Guided Setup
+![Guided setup flow](docs/img/img-07-guided-setup.png)
+
 ### Operations Status
 ![Operations Status and queue visibility](docs/img/img-05.png)
 
