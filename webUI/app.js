@@ -5280,14 +5280,16 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
   }
   const hasDirectVideo = !!String(payload.video_id || extractYouTubeVideoId(payload.stream_url) || "").trim();
   const isLocalOnlyPayload = !hasDirectVideo && (isLocalPlayerStreamUrl(payload.stream_url) || !!payload.local_path);
-  if (payload.recording_mbid && !hasDirectVideo && !isLocalOnlyPayload) {
-    const resolved = await resolveRecordingStreamUrl(payload.recording_mbid, {
-      artist: payload.artist,
-      track: payload.title,
-      album: payload.album,
-      release_mbid: payload.mb_release_id,
-      release_group_mbid: payload.mb_release_group_id,
-    });
+  if (payload.recording_mbid && !hasDirectVideo) {
+    const resolved = isLocalOnlyPayload
+      ? await resolveRecordingIndexedStreamUrlWithTimeout(payload.recording_mbid, 900)
+      : await resolveRecordingStreamUrl(payload.recording_mbid, {
+        artist: payload.artist,
+        track: payload.title,
+        album: payload.album,
+        release_mbid: payload.mb_release_id,
+        release_group_mbid: payload.mb_release_group_id,
+      });
     if (resolved?.stream_url || resolved?.video_id) {
       payload = normalizePlayableItem({
         ...payload,
@@ -13411,22 +13413,44 @@ function extractYouTubeVideoId(url) {
 // Returns { stream_url, video_id, source, resolved_via } or null.
 // video_id is populated for YouTube sources — playMusicPlayerItem uses it to trigger
 // the YT IFrame player path instead of the <audio> element.
-async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
-  const runIndexResolve = async () => {
-    if (!recordingMbid) return null;
-    try {
-      const resolution = await fetchJson(`/resolve/recording/${encodeURIComponent(recordingMbid)}`);
-      const selectedUrl = String(resolution?.selection?.selected_url || "").trim();
-      const source = String(resolution?.best_source?.source || "").toLowerCase();
-      if (!selectedUrl || !isYouTubeFamilySource(source, selectedUrl)) return null;
-      const videoId = extractYouTubeVideoId(selectedUrl);
-      if (!videoId) return null;
-      return { stream_url: selectedUrl, video_id: videoId, source: source || "youtube", resolved_via: "resolution_index" };
-    } catch (_err) {
-      return null;
-    }
-  };
+async function resolveRecordingIndexedStreamUrl(recordingMbid) {
+  if (!recordingMbid) return null;
+  try {
+    const resolution = await fetchJson(`/resolve/recording/${encodeURIComponent(recordingMbid)}`);
+    const selectedUrl = String(resolution?.selection?.selected_url || "").trim();
+    const source = String(resolution?.best_source?.source || "").toLowerCase();
+    if (!selectedUrl || !isYouTubeFamilySource(source, selectedUrl)) return null;
+    const videoId = extractYouTubeVideoId(selectedUrl);
+    if (!videoId) return null;
+    return { stream_url: selectedUrl, video_id: videoId, source: source || "youtube", resolved_via: "resolution_index" };
+  } catch (_err) {
+    return null;
+  }
+}
 
+async function resolveRecordingIndexedStreamUrlWithTimeout(recordingMbid, timeoutMs = 900) {
+  if (!recordingMbid) return null;
+  return await new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result || null);
+    };
+    const timer = window.setTimeout(() => finish(null), Math.max(100, Number(timeoutMs) || 900));
+    resolveRecordingIndexedStreamUrl(recordingMbid)
+      .then((result) => {
+        window.clearTimeout(timer);
+        finish(result);
+      })
+      .catch(() => {
+        window.clearTimeout(timer);
+        finish(null);
+      });
+  });
+}
+
+async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
   const runPreviewResolve = async () => {
     try {
       const response = await fetchMusicTrackPreview({ recording_mbid: recordingMbid, ...trackMeta });
@@ -13468,7 +13492,7 @@ async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
         resolve(null);
       }
     };
-    runIndexResolve().then(done).catch(() => done(null));
+    resolveRecordingIndexedStreamUrl(recordingMbid).then(done).catch(() => done(null));
     runPreviewResolve().then(done).catch(() => done(null));
   });
 }
