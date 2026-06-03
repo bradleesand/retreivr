@@ -9276,15 +9276,17 @@ def music_preview(data: dict = Body(...)):
     if not source or not source_url:
         raise HTTPException(status_code=404, detail="preview_not_available")
 
+    video_id = str(preview.get("video_id") or extract_video_id(source_url) or "").strip() or None
+    youtube_preview = source in {"youtube", "youtube_music"} or bool(video_id)
     response = {
-        "preview_type": "video" if media_mode == "music_video" else "audio",
+        "preview_type": "video" if media_mode == "music_video" or youtube_preview else "audio",
         "source": source,
         "source_url": source_url,
         "title": title,
         "resolved_via": str(preview.get("resolved_via") or "").strip() or None,
-        "video_id": str(preview.get("video_id") or extract_video_id(source_url) or "").strip() or None,
+        "video_id": video_id,
     }
-    if media_mode != "music_video":
+    if response["preview_type"] != "video":
         response["stream_url"] = f"/api/music/preview/stream?url={quote(source_url, safe='')}"
     return response
 
@@ -9610,20 +9612,49 @@ def music_album_art(album_id: str):
             cached_url = cached.get("cover_url")
             ttl = COVER_ART_CACHE_TTL_SECONDS if cached_url else COVER_ART_NEGATIVE_CACHE_TTL_SECONDS
             if now - cached_at < ttl:
-                return {"status": "ok", "cover_url": cached.get("cover_url")}
+                return {
+                    "status": "ok",
+                    "cover_url": cached.get("cover_url"),
+                    "cache": "memory",
+                }
+
+    persisted_payload = _get_music_artwork_cache_entry("album", album_id) or {}
+    persisted_url = str(persisted_payload.get("cover_url") or "").strip()
+    if persisted_url and not _is_http_url(persisted_url):
+        persisted_url = ""
+    if persisted_url:
+        if isinstance(cache, dict):
+            cache[album_id] = {
+                "cover_url": persisted_url,
+                "cached_at": now,
+            }
+        return {
+            "status": "ok",
+            "cover_url": persisted_url,
+            "cache": "persistent",
+            "updated_at": persisted_payload.get("updated_at"),
+        }
 
     try:
         cover_url = _mb_service().fetch_release_group_cover_art_url(album_id, timeout=8)
     except Exception:
         logging.exception("music_album_art fetch failed album_id=%s", album_id)
         cover_url = None
+    cover_url_text = str(cover_url or "").strip()
+    cover_url = cover_url_text if cover_url_text and _is_http_url(cover_url_text) else None
 
     if isinstance(cache, dict):
         cache[album_id] = {
             "cover_url": cover_url,
             "cached_at": now,
         }
-    return {"status": "ok", "cover_url": cover_url}
+    if cover_url:
+        _set_music_artwork_cache_entry("album", album_id, {"cover_url": cover_url})
+    return {
+        "status": "ok",
+        "cover_url": cover_url,
+        "cache": "network" if cover_url else "miss",
+    }
 
 
 @app.get("/api/music/artist/art/{artist_mbid}")

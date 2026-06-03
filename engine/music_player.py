@@ -323,16 +323,37 @@ def _embedded_art_payload(path: Path) -> tuple[bytes, str] | None:
     return None
 
 
+def _embedded_art_cache_digest(path: Path, album_dir: Path) -> str:
+    return hashlib.sha256(f"{album_dir.resolve()}|{path.resolve()}".encode("utf-8")).hexdigest()[:24]
+
+
+def _cached_embedded_album_art(path: Path, album_dir: Path) -> str | None:
+    digest = _embedded_art_cache_digest(path, album_dir)
+    cache_dir = _local_art_cache_dir()
+    for ext in CACHED_ART_EXTENSIONS:
+        candidate = cache_dir / f"{digest}{ext}"
+        try:
+            if candidate.exists() and candidate.stat().st_size > 0:
+                return str(candidate.resolve())
+        except Exception:
+            continue
+    return None
+
+
 def _extract_embedded_album_art(path: Path, album_dir: Path, cache: dict[str, str | None]) -> str | None:
     key = f"embedded:{album_dir.resolve()}"
     if key in cache:
         return cache[key]
+    cached_art = _cached_embedded_album_art(path, album_dir)
+    if cached_art:
+        cache[key] = cached_art
+        return cached_art
     payload = _embedded_art_payload(path)
     if not payload:
         cache[key] = None
         return None
     data, ext = payload
-    digest = hashlib.sha256(f"{album_dir.resolve()}|{path.resolve()}".encode("utf-8")).hexdigest()[:24]
+    digest = _embedded_art_cache_digest(path, album_dir)
     target = _local_art_cache_dir() / f"{digest}{ext if ext in CACHED_ART_EXTENSIONS else '.jpg'}"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -460,7 +481,14 @@ def summarize_library(items: list[dict[str, Any]]) -> dict[str, list[dict[str, A
         album_key = album.lower()
         artist_entry = artists_map.setdefault(
             artist_key,
-            {"artist": artist, "artist_key": artist_key, "album_count": 0, "track_count": 0, "latest_downloaded_at": 0},
+            {
+                "artist": artist,
+                "artist_key": artist_key,
+                "album_count": 0,
+                "track_count": 0,
+                "latest_downloaded_at": 0,
+                "artwork_local_path": None,
+            },
         )
         artist_entry["track_count"] += 1
         artist_entry["latest_downloaded_at"] = max(int(artist_entry.get("latest_downloaded_at") or 0), int(item.get("downloaded_at") or 0))

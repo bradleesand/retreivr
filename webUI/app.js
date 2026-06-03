@@ -19921,6 +19921,21 @@ function bindEvents() {
         const source = String(response?.source || "").trim();
         const title = String(response?.title || selectedResult.track || "Preview").trim() || "Preview";
         const sourceUrl = String(response?.source_url || "").trim();
+        if (sourceUrl && isYouTubeFamilySource(source, sourceUrl)) {
+          recordRuntimeResolution({
+            recording_mbid: selectedResult.recording_mbid,
+            release_mbid: selectedResult.mb_release_id,
+            release_group_mbid: selectedResult.mb_release_group_id,
+            source_url: sourceUrl,
+            source: source || "youtube",
+            video_id: String(response?.video_id || extractYouTubeVideoId(sourceUrl) || "").trim() || null,
+            artist: selectedResult.artist,
+            track: selectedResult.track,
+            album: selectedResult.album,
+            duration_ms: selectedResult.duration_ms,
+            resolved_via: String(response?.resolved_via || "preview_button").trim() || "preview_button",
+          });
+        }
         if (previewType === "audio") {
           const streamUrl = String(response?.stream_url || buildPreviewStreamUrl(sourceUrl) || "").trim();
           if (!streamUrl) {
