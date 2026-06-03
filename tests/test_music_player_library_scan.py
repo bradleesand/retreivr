@@ -41,6 +41,13 @@ class _FakeAudio:
         self.tags = tags
 
 
+class _FakePicture:
+    mime = "image/jpeg"
+
+    def __init__(self, data: bytes):
+        self.data = data
+
+
 def test_scan_local_library_prefers_embedded_tags_and_mbids(tmp_path: Path, monkeypatch) -> None:
     music_player = _load_music_player_module()
     track_path = tmp_path / "Folder Artist" / "Folder Album" / "01 - Track.mp3"
@@ -76,6 +83,67 @@ def test_scan_local_library_prefers_embedded_tags_and_mbids(tmp_path: Path, monk
     assert item["recording_mbid"] == "f069fca4-97f8-4bb1-a627-8881a0bf5240"
     assert item["mb_release_id"] == "fb6279fc-91dc-4a27-93e2-03864f92b96d"
     assert item["mb_release_group_id"] == "082002ba-ab38-4da4-8ea5-000a203dda49"
+
+
+def test_scan_local_library_decodes_byte_tags(tmp_path: Path, monkeypatch) -> None:
+    music_player = _load_music_player_module()
+    track_path = tmp_path / "Artist" / "Album" / "01 - Track.m4a"
+    track_path.parent.mkdir(parents=True, exist_ok=True)
+    track_path.write_bytes(b"test-audio")
+
+    monkeypatch.setattr(music_player, "_music_roots", lambda _config: [tmp_path])
+    monkeypatch.setattr(
+        music_player,
+        "MutagenFile",
+        lambda _path, easy=False: _FakeAudio(
+            _FakeTags(
+                {
+                    "\xa9nam": [b"Track"],
+                    "\xa9ART": [b"Artist"],
+                    "\xa9alb": [b"Album"],
+                    "musicbrainz_trackid": [b"6b0b1b38-4f26-4abc-9915-d7ece6633438"],
+                    "musicbrainz_releaseid": [b"dac3eddc-cdce-4b93-9226-bc600cfda54f"],
+                }
+            )
+        ),
+    )
+
+    items = music_player.scan_local_library({}, limit=10)
+
+    assert items[0]["recording_mbid"] == "6b0b1b38-4f26-4abc-9915-d7ece6633438"
+    assert items[0]["mb_release_id"] == "dac3eddc-cdce-4b93-9226-bc600cfda54f"
+
+
+def test_scan_local_library_caches_embedded_artwork(tmp_path: Path, monkeypatch) -> None:
+    music_player = _load_music_player_module()
+    track_path = tmp_path / "Artist" / "Album" / "01 - Track.mp3"
+    data_dir = tmp_path / "data"
+    track_path.parent.mkdir(parents=True, exist_ok=True)
+    track_path.write_bytes(b"test-audio")
+
+    monkeypatch.setenv("RETREIVR_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(music_player, "_music_roots", lambda _config: [tmp_path])
+    monkeypatch.setattr(
+        music_player,
+        "MutagenFile",
+        lambda _path, easy=False: _FakeAudio(
+            _FakeTags(
+                {
+                    "TIT2": ["Track"],
+                    "TPE1": ["Artist"],
+                    "TALB": ["Album"],
+                    "APIC:": _FakePicture(b"image-bytes"),
+                }
+            )
+        ),
+    )
+
+    items = music_player.scan_local_library({}, limit=10)
+
+    artwork_path = Path(items[0]["artwork_local_path"])
+    assert artwork_path.is_file()
+    assert artwork_path.read_bytes() == b"image-bytes"
+    assert artwork_path.parent == data_dir / "artwork_cache" / "local_embedded"
 
 
 def test_scan_local_library_falls_back_to_path_when_tags_unavailable(tmp_path: Path, monkeypatch) -> None:

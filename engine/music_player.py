@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import hashlib
 import mimetypes
 import json
 import os
@@ -21,6 +22,7 @@ except Exception:  # pragma: no cover - optional dependency in some environments
 
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".mp4", ".flac", ".aac", ".ogg", ".opus", ".wav", ".alac", ".wma"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+CACHED_ART_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 PREFERRED_ART_NAMES = (
     "cover",
     "folder",
@@ -44,6 +46,14 @@ _SEARCH_DB_PATH: str | None = None
 def configure_search_db_path(db_path: str | None) -> None:
     global _SEARCH_DB_PATH
     _SEARCH_DB_PATH = str(db_path or "").strip() or None
+
+
+def _data_dir() -> Path:
+    return Path(os.environ.get("RETREIVR_DATA_DIR") or "/data")
+
+
+def _local_art_cache_dir() -> Path:
+    return _data_dir() / "artwork_cache" / "local_embedded"
 
 
 def ensure_music_player_tables(conn: sqlite3.Connection) -> None:
@@ -174,6 +184,7 @@ def is_local_player_path_allowed(
     path: str | Path,
     *,
     allowed_extensions: set[str] | None = None,
+    extra_roots: list[Path] | None = None,
 ) -> bool:
     try:
         resolved = Path(path).expanduser().resolve()
@@ -181,7 +192,8 @@ def is_local_player_path_allowed(
         return False
     if allowed_extensions is not None and resolved.suffix.lower() not in allowed_extensions:
         return False
-    return any(_is_path_under_root(resolved, root) for root in _resolved_music_roots(config))
+    roots = [*_resolved_music_roots(config), *list(extra_roots or [])]
+    return any(_is_path_under_root(resolved, root) for root in roots)
 
 
 def resolve_local_player_file(
@@ -189,12 +201,13 @@ def resolve_local_player_file(
     path: str | Path,
     *,
     allowed_extensions: set[str] | None = None,
+    extra_roots: list[Path] | None = None,
 ) -> Path | None:
     try:
         resolved = Path(path).expanduser().resolve()
     except Exception:
         return None
-    if not is_local_player_path_allowed(config, resolved, allowed_extensions=allowed_extensions):
+    if not is_local_player_path_allowed(config, resolved, allowed_extensions=allowed_extensions, extra_roots=extra_roots):
         return None
     if not resolved.exists() or not resolved.is_file():
         return None
@@ -231,6 +244,26 @@ def _find_album_art(album_dir: Path, cache: dict[str, str | None], roots: list[P
     return found
 
 
+def _coerce_music_tag_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="ignore").strip()
+        except Exception:
+            return ""
+    text_attr = getattr(value, "text", None)
+    if isinstance(text_attr, list) and text_attr:
+        return _coerce_music_tag_text(text_attr[0])
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = _coerce_music_tag_text(item)
+            if text:
+                return text
+        return ""
+    return str(value or "").strip()
+
+
 def _first_music_tag(tags: Any, *keys: str) -> str:
     if not tags:
         return ""
@@ -241,16 +274,75 @@ def _first_music_tag(tags: Any, *keys: str) -> str:
             value = None
         if value is None:
             continue
-        if isinstance(value, (list, tuple)):
-            for item in value:
-                text = str(item or "").strip()
-                if text:
-                    return text
-            continue
-        text = str(value or "").strip()
+        text = _coerce_music_tag_text(value)
         if text:
             return text
     return ""
+
+
+def _embedded_art_payload(path: Path) -> tuple[bytes, str] | None:
+    if MutagenFile is None:
+        return None
+    try:
+        audio = MutagenFile(str(path), easy=False)
+    except Exception:
+        return None
+    if audio is None:
+        return None
+    tags = getattr(audio, "tags", None)
+    if not tags:
+        return None
+    try:
+        for value in tags.values():
+            data = getattr(value, "data", None)
+            if isinstance(data, bytes) and data:
+                mime = str(getattr(value, "mime", "") or "").lower()
+                ext = ".png" if "png" in mime else ".jpg"
+                return data, ext
+    except Exception:
+        pass
+    try:
+        covers = tags.get("covr") if hasattr(tags, "get") else None
+        if covers:
+            first = covers[0] if isinstance(covers, (list, tuple)) else covers
+            if isinstance(first, bytes) and first:
+                return bytes(first), ".jpg"
+    except Exception:
+        pass
+    try:
+        pictures = getattr(audio, "pictures", None)
+        if pictures:
+            first = pictures[0]
+            data = getattr(first, "data", None)
+            if isinstance(data, bytes) and data:
+                mime = str(getattr(first, "mime", "") or "").lower()
+                ext = ".png" if "png" in mime else ".jpg"
+                return data, ext
+    except Exception:
+        pass
+    return None
+
+
+def _extract_embedded_album_art(path: Path, album_dir: Path, cache: dict[str, str | None]) -> str | None:
+    key = f"embedded:{album_dir.resolve()}"
+    if key in cache:
+        return cache[key]
+    payload = _embedded_art_payload(path)
+    if not payload:
+        cache[key] = None
+        return None
+    data, ext = payload
+    digest = hashlib.sha256(f"{album_dir.resolve()}|{path.resolve()}".encode("utf-8")).hexdigest()[:24]
+    target = _local_art_cache_dir() / f"{digest}{ext if ext in CACHED_ART_EXTENSIONS else '.jpg'}"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or target.stat().st_size <= 0:
+            target.write_bytes(data)
+        cache[key] = str(target.resolve())
+        return cache[key]
+    except Exception:
+        cache[key] = None
+        return None
 
 
 def _clean_display_title(value: Any) -> str:
@@ -329,6 +421,8 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
                 title = _clean_display_title(str(tag_data.get("title") or "").strip() or path.stem)
                 stat = resolved_path.stat()
                 artwork_local_path = _find_album_art(resolved_path.parent, artwork_cache, [root])
+                if not artwork_local_path:
+                    artwork_local_path = _extract_embedded_album_art(resolved_path, resolved_path.parent, artwork_cache)
                 items.append(
                     {
                         "id": resolved,

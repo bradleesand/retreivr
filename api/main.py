@@ -177,6 +177,7 @@ from engine.music_player import (
     prime_station,
     reorder_playlist_items,
     is_local_player_path_allowed,
+    _local_art_cache_dir,
     resolve_local_player_file,
     scan_local_library,
     remove_playlist_item,
@@ -11726,9 +11727,10 @@ async def api_player_stream_local(path: str = Query(...)):
 @app.get("/api/player/art/local")
 async def api_player_art_local(path: str = Query(...)):
     cfg = _current_loaded_config()
-    if not is_local_player_path_allowed(cfg, path, allowed_extensions=IMAGE_EXTENSIONS):
+    art_cache_root = _local_art_cache_dir()
+    if not is_local_player_path_allowed(cfg, path, allowed_extensions=IMAGE_EXTENSIONS, extra_roots=[art_cache_root]):
         raise HTTPException(status_code=403, detail={"error": "path_not_allowed"})
-    resolved = resolve_local_player_file(cfg, path, allowed_extensions=IMAGE_EXTENSIONS)
+    resolved = resolve_local_player_file(cfg, path, allowed_extensions=IMAGE_EXTENSIONS, extra_roots=[art_cache_root])
     if resolved is None:
         raise HTTPException(status_code=404, detail={"error": "file_not_found"})
     return FileResponse(

@@ -5280,7 +5280,7 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
   }
   const hasDirectVideo = !!String(payload.video_id || extractYouTubeVideoId(payload.stream_url) || "").trim();
   const isLocalOnlyPayload = !hasDirectVideo && (isLocalPlayerStreamUrl(payload.stream_url) || !!payload.local_path);
-  if (payload.recording_mbid && (!hasDirectVideo || isLocalOnlyPayload)) {
+  if (payload.recording_mbid && !hasDirectVideo && !isLocalOnlyPayload) {
     const resolved = await resolveRecordingStreamUrl(payload.recording_mbid, {
       artist: payload.artist,
       track: payload.title,
