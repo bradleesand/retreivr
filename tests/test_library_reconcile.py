@@ -216,6 +216,43 @@ def test_reconcile_library_scans_default_video_root_when_download_destination_is
     assert result["jobs_inserted"] == 2
 
 
+def test_reconcile_library_backfills_local_video_without_source_metadata(tmp_path, monkeypatch) -> None:
+    downloads_root = tmp_path / "downloads"
+    video_root = downloads_root / "Videos"
+    video_path = video_root / "Home-Videos" / "Family Clip.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"video")
+
+    db_path = tmp_path / "db.sqlite"
+    _prepare_db(db_path)
+
+    monkeypatch.setattr(reconcile_module, "DOWNLOADS_DIR", downloads_root)
+    monkeypatch.setattr(reconcile_module, "get_media_tags", lambda _path: {})
+
+    result = reconcile_module.reconcile_library(
+        db_path=str(db_path),
+        config={"single_download_folder": "Videos/YouTube-Downloads"},
+    )
+
+    assert result["video_files_seen"] == 1
+    assert result["jobs_inserted"] == 1
+    assert result["history_inserted"] == 1
+    assert result["skipped_missing_identity"] == 0
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT title, source, external_id, input_url FROM download_history LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row[0] == "Family Clip"
+    assert row[1] == "local_library"
+    assert row[2].startswith("local-")
+    assert row[3] == str(video_path)
+
+
 def test_reconcile_library_skips_macos_appledouble_sidecars(tmp_path, monkeypatch) -> None:
     downloads_root = tmp_path / "downloads"
     video_root = downloads_root / "Videos"

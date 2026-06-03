@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import hashlib
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
@@ -148,12 +149,15 @@ def _scan_root(conn: sqlite3.Connection, root: Path, summary: ReconcileSummary) 
             continue
         try:
             metadata = None
-            if suffix in _SUPPORTED_AUDIO_EXTENSIONS:
-                summary.audio_files_seen += 1
-                metadata = _read_music_identity(path)
-            elif suffix in _SUPPORTED_VIDEO_EXTENSIONS:
+            is_video = suffix in _SUPPORTED_VIDEO_EXTENSIONS and (
+                suffix not in _SUPPORTED_AUDIO_EXTENSIONS or _is_default_video_path(path)
+            )
+            if is_video:
                 summary.video_files_seen += 1
                 metadata = _read_video_identity(path)
+            elif suffix in _SUPPORTED_AUDIO_EXTENSIONS:
+                summary.audio_files_seen += 1
+                metadata = _read_music_identity(path)
             if metadata is None:
                 summary.skipped_missing_identity += 1
                 continue
@@ -262,7 +266,7 @@ def _read_music_identity(path: Path) -> dict[str, Any] | None:
 def _read_video_identity(path: Path) -> dict[str, Any] | None:
     tags = get_media_tags(str(path))
     if not tags:
-        return None
+        tags = {}
     normalized = {str(key).lower(): str(value).strip() for key, value in tags.items() if str(value).strip()}
     title = (
         normalized.get("title")
@@ -289,7 +293,8 @@ def _read_video_identity(path: Path) -> dict[str, Any] | None:
         source_id = _extract_youtube_id_from_url(input_url) or ""
 
     if not source_id and not input_url:
-        return None
+        source = "local_library"
+        source_id = _local_video_external_id(path)
 
     canonical_url = input_url or _build_canonical_video_url(source, source_id)
     return {
@@ -302,6 +307,26 @@ def _read_video_identity(path: Path) -> dict[str, Any] | None:
         "canonical_url": canonical_url,
         "channel_id": source_channel_id or None,
     }
+
+
+def _local_video_external_id(path: Path) -> str:
+    try:
+        relative = str(path.resolve().relative_to(DOWNLOADS_DIR.resolve()))
+    except Exception:
+        relative = str(path.resolve())
+    try:
+        stat = path.stat()
+        material = f"{relative}|{stat.st_size}|{int(stat.st_mtime)}"
+    except OSError:
+        material = relative
+    return f"local-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _is_default_video_path(path: Path) -> bool:
+    try:
+        return _is_relative_to(path.resolve(), (DOWNLOADS_DIR / "Videos").resolve())
+    except Exception:
+        return False
 
 
 def _insert_reconciled_job(conn: sqlite3.Connection, path: Path, metadata: dict[str, Any]) -> bool:

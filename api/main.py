@@ -12535,16 +12535,18 @@ def _list_video_library_items(db_path: str, *, limit: int = 24) -> list[dict[str
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
+            extension_filters = " OR ".join(["LOWER(filename) LIKE ?" for _ext in _VIDEO_LIBRARY_EXTENSIONS])
             cur.execute(
-                """
+                f"""
                 SELECT title, filename, destination, source, completed_at, file_size_bytes,
                        input_url, canonical_url, external_id
                 FROM download_history
                 WHERE status='completed'
+                  AND ({extension_filters})
                 ORDER BY COALESCE(completed_at, created_at, id) DESC
                 LIMIT ?
                 """,
-                (max(int(limit) * 8, 150),),
+                tuple(f"%{ext}" for ext in _VIDEO_LIBRARY_EXTENSIONS) + (max(int(limit) * 8, 150),),
             )
             rows = [dict(row) for row in cur.fetchall()]
     except sqlite3.OperationalError:
