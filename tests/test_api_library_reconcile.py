@@ -110,3 +110,102 @@ def test_video_library_query_filters_to_video_history_before_limit(monkeypatch, 
 
     assert len(items) == 1
     assert items[0]["title"] == "Old Clip"
+
+
+def test_video_library_uses_source_thumbnail_from_youtube_id(monkeypatch, tmp_path: Path) -> None:
+    _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    downloads_root = tmp_path / "downloads"
+    video_dir = downloads_root / "Videos"
+    video_dir.mkdir(parents=True)
+    video_path = video_dir / "Clip.mp4"
+    video_path.write_bytes(b"video")
+    db_path = tmp_path / "db.sqlite"
+    monkeypatch.setattr(module, "DOWNLOADS_DIR", downloads_root)
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_download_history_table(conn)
+        conn.execute(
+            """
+            INSERT INTO download_history (
+                video_id, title, filename, destination, source, status,
+                created_at, completed_at, external_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "abc123XYZ99",
+                "Clip",
+                video_path.name,
+                str(video_dir),
+                "youtube",
+                "completed",
+                "2026-06-03T12:00:00Z",
+                "2026-06-03T12:00:00Z",
+                "abc123XYZ99",
+            ),
+        )
+
+    items = module._list_video_library_items(str(db_path), limit=1)
+
+    assert items[0]["thumbnail_url"] == "https://i.ytimg.com/vi/abc123XYZ99/hqdefault.jpg"
+    assert items[0]["source_url"] == "https://www.youtube.com/watch?v=abc123XYZ99"
+
+
+def test_video_library_falls_back_to_local_thumbnail_endpoint(monkeypatch, tmp_path: Path) -> None:
+    _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    downloads_root = tmp_path / "downloads"
+    video_dir = downloads_root / "Videos"
+    video_dir.mkdir(parents=True)
+    video_path = video_dir / "Family Clip.mp4"
+    video_path.write_bytes(b"video")
+    db_path = tmp_path / "db.sqlite"
+    monkeypatch.setattr(module, "DOWNLOADS_DIR", downloads_root)
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_download_history_table(conn)
+        conn.execute(
+            """
+            INSERT INTO download_history (
+                video_id, title, filename, destination, source, status,
+                created_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "local-1",
+                "Family Clip",
+                video_path.name,
+                str(video_dir),
+                "local_library",
+                "completed",
+                "2026-06-03T12:00:00Z",
+                "2026-06-03T12:00:00Z",
+            ),
+        )
+
+    items = module._list_video_library_items(str(db_path), limit=1)
+
+    assert items[0]["thumbnail_url"].startswith("/api/library/videos/thumbnail?file_id=")
+
+
+def test_video_library_thumbnail_endpoint_serves_generated_cache(monkeypatch, tmp_path: Path) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    downloads_root = tmp_path / "downloads"
+    video_dir = downloads_root / "Videos"
+    video_dir.mkdir(parents=True)
+    video_path = video_dir / "Family Clip.mp4"
+    video_path.write_bytes(b"video")
+    thumb_path = tmp_path / "thumb.jpg"
+    thumb_path.write_bytes(b"jpg")
+    monkeypatch.setattr(module, "DOWNLOADS_DIR", downloads_root)
+    monkeypatch.setattr(module, "_generate_local_video_thumbnail", lambda _path: thumb_path)
+    file_id = module._file_id_from_path(str(video_path))
+
+    response = client.get("/api/library/videos/thumbnail", params={"file_id": file_id})
+
+    assert response.status_code == 200
+    assert response.content == b"jpg"

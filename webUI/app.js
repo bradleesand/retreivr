@@ -6501,11 +6501,27 @@ async function openFileLocation({ fileId = "", filePath = "" } = {}) {
       body: JSON.stringify(payload),
     });
   } catch (err) {
+    const errorMessage = toUserErrorMessage(err);
+    const fileManagerUnavailable = /file manager command unavailable|xdg-open/i.test(errorMessage);
     notify({
-      kind: "warning",
-      message: `Open file location failed: ${toUserErrorMessage(err)}`,
+      kind: fileManagerUnavailable ? "info" : "warning",
+      message: fileManagerUnavailable
+        ? "This server cannot open a desktop file manager from Docker."
+        : `Open file location failed: ${errorMessage}`,
       ttlMs: 5200,
       scope: `open-location-${fileIdValue || filePathValue}`,
+    });
+    const fallbackPath = filePathValue || fileIdValue;
+    if (fallbackPath && typeof navigator !== "undefined" && navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(fallbackPath).catch(() => {});
+    }
+    notify({
+      kind: "info",
+      message: fallbackPath
+        ? `File location is available on the server: ${fallbackPath}`
+        : "File location is available on the server.",
+      ttlMs: 7600,
+      scope: `open-location-path-${fileIdValue || filePathValue}`,
     });
   }
 }
@@ -7428,6 +7444,53 @@ function openLibraryVideoModal(payload) {
   modal.classList.remove("hidden");
 }
 
+function buildVideoLibraryPreviewCandidate(item) {
+  const sourceUrl = String(item?.source_url || item?.canonical_url || item?.input_url || "").trim();
+  if (!sourceUrl || !isValidHttpUrl(sourceUrl)) return null;
+  let source = String(item?.source || "").trim().toLowerCase();
+  if (!source || source === "local" || source === "local_library" || source === "library_reconcile") {
+    if (extractYouTubeVideoIdFromUrl(sourceUrl)) {
+      source = "youtube";
+    } else if (sourceUrl.includes("archive.org/")) {
+      source = "archive_org";
+    } else if (sourceUrl.includes("rumble.com/")) {
+      source = "rumble";
+    }
+  }
+  return {
+    source,
+    url: sourceUrl,
+    title: String(item?.title || item?.filename || "Video").trim() || "Video",
+    thumbnail_url: String(item?.thumbnail_url || "").trim() || null,
+  };
+}
+
+function buildVideoLibraryPreviewDescriptor(item) {
+  const candidate = buildVideoLibraryPreviewCandidate(item);
+  if (!candidate) return null;
+  return buildHomePreviewDescriptor(candidate);
+}
+
+function buildVideoLibraryHoverPreviewDescriptor(item) {
+  const candidate = buildVideoLibraryPreviewCandidate(item);
+  if (!candidate) return null;
+  return buildHomeHoverPreviewDescriptor(candidate);
+}
+
+function openVideoLibraryWatchHere(payload) {
+  const descriptor = buildVideoLibraryPreviewDescriptor(payload);
+  if (descriptor) {
+    openHomePreviewModal({
+      ...descriptor,
+      description: String(payload?.filepath || "").trim(),
+      directUrl: String(payload?.source_url || payload?.canonical_url || payload?.input_url || "").trim(),
+      directOnly: true,
+    });
+    return;
+  }
+  openLibraryVideoModal(payload);
+}
+
 function closeLibraryVideoModal() {
   const modal = $("#library-video-modal");
   const player = $("#library-video-player");
@@ -7678,6 +7741,91 @@ function buildVideoLibraryModalPayload(item) {
   };
 }
 
+function renderVideoLibraryCard(item, { includeDownload = false } = {}) {
+  const thumbnail = String(item?.thumbnail_url || "").trim() || "assets/no_artwork.png";
+  const sourceLabel = getVideoLibrarySourceBadge(item);
+  const fileId = String(item?.file_id || "").trim();
+  const previewDescriptor = buildVideoLibraryPreviewDescriptor(item);
+  const downloadHref = fileId ? downloadUrl(fileId) : "#";
+  return `
+    <article class="home-candidate-row media-library-card media-library-video-card" data-library-type="video" data-file-id="${escapeAttr(fileId)}">
+      <div class="home-candidate-artwork media-library-video-artwork" ${previewDescriptor ? 'data-preview-enabled="true"' : ""}>
+        <img src="${escapeAttr(thumbnail)}" alt="${escapeAttr(item?.title || "Video")}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
+      </div>
+      <div class="home-candidate-info">
+        <div class="home-candidate-title-row">
+          <div class="home-candidate-title" ${previewDescriptor ? 'data-preview-enabled="true"' : ""}>${escapeHtml(item?.title || item?.filename || "Video")}</div>
+          <span class="home-candidate-source">${escapeHtml(sourceLabel)}</span>
+        </div>
+        <div class="home-candidate-meta">${escapeHtml([formatTimestamp(item?.downloaded_at), formatBytes(item?.size_bytes)].filter(Boolean).join(" • "))}</div>
+      </div>
+      <div class="home-candidate-action home-candidate-action-primary-stack">
+        ${previewDescriptor ? `<button class="button ghost small home-candidate-preview" type="button" data-action="video-library-preview" data-file-id="${escapeAttr(fileId)}">Preview</button>` : ""}
+        ${includeDownload ? `<a class="button ghost small home-candidate-download-primary" href="${downloadHref}">Download File</a>` : ""}
+        <button class="button ghost small" type="button" data-action="video-library-open-location" data-file-id="${escapeAttr(fileId)}" data-file-path="${escapeAttr(item?.filepath || "")}">Open file location</button>
+        <button class="button ghost small" type="button" data-action="video-library-info" data-file-id="${escapeAttr(fileId)}">More Info</button>
+      </div>
+    </article>
+  `;
+}
+
+function hydrateVideoLibraryCards(grid) {
+  if (!grid) return;
+  grid.querySelectorAll(".media-library-video-card").forEach((card) => {
+    const fileId = String(card.dataset.fileId || "").trim();
+    const item = state.videoLibraryItems.find((entry) => String(entry.file_id || "") === fileId);
+    if (!item) return;
+    const hoverPreviewDescriptor = buildVideoLibraryHoverPreviewDescriptor(item);
+    if (!hoverPreviewDescriptor) return;
+    card.addEventListener("mouseenter", () => startHomeArtworkHoverPreview(card, hoverPreviewDescriptor));
+    card.addEventListener("mouseleave", () => stopHomeArtworkHoverPreview(card));
+    card.addEventListener("focusin", () => startHomeArtworkHoverPreview(card, hoverPreviewDescriptor));
+    card.addEventListener("focusout", () => stopHomeArtworkHoverPreview(card));
+  });
+}
+
+function findVideoLibraryItemByFileId(fileId) {
+  const key = String(fileId || "").trim();
+  if (!key) return null;
+  return (state.videoLibraryItems || []).find((entry) => String(entry.file_id || "") === key) || null;
+}
+
+function handleVideoLibraryGridClick(event) {
+  const action = event.target.closest("[data-action]");
+  const card = event.target.closest(".media-library-video-card");
+  if (!card) return;
+  const fileId = String(card.dataset.fileId || "").trim();
+  const item = findVideoLibraryItemByFileId(fileId);
+  if (!item) return;
+  if (!action) {
+    openLibraryDetailsModal(buildVideoLibraryModalPayload(item));
+    return;
+  }
+  const actionName = String(action.dataset.action || "");
+  if (actionName === "video-library-open-location") {
+    void openFileLocation({
+      fileId: String(action.dataset.fileId || fileId).trim(),
+      filePath: String(action.dataset.filePath || item.filepath || "").trim(),
+    });
+    return;
+  }
+  if (actionName === "video-library-info") {
+    openLibraryDetailsModal(buildVideoLibraryModalPayload(item));
+    return;
+  }
+  if (actionName === "video-library-preview") {
+    const descriptor = buildVideoLibraryPreviewDescriptor(item);
+    if (descriptor) {
+      openHomePreviewModal({
+        ...descriptor,
+        description: String(item.filepath || "").trim(),
+        directUrl: String(item.source_url || item.canonical_url || item.input_url || "").trim(),
+        directOnly: true,
+      });
+    }
+  }
+}
+
 function renderMusicLibrarySection() {
   const section = $("#music-library-section");
   const grid = $("#music-library-grid");
@@ -7822,30 +7970,8 @@ function renderVideoLibrarySection() {
     grid.innerHTML = `<div class="home-results-empty">No local video downloads found yet.</div>`;
     return;
   }
-  grid.innerHTML = items.map((item) => {
-    const thumbnail = String(item.thumbnail_url || "").trim() || "assets/no_artwork.png";
-    const sourceLabel = getVideoLibrarySourceBadge(item);
-    const downloadHref = item.file_id ? downloadUrl(item.file_id) : "#";
-    return `
-      <article class="home-candidate-row media-library-card media-library-video-card" data-library-type="video" data-file-id="${escapeAttr(item.file_id || "")}">
-        <div class="home-candidate-artwork media-library-video-artwork">
-          <img src="${escapeAttr(thumbnail)}" alt="${escapeAttr(item.title || "Video")}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
-        </div>
-        <div class="home-candidate-info">
-          <div class="home-candidate-title-row">
-            <div class="home-candidate-title">${escapeHtml(item.title || item.filename || "Video")}</div>
-            <span class="home-candidate-source">${escapeHtml(sourceLabel)}</span>
-          </div>
-          <div class="home-candidate-meta">${escapeHtml([formatTimestamp(item.downloaded_at), formatBytes(item.size_bytes)].filter(Boolean).join(" • "))}</div>
-        </div>
-        <div class="home-candidate-action home-candidate-action-primary-stack">
-          <a class="button ghost small home-candidate-download-primary" href="${downloadHref}">Download File</a>
-          <button class="button ghost small" type="button" data-action="video-library-open-location" data-file-id="${escapeAttr(item.file_id || "")}" data-file-path="${escapeAttr(item.filepath || "")}">Open file location</button>
-          <button class="button ghost small" type="button" data-action="video-library-info" data-file-id="${escapeAttr(item.file_id || "")}">More Info</button>
-        </div>
-      </article>
-    `;
-  }).join("");
+  grid.innerHTML = items.map((item) => renderVideoLibraryCard(item, { includeDownload: true })).join("");
+  hydrateVideoLibraryCards(grid);
 }
 
 function renderVideoDiscoveryDefault() {
@@ -7881,24 +8007,8 @@ function renderVideoDiscoveryDefault() {
     `;
     return;
   }
-  grid.innerHTML = items.map((item) => `
-    <article class="home-candidate-row media-library-card media-library-video-card" data-library-type="video" data-file-id="${escapeAttr(item.file_id || "")}">
-      <div class="home-candidate-artwork media-library-video-artwork">
-        <img src="${escapeAttr(String(item.thumbnail_url || "").trim() || "assets/no_artwork.png")}" alt="${escapeAttr(item.title || "Video")}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
-      </div>
-      <div class="home-candidate-info">
-        <div class="home-candidate-title-row">
-          <div class="home-candidate-title">${escapeHtml(item.title || item.filename || "Video")}</div>
-          <span class="home-candidate-source">${escapeHtml(getVideoLibrarySourceBadge(item))}</span>
-        </div>
-        <div class="home-candidate-meta">${escapeHtml([formatTimestamp(item.downloaded_at), formatBytes(item.size_bytes)].filter(Boolean).join(" • "))}</div>
-      </div>
-      <div class="home-candidate-action home-candidate-action-primary-stack">
-        <button class="button ghost small" type="button" data-action="video-library-open-location" data-file-id="${escapeAttr(item.file_id || "")}" data-file-path="${escapeAttr(item.filepath || "")}">Open file location</button>
-        <button class="button ghost small" type="button" data-action="video-library-info" data-file-id="${escapeAttr(item.file_id || "")}">More Info</button>
-      </div>
-    </article>
-  `).join("");
+  grid.innerHTML = items.map((item) => renderVideoLibraryCard(item)).join("");
+  hydrateVideoLibraryCards(grid);
 }
 
 async function hydrateMusicLibraryArtistCovers() {
@@ -9739,6 +9849,12 @@ function applyHomeVideoCardSize(size) {
   if (list) {
     list.style.setProperty("--home-video-card-min", `${nextSize}px`);
   }
+  ["#home-video-library-grid", "#video-discovery-preview-grid"].forEach((selector) => {
+    const grid = $(selector);
+    if (grid) {
+      grid.style.setProperty("--home-video-card-min", `${nextSize}px`);
+    }
+  });
   const input = $("#home-video-card-size");
   if (input && String(input.value) !== String(nextSize)) {
     input.value = String(nextSize);
@@ -19275,34 +19391,11 @@ function bindEvents() {
   }
   const videoLibraryGrid = $("#home-video-library-grid");
   if (videoLibraryGrid) {
-    videoLibraryGrid.addEventListener("click", (event) => {
-      const action = event.target.closest("[data-action]");
-      if (!action) {
-        const card = event.target.closest(".media-library-video-card");
-        if (!card) return;
-        const fileId = String(card.dataset.fileId || "").trim();
-        const item = state.videoLibraryItems.find((entry) => String(entry.file_id || "") === fileId);
-        if (item) {
-          openLibraryDetailsModal(buildVideoLibraryModalPayload(item));
-        }
-        return;
-      }
-      const actionName = String(action.dataset.action || "");
-      if (actionName === "video-library-open-location") {
-        void openFileLocation({
-          fileId: String(action.dataset.fileId || "").trim(),
-          filePath: String(action.dataset.filePath || "").trim(),
-        });
-        return;
-      }
-      if (actionName === "video-library-info") {
-        const fileId = String(action.dataset.fileId || "").trim();
-        const item = state.videoLibraryItems.find((entry) => String(entry.file_id || "") === fileId);
-        if (item) {
-          openLibraryDetailsModal(buildVideoLibraryModalPayload(item));
-        }
-      }
-    });
+    videoLibraryGrid.addEventListener("click", handleVideoLibraryGridClick);
+  }
+  const videoDiscoveryPreviewGrid = $("#video-discovery-preview-grid");
+  if (videoDiscoveryPreviewGrid) {
+    videoDiscoveryPreviewGrid.addEventListener("click", handleVideoLibraryGridClick);
   }
   const libraryModal = $("#library-details-modal");
   if (libraryModal) {
@@ -19364,7 +19457,7 @@ function bindEvents() {
       }
       if (actionName === "video-library-watch-here") {
         closeLibraryDetailsModal();
-        openLibraryVideoModal(payload);
+        openVideoLibraryWatchHere(payload);
         return;
       }
       if (actionName === "video-library-open-external") {

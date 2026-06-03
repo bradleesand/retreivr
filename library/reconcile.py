@@ -53,6 +53,7 @@ _SUPPORTED_VIDEO_EXTENSIONS = {
 _RECONCILE_PLAYLIST_ID = "__library_reconcile__"
 _YOUTUBE_ID_RE = re.compile(r"YouTubeID=([A-Za-z0-9_-]{6,})")
 _URL_RE = re.compile(r"URL=(https?://\S+)")
+_YOUTUBE_FILENAME_ID_RE = re.compile(r"(?:^|[-_\s])([A-Za-z0-9_-]{11})$")
 
 
 @dataclass
@@ -291,12 +292,17 @@ def _read_video_identity(path: Path) -> dict[str, Any] | None:
     if not source_id and input_url and "youtube" in input_url:
         source = "youtube"
         source_id = _extract_youtube_id_from_url(input_url) or ""
+    if not source_id:
+        source_id = _extract_youtube_id_from_filename(path.name) or ""
+        if source_id:
+            source = "youtube"
 
     if not source_id and not input_url:
         source = "local_library"
         source_id = _local_video_external_id(path)
 
     canonical_url = input_url or _build_canonical_video_url(source, source_id)
+    thumbnail_url = _build_video_thumbnail_url(source, source_id, canonical_url)
     return {
         "title": title or path.stem,
         "media_type": "video",
@@ -306,6 +312,7 @@ def _read_video_identity(path: Path) -> dict[str, Any] | None:
         "input_url": input_url or canonical_url,
         "canonical_url": canonical_url,
         "channel_id": source_channel_id or None,
+        "thumbnail_url": thumbnail_url,
     }
 
 
@@ -427,8 +434,8 @@ def _insert_reconciled_history(conn: sqlite3.Connection, path: Path, metadata: d
         INSERT INTO download_history (
             video_id, title, filename, destination, source, status,
             created_at, completed_at, file_size_bytes,
-            input_url, canonical_url, external_id, channel_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            input_url, canonical_url, external_id, channel_id, thumbnail_url
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(metadata.get("recording_mbid") or metadata.get("external_id") or metadata.get("canonical_id") or path.name),
@@ -444,6 +451,7 @@ def _insert_reconciled_history(conn: sqlite3.Connection, path: Path, metadata: d
             str(metadata.get("canonical_url") or "") or None,
             str(metadata.get("external_id") or metadata.get("recording_mbid") or metadata.get("isrc") or path.name),
             metadata.get("channel_id"),
+            metadata.get("thumbnail_url"),
         ),
     )
     return True
@@ -546,6 +554,18 @@ def _build_canonical_video_url(source: str | None, source_id: str | None) -> str
     return None
 
 
+def _build_video_thumbnail_url(source: str | None, source_id: str | None, source_url: str | None = None) -> str | None:
+    normalized_source = str(source or "").strip().lower()
+    normalized_source_id = str(source_id or "").strip()
+    if normalized_source in {"youtube", "youtube_music"} and normalized_source_id:
+        return f"https://i.ytimg.com/vi/{normalized_source_id}/hqdefault.jpg"
+    if normalized_source == "archive_org":
+        identifier = _archive_identifier_from_url(source_url)
+        if identifier:
+            return f"https://archive.org/services/img/{identifier}"
+    return None
+
+
 def _extract_youtube_id_from_url(url: str | None) -> str | None:
     text = str(url or "").strip()
     if not text:
@@ -557,6 +577,22 @@ def _extract_youtube_id_from_url(url: str | None) -> str | None:
     if match:
         return match.group(1)
     return None
+
+
+def _extract_youtube_id_from_filename(filename: str | None) -> str | None:
+    text = str(filename or "").strip()
+    if not text:
+        return None
+    match = _YOUTUBE_FILENAME_ID_RE.search(Path(text).stem)
+    return match.group(1) if match else None
+
+
+def _archive_identifier_from_url(url: str | None) -> str | None:
+    value = str(url or "").strip()
+    if not value:
+        return None
+    match = re.search(r"archive\.org/(?:details|download)/([^/?#]+)", value)
+    return match.group(1) if match else None
 
 
 def _should_skip_reconcile_path(path: Path) -> bool:

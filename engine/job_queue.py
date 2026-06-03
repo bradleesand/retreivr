@@ -527,13 +527,14 @@ def ensure_download_history_table(conn):
             input_url TEXT,
             canonical_url TEXT,
             external_id TEXT,
-            channel_id TEXT
+            channel_id TEXT,
+            thumbnail_url TEXT
         )
         """
     )
     cur.execute("PRAGMA table_info(download_history)")
     existing_columns = {row[1] for row in cur.fetchall()}
-    for column in ("input_url", "canonical_url", "external_id", "source", "channel_id"):
+    for column in ("input_url", "canonical_url", "external_id", "source", "channel_id", "thumbnail_url"):
         if column not in existing_columns:
             cur.execute(f"ALTER TABLE download_history ADD COLUMN {column} TEXT")
     cur.execute(
@@ -8944,8 +8945,8 @@ def record_download_history(db_path, job, filepath, *, meta=None):
             INSERT INTO download_history (
                 video_id, title, filename, destination, source, status,
                 created_at, completed_at, file_size_bytes,
-                input_url, canonical_url, external_id, channel_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                input_url, canonical_url, external_id, channel_id, thumbnail_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 video_id,
@@ -8961,6 +8962,7 @@ def record_download_history(db_path, job, filepath, *, meta=None):
                 canonical_url,
                 external_id,
                 (meta or {}).get("channel_id") if isinstance(meta, dict) else None,
+                (meta or {}).get("thumbnail_url") if isinstance(meta, dict) else None,
             ),
         )
         conn.commit()

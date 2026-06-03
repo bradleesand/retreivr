@@ -3416,8 +3416,9 @@ def _browse_root_map():
 def _path_allowed(path, roots):
     real = os.path.realpath(path)
     for root in roots:
+        root_real = os.path.realpath(str(root))
         try:
-            if os.path.commonpath([real, root]) == root:
+            if os.path.commonpath([real, root_real]) == root_real:
                 return True
         except ValueError:
             continue
@@ -3660,13 +3661,14 @@ def _record_direct_url_history(db_path, files, source_url):
             file_size_bytes INTEGER,
             input_url TEXT,
             canonical_url TEXT,
-            external_id TEXT
+            external_id TEXT,
+            thumbnail_url TEXT
         )
         """
     )
     cur.execute("PRAGMA table_info(download_history)")
     existing_columns = {row[1] for row in cur.fetchall()}
-    for column in ("input_url", "canonical_url", "external_id", "source"):
+    for column in ("input_url", "canonical_url", "external_id", "source", "thumbnail_url"):
         if column not in existing_columns:
             cur.execute(f"ALTER TABLE download_history ADD COLUMN {column} TEXT")
     cur.execute(
@@ -3697,10 +3699,10 @@ def _record_direct_url_history(db_path, files, source_url):
                 (
                     video_id, title, filename, destination, source, status,
                     created_at, completed_at, file_size_bytes,
-                    input_url, canonical_url, external_id
+                    input_url, canonical_url, external_id, thumbnail_url
                 )
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 None,
@@ -3715,6 +3717,7 @@ def _record_direct_url_history(db_path, files, source_url):
                 input_url,
                 canonical_url,
                 external_id,
+                f"https://i.ytimg.com/vi/{external_id}/hqdefault.jpg" if source in {"youtube", "youtube_music"} and external_id else None,
             ),
         )
 
@@ -12537,6 +12540,66 @@ _VIDEO_LIBRARY_EXTENSIONS = {
 }
 
 
+def _video_thumbnail_cache_dir() -> Path:
+    return DATA_DIR / "artwork_cache" / "video_thumbs"
+
+
+def _video_thumbnail_cache_path(filepath: str) -> Path:
+    target = os.path.realpath(str(filepath or ""))
+    digest = hashlib.sha256(target.encode("utf-8")).hexdigest()[:24]
+    return _video_thumbnail_cache_dir() / f"{digest}.jpg"
+
+
+def _generate_local_video_thumbnail(filepath: str) -> Path | None:
+    target = os.path.realpath(str(filepath or ""))
+    if not target or not os.path.isfile(target):
+        return None
+    output = _video_thumbnail_cache_path(target)
+    try:
+        if output.exists() and output.stat().st_size > 0:
+            return output
+    except OSError:
+        pass
+    if not shutil.which("ffmpeg"):
+        return None
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        tmp_output = output.with_suffix(".tmp.jpg")
+        command = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            "5",
+            "-i",
+            target,
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale='min(480,iw)':-2",
+            "-q:v",
+            "7",
+            str(tmp_output),
+        ]
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=12,
+        )
+        if completed.returncode != 0 or not tmp_output.exists() or tmp_output.stat().st_size <= 0:
+            try:
+                tmp_output.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+        tmp_output.replace(output)
+        return output
+    except Exception:
+        logging.debug("local video thumbnail generation failed path=%s", target, exc_info=True)
+        return None
+
+
 def _archive_identifier_from_url(url: str | None) -> str | None:
     value = str(url or "").strip()
     if not value:
@@ -12552,12 +12615,38 @@ def _build_video_library_thumbnail(row: dict[str, Any]) -> str | None:
     external_id = str(row.get("external_id") or "").strip()
     canonical_url = str(row.get("canonical_url") or "").strip()
     input_url = str(row.get("input_url") or "").strip()
+    stored_thumbnail = str(row.get("thumbnail_url") or "").strip()
+    if stored_thumbnail and _is_http_url(stored_thumbnail):
+        return stored_thumbnail
+    if not external_id:
+        external_id = extract_video_id(canonical_url) or extract_video_id(input_url) or ""
+    if not source or source in {"local", "local_library", "library_reconcile"}:
+        if external_id or "youtube" in canonical_url or "youtube" in input_url or "youtu.be" in canonical_url or "youtu.be" in input_url:
+            source = "youtube"
+        elif "archive.org/" in canonical_url or "archive.org/" in input_url:
+            source = "archive_org"
     if source in {"youtube", "youtube_music"} and external_id:
         return f"https://i.ytimg.com/vi/{external_id}/hqdefault.jpg"
     if source == "archive_org":
         identifier = _archive_identifier_from_url(canonical_url) or _archive_identifier_from_url(input_url)
         if identifier:
             return f"https://archive.org/services/img/{identifier}"
+    return None
+
+
+def _build_video_library_source_url(row: dict[str, Any]) -> str | None:
+    canonical_url = str(row.get("canonical_url") or "").strip()
+    input_url = str(row.get("input_url") or "").strip()
+    if canonical_url:
+        return canonical_url
+    if input_url:
+        return input_url
+    source = str(row.get("source") or "").strip().lower()
+    external_id = str(row.get("external_id") or "").strip()
+    if not external_id:
+        external_id = extract_video_id(canonical_url) or extract_video_id(input_url) or ""
+    if source in {"youtube", "youtube_music"} and external_id:
+        return f"https://www.youtube.com/watch?v={external_id}"
     return None
 
 
@@ -12572,7 +12661,7 @@ def _list_video_library_items(db_path: str, *, limit: int = 24) -> list[dict[str
             cur.execute(
                 f"""
                 SELECT title, filename, destination, source, completed_at, file_size_bytes,
-                       input_url, canonical_url, external_id
+                       input_url, canonical_url, external_id, thumbnail_url
                 FROM download_history
                 WHERE status='completed'
                   AND ({extension_filters})
@@ -12602,6 +12691,9 @@ def _list_video_library_items(db_path: str, *, limit: int = 24) -> list[dict[str
         file_id = _file_id_from_path(filepath)
         source = str(row.get("source") or "").strip() or "local"
         thumbnail_url = _build_video_library_thumbnail(row)
+        if not thumbnail_url and file_id:
+            thumbnail_url = f"/api/library/videos/thumbnail?file_id={quote(file_id, safe='')}"
+        source_url = _build_video_library_source_url(row)
         items.append(
             {
                 "title": title,
@@ -12615,7 +12707,7 @@ def _list_video_library_items(db_path: str, *, limit: int = 24) -> list[dict[str
                 "file_ext": ext or None,
                 "media_type": str(mimetypes.guess_type(filepath)[0] or "").strip() or None,
                 "video_id": row.get("external_id") or None,
-                "source_url": str(row.get("canonical_url") or "").strip() or str(row.get("input_url") or "").strip() or None,
+                "source_url": source_url,
                 "canonical_url": str(row.get("canonical_url") or "").strip() or None,
                 "input_url": str(row.get("input_url") or "").strip() or None,
             }
@@ -12668,6 +12760,32 @@ async def api_history(
 @app.get("/api/library/videos")
 async def api_video_library(limit: int = Query(24, ge=1, le=200)):
     return safe_json({"items": _list_video_library_items(app.state.paths.db_path, limit=limit)})
+
+
+@app.get("/api/library/videos/thumbnail")
+async def api_video_library_thumbnail(file_id: str = Query(..., min_length=1, max_length=1000)):
+    try:
+        rel = _decode_file_id(file_id)
+    except (ValueError, UnicodeDecodeError, binascii.Error):
+        raise HTTPException(status_code=400, detail="Invalid file id")
+
+    candidate = os.path.abspath(os.path.join(DOWNLOADS_DIR, rel))
+    if not _path_allowed(candidate, [DOWNLOADS_DIR]):
+        raise HTTPException(status_code=403, detail="File not allowed")
+    if not os.path.isfile(candidate):
+        raise HTTPException(status_code=404, detail="File not found")
+    if os.path.splitext(candidate)[1].lower() not in _VIDEO_LIBRARY_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Not a video file")
+    thumbnail = _generate_local_video_thumbnail(candidate)
+    if not thumbnail or not thumbnail.exists():
+        raise HTTPException(status_code=404, detail="thumbnail_not_available")
+    return FileResponse(
+        str(thumbnail),
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "public, max-age=86400",
+        },
+    )
 
 
 @app.get("/api/files")

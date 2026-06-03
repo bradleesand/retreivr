@@ -253,6 +253,42 @@ def test_reconcile_library_backfills_local_video_without_source_metadata(tmp_pat
     assert row[3] == str(video_path)
 
 
+def test_reconcile_library_derives_youtube_thumbnail_from_legacy_filename(tmp_path, monkeypatch) -> None:
+    downloads_root = tmp_path / "downloads"
+    video_root = downloads_root / "Videos"
+    video_path = video_root / "YouTube-Downloads" / "Old Video-abc123XYZ99.webm"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"video")
+
+    db_path = tmp_path / "db.sqlite"
+    _prepare_db(db_path)
+
+    monkeypatch.setattr(reconcile_module, "DOWNLOADS_DIR", downloads_root)
+    monkeypatch.setattr(reconcile_module, "get_media_tags", lambda _path: {})
+
+    result = reconcile_module.reconcile_library(
+        db_path=str(db_path),
+        config={"single_download_folder": "Videos/YouTube-Downloads"},
+    )
+
+    assert result["video_files_seen"] == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT source, external_id, canonical_url, thumbnail_url FROM download_history LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == (
+        "youtube",
+        "abc123XYZ99",
+        "https://www.youtube.com/watch?v=abc123XYZ99",
+        "https://i.ytimg.com/vi/abc123XYZ99/hqdefault.jpg",
+    )
+
+
 def test_reconcile_library_skips_macos_appledouble_sidecars(tmp_path, monkeypatch) -> None:
     downloads_root = tmp_path / "downloads"
     video_root = downloads_root / "Videos"
