@@ -175,6 +175,23 @@ const state = {
   logsStickToBottom: true,
   startupSetupPromptPending: false,
   startupSetupPromptDismissedForSession: false,
+  hunt: {
+    launcherOpen: false,
+    overlayOpen: false,
+    roundActive: false,
+    score: 0,
+    hits: 0,
+    streak: 0,
+    launched: 0,
+    birds: [],
+    rafId: 0,
+    spawnTimer: null,
+    barkTimer: null,
+    lastFrameAt: 0,
+    pointer: { x: 0, y: 0 },
+    longPressTimer: null,
+    audioCtx: null,
+  },
 };
 const browserState = {
   open: false,
@@ -320,6 +337,10 @@ const HOME_VIDEO_SOURCE_PRIORITY = [
 const HOME_VIDEO_KEYWORDS = ["show", "podcast", "episode", "interview"];
 const HOME_MUSIC_MODE_FORMATS = ["mp3", "m4a"];
 const HOME_MUSIC_VIDEO_MODE_FORMATS = ["mp4", "mkv", "webm"];
+const RETREIVR_HUNT_BEST_KEY = "retreivr_hunt_best_score_v1";
+const RETREIVR_HUNT_LONG_PRESS_MS = 1500;
+const RETREIVR_HUNT_TOTAL_BIRDS = 20;
+const SETTINGS_ADVANCED_MODE_KEY = "retreivr_settings_advanced_mode";
 const SETTINGS_ALL_SECTION_ID = "settings-all";
 const HOME_PREVIEW_EMBED_BUILDERS = {
   youtube: buildYouTubeHomePreviewEmbedUrl,
@@ -18526,7 +18547,440 @@ function setupTimers() {
   }, 4000);
 }
 
+function loadRetreivrHuntBestScore() {
+  try {
+    const raw = localStorage.getItem(RETREIVR_HUNT_BEST_KEY);
+    const value = Number.parseInt(String(raw || "0"), 10);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch (_err) {
+    return 0;
+  }
+}
+
+function saveRetreivrHuntBestScore(score) {
+  const next = Number.parseInt(String(score || "0"), 10);
+  if (!Number.isFinite(next) || next < 0) return;
+  try {
+    localStorage.setItem(RETREIVR_HUNT_BEST_KEY, String(next));
+  } catch (_err) {
+    // ignore storage failures
+  }
+}
+
+function updateRetreivrHuntHud() {
+  const scoreEl = $("#retreivr-hunt-score");
+  const leftEl = $("#retreivr-hunt-left");
+  const bestEl = $("#retreivr-hunt-best");
+  const streakEl = $("#retreivr-hunt-streak");
+  if (scoreEl) scoreEl.textContent = String(state.hunt.score || 0);
+  if (leftEl) leftEl.textContent = String(Math.max(0, RETREIVR_HUNT_TOTAL_BIRDS - Number(state.hunt.launched || 0)));
+  if (bestEl) bestEl.textContent = String(loadRetreivrHuntBestScore());
+  if (streakEl) streakEl.textContent = String(state.hunt.streak || 0);
+}
+
+function ensureRetreivrHuntAudioContext() {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return null;
+  if (!state.hunt.audioCtx) {
+    try {
+      state.hunt.audioCtx = new AudioCtx();
+    } catch (_err) {
+      return null;
+    }
+  }
+  if (state.hunt.audioCtx?.state === "suspended") {
+    state.hunt.audioCtx.resume().catch(() => {});
+  }
+  return state.hunt.audioCtx;
+}
+
+function playRetreivrHuntTone({ frequency = 240, duration = 0.08, type = "square", gain = 0.025, decayTo = 0.0001, slideTo = null } = {}) {
+  const ctx = ensureRetreivrHuntAudioContext();
+  if (!ctx) return;
+  const oscillator = ctx.createOscillator();
+  const amp = ctx.createGain();
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(frequency, ctx.currentTime);
+  if (slideTo) {
+    oscillator.frequency.exponentialRampToValueAtTime(Math.max(1, slideTo), ctx.currentTime + duration);
+  }
+  amp.gain.setValueAtTime(gain, ctx.currentTime);
+  amp.gain.exponentialRampToValueAtTime(decayTo, ctx.currentTime + duration);
+  oscillator.connect(amp);
+  amp.connect(ctx.destination);
+  oscillator.start();
+  oscillator.stop(ctx.currentTime + duration);
+}
+
+function playRetreivrHuntNoise({ duration = 0.05, gain = 0.015 } = {}) {
+  const ctx = ensureRetreivrHuntAudioContext();
+  if (!ctx) return;
+  const buffer = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * duration)), ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < data.length; i += 1) {
+    data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+  }
+  const source = ctx.createBufferSource();
+  const amp = ctx.createGain();
+  source.buffer = buffer;
+  amp.gain.setValueAtTime(gain, ctx.currentTime);
+  amp.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + duration);
+  source.connect(amp);
+  amp.connect(ctx.destination);
+  source.start();
+}
+
+function playRetreivrHuntShotSound() {
+  playRetreivrHuntTone({ frequency: 190, duration: 0.065, type: "square", gain: 0.085, slideTo: 130 });
+  playRetreivrHuntNoise({ duration: 0.055, gain: 0.05 });
+}
+
+function playRetreivrHuntReloadSound() {
+  playRetreivrHuntTone({ frequency: 360, duration: 0.06, type: "triangle", gain: 0.05, slideTo: 300 });
+  window.setTimeout(() => playRetreivrHuntTone({ frequency: 300, duration: 0.05, type: "triangle", gain: 0.04, slideTo: 240 }), 48);
+}
+
+function playRetreivrHuntFlapSound() {
+  playRetreivrHuntTone({ frequency: 520 + Math.random() * 90, duration: 0.03, type: "triangle", gain: 0.02, slideTo: 420 + Math.random() * 40 });
+}
+
+function playRetreivrHuntBarkSound() {
+  playRetreivrHuntTone({ frequency: 180, duration: 0.08, type: "sawtooth", gain: 0.055, slideTo: 130 });
+  window.setTimeout(() => playRetreivrHuntTone({ frequency: 140, duration: 0.08, type: "square", gain: 0.05, slideTo: 110 }), 55);
+}
+
+function scheduleRetreivrHuntBark() {
+  if (state.hunt.barkTimer) {
+    window.clearTimeout(state.hunt.barkTimer);
+    state.hunt.barkTimer = null;
+  }
+  if (!state.hunt.overlayOpen) return;
+  state.hunt.barkTimer = window.setTimeout(() => {
+    state.hunt.barkTimer = null;
+    if (state.hunt.overlayOpen && (state.hunt.roundActive || Math.random() > 0.4)) {
+      playRetreivrHuntBarkSound();
+    }
+    scheduleRetreivrHuntBark();
+  }, 7000 + Math.random() * 5000);
+}
+
+function closeRetreivrHuntLauncher() {
+  const launcher = $("#retreivr-hunt-launcher");
+  if (launcher) launcher.classList.add("hidden");
+  state.hunt.launcherOpen = false;
+}
+
+function openRetreivrHuntLauncher() {
+  const launcher = $("#retreivr-hunt-launcher");
+  if (!launcher) return;
+  launcher.classList.remove("hidden");
+  state.hunt.launcherOpen = true;
+}
+
+function flashRetreivrHuntAt(x, y) {
+  const flash = $("#retreivr-hunt-flash");
+  if (!flash) return;
+  flash.style.left = `${x}px`;
+  flash.style.top = `${y}px`;
+  flash.classList.remove("hidden", "active");
+  void flash.offsetWidth;
+  flash.classList.add("active");
+  window.setTimeout(() => {
+    flash.classList.remove("active");
+    flash.classList.add("hidden");
+  }, 220);
+}
+
+function clearRetreivrHuntBirds() {
+  state.hunt.birds.forEach((bird) => {
+    try {
+      bird.el?.remove();
+    } catch (_err) {
+      // ignore
+    }
+  });
+  state.hunt.birds = [];
+}
+
+function setRetreivrHuntPanel(title, copy, { showStart = false, showRestart = false, kicker = "Easter Egg" } = {}) {
+  const panel = $("#retreivr-hunt-panel");
+  const titleEl = $("#retreivr-hunt-panel-title");
+  const copyEl = $("#retreivr-hunt-panel-copy");
+  const kickerEl = $("#retreivr-hunt-panel-kicker");
+  const startBtn = $("#retreivr-hunt-start");
+  const restartBtn = $("#retreivr-hunt-restart");
+  if (panel) panel.classList.remove("hidden");
+  if (titleEl) titleEl.textContent = title;
+  if (copyEl) copyEl.textContent = copy;
+  if (kickerEl) kickerEl.textContent = kicker;
+  if (startBtn) startBtn.classList.toggle("hidden", !showStart);
+  if (restartBtn) restartBtn.classList.toggle("hidden", !showRestart);
+}
+
+function hideRetreivrHuntPanel() {
+  const panel = $("#retreivr-hunt-panel");
+  if (panel) panel.classList.add("hidden");
+}
+
+function closeRetreivrHuntOverlay() {
+  const overlay = $("#retreivr-hunt-overlay");
+  if (overlay) {
+    overlay.classList.add("hidden");
+    overlay.setAttribute("aria-hidden", "true");
+  }
+  closeRetreivrHuntLauncher();
+  if (state.hunt.spawnTimer) {
+    window.clearTimeout(state.hunt.spawnTimer);
+    state.hunt.spawnTimer = null;
+  }
+  if (state.hunt.barkTimer) {
+    window.clearTimeout(state.hunt.barkTimer);
+    state.hunt.barkTimer = null;
+  }
+  if (state.hunt.rafId) {
+    window.cancelAnimationFrame(state.hunt.rafId);
+    state.hunt.rafId = 0;
+  }
+  state.hunt.overlayOpen = false;
+  state.hunt.roundActive = false;
+  state.hunt.streak = 0;
+  state.hunt.lastFrameAt = 0;
+  clearRetreivrHuntBirds();
+}
+
+function openRetreivrHuntOverlay() {
+  const overlay = $("#retreivr-hunt-overlay");
+  const reticle = $("#retreivr-hunt-reticle");
+  const stage = $("#retreivr-hunt-stage");
+  if (!overlay || !reticle || !stage) return;
+  overlay.classList.remove("hidden");
+  overlay.setAttribute("aria-hidden", "false");
+  state.hunt.overlayOpen = true;
+  state.hunt.roundActive = false;
+  state.hunt.score = 0;
+  state.hunt.hits = 0;
+  state.hunt.streak = 0;
+  state.hunt.launched = 0;
+  state.hunt.lastFrameAt = 0;
+  clearRetreivrHuntBirds();
+  updateRetreivrHuntHud();
+  scheduleRetreivrHuntBark();
+  setRetreivrHuntPanel(
+    "Retreivr Hunt",
+    "At dusk, silhouette birds lift from the brush. Hit as many as you can before all 20 get away.",
+    { showStart: true, showRestart: false, kicker: "Hidden Game" }
+  );
+  const rect = stage.getBoundingClientRect();
+  state.hunt.pointer = { x: rect.width * 0.5, y: rect.height * 0.5 };
+  reticle.style.left = `${state.hunt.pointer.x}px`;
+  reticle.style.top = `${state.hunt.pointer.y}px`;
+}
+
+function createRetreivrHuntBirdElement() {
+  const bird = document.createElement("button");
+  bird.type = "button";
+  bird.className = "retreivr-hunt-bird";
+  bird.innerHTML = `
+    <span class="retreivr-hunt-bird-wing left"></span>
+    <span class="retreivr-hunt-bird-body"></span>
+    <span class="retreivr-hunt-bird-wing right"></span>
+  `;
+  return bird;
+}
+
+function spawnRetreivrHuntBird() {
+  const stage = $("#retreivr-hunt-stage");
+  const birdsLayer = $("#retreivr-hunt-birds");
+  if (!stage || !birdsLayer || !state.hunt.roundActive) return;
+  if (state.hunt.launched >= RETREIVR_HUNT_TOTAL_BIRDS) return;
+  const rect = stage.getBoundingClientRect();
+  const direction = Math.random() > 0.5 ? 1 : -1;
+  const birdEl = createRetreivrHuntBirdElement();
+  birdsLayer.appendChild(birdEl);
+  const bird = {
+    id: `bird-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    el: birdEl,
+    x: rect.width * (0.16 + Math.random() * 0.68),
+    y: rect.height - (60 + Math.random() * 24),
+    vx: direction * (150 + Math.random() * 170),
+    vy: -(320 + Math.random() * 170),
+    gravity: 170 + Math.random() * 70,
+    scale: 0.9 + Math.random() * 0.45,
+    launchedAt: performance.now(),
+    alive: true,
+    direction,
+  };
+  birdEl.dataset.huntBirdId = bird.id;
+  birdEl.classList.add(Math.random() > 0.45 ? "flap-fast" : "flap-slow");
+  state.hunt.birds.push(bird);
+  state.hunt.launched += 1;
+  updateRetreivrHuntHud();
+  if (Math.random() > 0.45) {
+    playRetreivrHuntFlapSound();
+  }
+}
+
+function scheduleRetreivrHuntBirdSpawn() {
+  if (state.hunt.spawnTimer) {
+    window.clearTimeout(state.hunt.spawnTimer);
+    state.hunt.spawnTimer = null;
+  }
+  if (!state.hunt.roundActive || state.hunt.launched >= RETREIVR_HUNT_TOTAL_BIRDS) return;
+  state.hunt.spawnTimer = window.setTimeout(() => {
+    state.hunt.spawnTimer = null;
+    if (state.hunt.birds.filter((bird) => bird.alive).length < 2 || Math.random() > 0.55) {
+      spawnRetreivrHuntBird();
+      if (state.hunt.launched < RETREIVR_HUNT_TOTAL_BIRDS && Math.random() > 0.7) {
+        window.setTimeout(() => {
+          if (state.hunt.roundActive) spawnRetreivrHuntBird();
+        }, 120 + Math.random() * 120);
+      }
+    }
+    scheduleRetreivrHuntBirdSpawn();
+  }, 320 + Math.random() * 340);
+}
+
+function endRetreivrHuntRound() {
+  state.hunt.roundActive = false;
+  if (state.hunt.spawnTimer) {
+    window.clearTimeout(state.hunt.spawnTimer);
+    state.hunt.spawnTimer = null;
+  }
+  if (state.hunt.rafId) {
+    window.cancelAnimationFrame(state.hunt.rafId);
+    state.hunt.rafId = 0;
+  }
+  const best = loadRetreivrHuntBestScore();
+  if (state.hunt.score > best) {
+    saveRetreivrHuntBestScore(state.hunt.score);
+  }
+  updateRetreivrHuntHud();
+  const accuracy = state.hunt.launched ? Math.round((state.hunt.hits / state.hunt.launched) * 100) : 0;
+  setRetreivrHuntPanel(
+    state.hunt.score > best ? "New High Score" : "Round Over",
+    `You hit ${state.hunt.hits} of ${RETREIVR_HUNT_TOTAL_BIRDS} birds. Accuracy: ${accuracy}%.`,
+    { showStart: false, showRestart: true, kicker: "Retreivr Hunt" }
+  );
+}
+
+function updateRetreivrHuntFrame(now) {
+  if (!state.hunt.roundActive) return;
+  const stage = $("#retreivr-hunt-stage");
+  if (!stage) return;
+  const rect = stage.getBoundingClientRect();
+  const last = state.hunt.lastFrameAt || now;
+  const dt = Math.min(0.032, Math.max(0.008, (now - last) / 1000));
+  state.hunt.lastFrameAt = now;
+  state.hunt.birds = state.hunt.birds.filter((bird) => bird.alive);
+  state.hunt.birds.forEach((bird) => {
+    bird.x += bird.vx * dt;
+    bird.y += bird.vy * dt;
+    bird.vy += bird.gravity * dt;
+    if (bird.el) {
+      bird.el.style.transform = `translate(${bird.x}px, ${bird.y}px) scale(${bird.direction < 0 ? -bird.scale : bird.scale}, ${bird.scale})`;
+    }
+    if (bird.y > rect.height + 40 || bird.x < -80 || bird.x > rect.width + 80) {
+      bird.alive = false;
+      bird.el?.remove();
+      state.hunt.streak = 0;
+      updateRetreivrHuntHud();
+    }
+  });
+  state.hunt.birds = state.hunt.birds.filter((bird) => bird.alive);
+  if (state.hunt.launched >= RETREIVR_HUNT_TOTAL_BIRDS && state.hunt.birds.length === 0) {
+    endRetreivrHuntRound();
+    return;
+  }
+  state.hunt.rafId = window.requestAnimationFrame(updateRetreivrHuntFrame);
+}
+
+function startRetreivrHuntRound() {
+  clearRetreivrHuntBirds();
+  state.hunt.roundActive = true;
+  state.hunt.score = 0;
+  state.hunt.hits = 0;
+  state.hunt.streak = 0;
+  state.hunt.launched = 0;
+  state.hunt.lastFrameAt = 0;
+  hideRetreivrHuntPanel();
+  updateRetreivrHuntHud();
+  spawnRetreivrHuntBird();
+  scheduleRetreivrHuntBirdSpawn();
+  state.hunt.rafId = window.requestAnimationFrame(updateRetreivrHuntFrame);
+}
+
+function moveRetreivrHuntReticle(clientX, clientY) {
+  const stage = $("#retreivr-hunt-stage");
+  const reticle = $("#retreivr-hunt-reticle");
+  if (!stage || !reticle) return;
+  const rect = stage.getBoundingClientRect();
+  const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+  const y = Math.max(0, Math.min(rect.height, clientY - rect.top));
+  state.hunt.pointer = { x, y };
+  reticle.style.left = `${x}px`;
+  reticle.style.top = `${y}px`;
+}
+
+function fireRetreivrHuntShot(clientX, clientY, targetBirdId = "") {
+  const stage = $("#retreivr-hunt-stage");
+  if (!stage || !state.hunt.roundActive) return;
+  playRetreivrHuntShotSound();
+  moveRetreivrHuntReticle(clientX, clientY);
+  flashRetreivrHuntAt(state.hunt.pointer.x, state.hunt.pointer.y);
+  if (!targetBirdId) {
+    state.hunt.streak = 0;
+    updateRetreivrHuntHud();
+    window.setTimeout(playRetreivrHuntReloadSound, 70);
+    return;
+  }
+  const bird = state.hunt.birds.find((entry) => entry.id === targetBirdId && entry.alive);
+  if (!bird) {
+    state.hunt.streak = 0;
+    updateRetreivrHuntHud();
+    window.setTimeout(playRetreivrHuntReloadSound, 70);
+    return;
+  }
+  bird.alive = false;
+  bird.el?.classList.add("is-hit");
+  window.setTimeout(() => bird.el?.remove(), 60);
+  const ageSeconds = Math.max(0, (performance.now() - bird.launchedAt) / 1000);
+  state.hunt.streak += 1;
+  state.hunt.hits += 1;
+  const progressive = Math.min(4, state.hunt.streak - 1) * 25;
+  const speedBonus = ageSeconds < 0.55 ? 35 : ageSeconds < 0.95 ? 15 : 0;
+  state.hunt.score += 100 + progressive + speedBonus;
+  updateRetreivrHuntHud();
+  window.setTimeout(playRetreivrHuntReloadSound, 55);
+}
+
+function beginRetreivrHuntLongPress() {
+  if (state.hunt.longPressTimer) {
+    window.clearTimeout(state.hunt.longPressTimer);
+  }
+  state.hunt.longPressTimer = window.setTimeout(() => {
+    state.hunt.longPressTimer = null;
+    openRetreivrHuntLauncher();
+  }, RETREIVR_HUNT_LONG_PRESS_MS);
+}
+
+function cancelRetreivrHuntLongPress() {
+  if (state.hunt.longPressTimer) {
+    window.clearTimeout(state.hunt.longPressTimer);
+    state.hunt.longPressTimer = null;
+  }
+}
+
 function bindEvents() {
+  const brand = $(".brand");
+  if (brand) {
+    brand.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      beginRetreivrHuntLongPress();
+    });
+    ["pointerup", "pointerleave", "pointercancel"].forEach((eventName) => {
+      brand.addEventListener(eventName, cancelRetreivrHuntLongPress);
+    });
+  }
   const navToggle = $("#nav-toggle");
   if (navToggle) {
     navToggle.addEventListener("click", () => {
@@ -21010,6 +21464,63 @@ function bindEvents() {
     applyTheme(next);
   });
 
+  const huntLauncherPlay = $("#retreivr-hunt-launch-play");
+  if (huntLauncherPlay) {
+    huntLauncherPlay.addEventListener("click", () => {
+      ensureRetreivrHuntAudioContext();
+      openRetreivrHuntOverlay();
+    });
+  }
+  const huntLauncherClose = $("#retreivr-hunt-launch-close");
+  if (huntLauncherClose) {
+    huntLauncherClose.addEventListener("click", closeRetreivrHuntLauncher);
+  }
+  const huntOverlayClose = $("#retreivr-hunt-close");
+  if (huntOverlayClose) {
+    huntOverlayClose.addEventListener("click", closeRetreivrHuntOverlay);
+  }
+  const huntStart = $("#retreivr-hunt-start");
+  if (huntStart) {
+    huntStart.addEventListener("click", () => {
+      ensureRetreivrHuntAudioContext();
+      startRetreivrHuntRound();
+    });
+  }
+  const huntRestart = $("#retreivr-hunt-restart");
+  if (huntRestart) {
+    huntRestart.addEventListener("click", () => {
+      ensureRetreivrHuntAudioContext();
+      startRetreivrHuntRound();
+    });
+  }
+  const huntOverlay = $("#retreivr-hunt-overlay");
+  if (huntOverlay) {
+    huntOverlay.addEventListener("click", (event) => {
+      if (event.target === huntOverlay) {
+        closeRetreivrHuntOverlay();
+      }
+    });
+  }
+  const huntStage = $("#retreivr-hunt-stage");
+  if (huntStage) {
+    huntStage.addEventListener("pointermove", (event) => {
+      moveRetreivrHuntReticle(event.clientX, event.clientY);
+    });
+    huntStage.addEventListener("pointerdown", (event) => {
+      ensureRetreivrHuntAudioContext();
+      const bird = event.target.closest(".retreivr-hunt-bird");
+      fireRetreivrHuntShot(event.clientX, event.clientY, bird?.dataset?.huntBirdId || "");
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeRetreivrHuntLauncher();
+      if (state.hunt.overlayOpen) {
+        closeRetreivrHuntOverlay();
+      }
+    }
+  });
+
   document.addEventListener("focusin", (event) => {
     const tag = (event.target && event.target.tagName) || "";
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
@@ -21164,6 +21675,7 @@ async function init() {
   });
   applyTheme(resolveTheme());
   bindEvents();
+  updateRetreivrHuntHud();
   applyAppSidebarCollapsed(state.appSidebarCollapsed, { persist: false });
   setMusicHeaderMode(state.musicHeaderMode, { persist: false });
   setupHeaderScrollVisibility();

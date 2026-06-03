@@ -46,6 +46,82 @@
   <div id="topbar-subbar-host" class="topbar-subbar-host hidden" aria-live="polite"></div>
   <div id="topbar-node-parking" class="hidden" aria-hidden="true"></div>
 
+  <div id="retreivr-hunt-launcher" class="retreivr-hunt-launcher hidden" aria-live="polite">
+    <div class="retreivr-hunt-launcher-title">Retreivr Hunt</div>
+    <div class="retreivr-hunt-launcher-copy">Hidden mini game unlocked.</div>
+    <div class="retreivr-hunt-launcher-actions">
+      <button id="retreivr-hunt-launch-play" class="button primary small" type="button">Play</button>
+      <button id="retreivr-hunt-launch-close" class="button ghost small" type="button">Later</button>
+    </div>
+  </div>
+
+  <div id="retreivr-hunt-overlay" class="retreivr-hunt-overlay hidden" aria-hidden="true">
+    <div class="retreivr-hunt-shell">
+      <div class="retreivr-hunt-hud">
+        <div class="retreivr-hunt-hud-group">
+          <div class="retreivr-hunt-hud-label">Score</div>
+          <div id="retreivr-hunt-score" class="retreivr-hunt-hud-value">0</div>
+        </div>
+        <div class="retreivr-hunt-hud-group">
+          <div class="retreivr-hunt-hud-label">Birds Left</div>
+          <div id="retreivr-hunt-left" class="retreivr-hunt-hud-value">20</div>
+        </div>
+        <div class="retreivr-hunt-hud-group">
+          <div class="retreivr-hunt-hud-label">Best</div>
+          <div id="retreivr-hunt-best" class="retreivr-hunt-hud-value">0</div>
+        </div>
+        <div class="retreivr-hunt-hud-group">
+          <div class="retreivr-hunt-hud-label">Streak</div>
+          <div id="retreivr-hunt-streak" class="retreivr-hunt-hud-value">0</div>
+        </div>
+        <button id="retreivr-hunt-close" class="button ghost small retreivr-hunt-close" type="button">Close</button>
+      </div>
+      <div id="retreivr-hunt-stage" class="retreivr-hunt-stage">
+        <div class="retreivr-hunt-sky-glow" aria-hidden="true"></div>
+        <div class="retreivr-hunt-bushes" aria-hidden="true"></div>
+        <div class="retreivr-hunt-ground" aria-hidden="true"></div>
+        <div class="retreivr-hunt-dog-mark" aria-hidden="true">
+          <img src="app_icon.png" alt="">
+        </div>
+        <div id="retreivr-hunt-birds" class="retreivr-hunt-birds"></div>
+        <div id="retreivr-hunt-reticle" class="retreivr-hunt-reticle" aria-hidden="true">
+          <svg class="retreivr-hunt-reticle-svg" viewBox="0 0 84 84" aria-hidden="true" focusable="false">
+            <circle class="retreivr-hunt-reticle-ring" cx="42" cy="42" r="28"></circle>
+            <rect class="retreivr-hunt-reticle-post" x="38" y="0" width="8" height="12" rx="1"></rect>
+            <rect class="retreivr-hunt-reticle-post" x="38" y="72" width="8" height="12" rx="1"></rect>
+            <rect class="retreivr-hunt-reticle-post" x="0" y="38" width="12" height="8" rx="1"></rect>
+            <rect class="retreivr-hunt-reticle-post" x="72" y="38" width="12" height="8" rx="1"></rect>
+            <rect class="retreivr-hunt-reticle-gap" x="39" y="12" width="6" height="7"></rect>
+            <rect class="retreivr-hunt-reticle-gap" x="39" y="65" width="6" height="7"></rect>
+            <rect class="retreivr-hunt-reticle-gap" x="12" y="39" width="7" height="6"></rect>
+            <rect class="retreivr-hunt-reticle-gap" x="65" y="39" width="7" height="6"></rect>
+            <line class="retreivr-hunt-reticle-axis" x1="42" y1="18" x2="42" y2="66"></line>
+            <line class="retreivr-hunt-reticle-axis" x1="18" y1="42" x2="66" y2="42"></line>
+            <rect class="retreivr-hunt-reticle-tick" x="39.5" y="24" width="5" height="4" rx="0.75"></rect>
+            <rect class="retreivr-hunt-reticle-tick" x="39.5" y="32" width="5" height="4" rx="0.75"></rect>
+            <rect class="retreivr-hunt-reticle-tick" x="39.5" y="48" width="5" height="4" rx="0.75"></rect>
+            <rect class="retreivr-hunt-reticle-tick" x="39.5" y="56" width="5" height="4" rx="0.75"></rect>
+            <rect class="retreivr-hunt-reticle-tick" x="24" y="39.5" width="4" height="5" rx="0.75"></rect>
+            <rect class="retreivr-hunt-reticle-tick" x="32" y="39.5" width="4" height="5" rx="0.75"></rect>
+            <rect class="retreivr-hunt-reticle-tick" x="48" y="39.5" width="4" height="5" rx="0.75"></rect>
+            <rect class="retreivr-hunt-reticle-tick" x="56" y="39.5" width="4" height="5" rx="0.75"></rect>
+            <circle class="retreivr-hunt-reticle-core" cx="42" cy="42" r="3.25"></circle>
+          </svg>
+        </div>
+        <div id="retreivr-hunt-flash" class="retreivr-hunt-flash hidden" aria-hidden="true"></div>
+        <div id="retreivr-hunt-panel" class="retreivr-hunt-panel">
+          <div id="retreivr-hunt-panel-kicker" class="retreivr-hunt-panel-kicker">Easter Egg</div>
+          <div id="retreivr-hunt-panel-title" class="retreivr-hunt-panel-title">Retreivr Hunt</div>
+          <div id="retreivr-hunt-panel-copy" class="retreivr-hunt-panel-copy">At dusk, silhouette birds lift from the brush. Hit as many as you can before all 20 get away.</div>
+          <div class="retreivr-hunt-panel-actions">
+            <button id="retreivr-hunt-start" class="button primary" type="button">Start Round</button>
+            <button id="retreivr-hunt-restart" class="button ghost hidden" type="button">Play Again</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <main class="layout">
     <div class="layout-content">
     <section class="panel full page-full" id="home-landing-panel" data-page="home">
