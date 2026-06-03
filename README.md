@@ -18,9 +18,6 @@
 
 ---
 
-## Interface Overview
-![Retreivr dashboard overview](docs/img/img-02.png)
-
 ## What Is Retreivr?
 Retreivr is a self-hosted acquisition engine for building and maintaining a clean local media archive.
 
@@ -56,9 +53,6 @@ Retreivr is not a streaming server. It is the acquisition layer.
 
 ### Guided Setup
 ![Guided setup flow](docs/img/img-07-guided-setup.png)
-
-### Operations Status
-![Operations Status and queue visibility](docs/img/img-05.png)
 
 ## What It Does
 - Acquire from direct URLs, playlists, search, Spotify sync, and library-import files
