@@ -35,6 +35,69 @@ def test_band_name_with_ampersand_is_preserved_without_album_artist_prefix() -> 
     assert title == "Song"
 
 
+def test_known_ampersand_band_with_guest_moves_guest_to_title() -> None:
+    artist, title = normalize_track_artist_credit("Brooks & Dunn & Reba McEntire", "Song")
+
+    assert artist == "Brooks & Dunn"
+    assert title == "Song (feat. Reba McEntire)"
+
+
+def test_symbol_collaboration_moves_guest_to_title() -> None:
+    artist, title = normalize_track_artist_credit("Brandon Lake X Bethel Music", "Song")
+
+    assert artist == "Brandon Lake"
+    assert title == "Song (feat. Bethel Music)"
+
+
+def test_plus_collaboration_moves_guest_to_title() -> None:
+    artist, title = normalize_track_artist_credit("Brantley Gilbert + Lindsay Ell", "Song")
+
+    assert artist == "Brantley Gilbert"
+    assert title == "Song (feat. Lindsay Ell)"
+
+
+def test_single_ampersand_collaboration_moves_guest_to_title() -> None:
+    artist, title = normalize_track_artist_credit("Brantley Gilbert & Blake Shelton", "Song")
+
+    assert artist == "Brantley Gilbert"
+    assert title == "Song (feat. Blake Shelton)"
+
+
+def test_known_ampersand_artist_is_preserved() -> None:
+    artist, title = normalize_track_artist_credit("for KING & COUNTRY", "Song")
+
+    assert artist == "for KING & COUNTRY"
+    assert title == "Song"
+
+
+def test_known_plus_artist_is_preserved() -> None:
+    artist, title = normalize_track_artist_credit("Dan + Shay", "Song")
+
+    assert artist == "Dan + Shay"
+    assert title == "Song"
+
+
+def test_known_plus_artist_with_guest_preserves_primary_group() -> None:
+    artist, title = normalize_track_artist_credit("Dan + Shay & Justin Bieber", "Song")
+
+    assert artist == "Dan + Shay"
+    assert title == "Song (feat. Justin Bieber)"
+
+
+def test_known_x_artist_is_preserved() -> None:
+    artist, title = normalize_track_artist_credit("Greg X Volz", "Song")
+
+    assert artist == "Greg X Volz"
+    assert title == "Song"
+
+
+def test_known_plus_variant_with_guest_preserves_primary_group() -> None:
+    artist, title = normalize_track_artist_credit("for KING + COUNTRY & Echosmith", "Song")
+
+    assert artist == "for KING + COUNTRY"
+    assert title == "Song (feat. Echosmith)"
+
+
 def test_comma_compilation_credit_uses_album_artist_when_present() -> None:
     artist, title = normalize_track_artist_credit(
         "HIXTAPE, Ashland Craft & Brothers Osborne",
