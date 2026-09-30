@@ -8,6 +8,8 @@ import unicodedata
 from datetime import date
 from typing import Any
 
+from metadata.artist_credit import normalize_album_artist_credit, normalize_track_artist_credit
+from metadata.genre_policy import canonicalize_genre
 from metadata.types import CanonicalMetadata
 
 logger = logging.getLogger(__name__)
@@ -22,8 +24,6 @@ _TITLE_SUFFIX_RE = re.compile(
 )
 _TOPIC_SUFFIX_RE = re.compile(r"\s*-\s*topic\s*$", re.IGNORECASE)
 _TRAILING_HYPHENS_RE = re.compile(r"(?:\s*-\s*)+$")
-_FEAT_SPLIT_RE = re.compile(r"^(?P<main>.+?)\s+(?:feat\.|ft\.)\s+(?P<feat>.+)$", re.IGNORECASE)
-_TITLE_FEAT_RE = re.compile(r"\(\s*feat\.\s*([^)]+)\)", re.IGNORECASE)
 
 
 def normalize_music_metadata(metadata: CanonicalMetadata) -> CanonicalMetadata:
@@ -45,17 +45,10 @@ def normalize_music_metadata(metadata: CanonicalMetadata) -> CanonicalMetadata:
     # NFC normalization is applied via _normalize_text for stable player grouping.
     title = clean_title(_normalize_text(metadata.title)) or "Unknown Title"
     artist = _normalize_text(metadata.artist) or "Unknown Artist"
-    artist, title = normalize_featured_artists(artist, title)
     album = _normalize_text(metadata.album) or "Unknown Album"
     # Media players group albums by album_artist; blank/variant values fragment one album.
-    album_artist_raw = _normalize_optional_text(metadata.album_artist)
-    if not album_artist_raw:
-        # Fallback to track artist so all tracks in the same release can group together.
-        album_artist = artist
-    else:
-        album_artist = album_artist_raw
-    # When artist fields include comma-separated collaborators, keep primary artist for grouping.
-    album_artist = _primary_artist(album_artist)
+    album_artist = normalize_album_artist_credit(metadata.album_artist, fallback_artist=artist) or artist
+    artist, title = normalize_track_artist_credit(artist, title, album_artist=album_artist)
     genre = _normalize_genre(metadata.genre) or "Unknown"
     normalized_date = _normalize_release_date(metadata.date) or "Unknown"
 
@@ -116,23 +109,7 @@ def normalize_featured_artists(artist: str, title: str) -> tuple[str, str]:
     ``artist``. Existing title feat credits are preserved and not duplicated.
     Matching is case-insensitive.
     """
-    normalized_artist = _normalize_text(artist)
-    normalized_title = _normalize_text(title)
-
-    match = _FEAT_SPLIT_RE.match(normalized_artist)
-    if not match:
-        return normalized_artist, normalized_title
-
-    main_artist = _normalize_text(match.group("main"))
-    featured_segment = _normalize_text(match.group("feat"))
-    if not featured_segment:
-        return main_artist, normalized_title
-
-    existing = {_normalize_text(item).lower() for item in _TITLE_FEAT_RE.findall(normalized_title)}
-    if featured_segment.lower() in existing:
-        return main_artist, normalized_title
-
-    return main_artist, f"{normalized_title} (feat. {featured_segment})"
+    return normalize_track_artist_credit(artist, title)
 
 
 def _normalize_text(value: str) -> str:
@@ -146,37 +123,8 @@ def _normalize_optional_text(value: str | None) -> str | None:
     return normalized or None
 
 
-def _primary_artist(value: str) -> str:
-    primary = value.split(",", 1)[0]
-    normalized = _normalize_text(primary)
-    return normalized or value
-
-
 def _normalize_genre(value: Any) -> str | None:
-    if value is None:
-        return None
-
-    raw_parts: list[str]
-    if isinstance(value, list):
-        raw_parts = [str(part) for part in value]
-    else:
-        raw_parts = re.split(r"[;,]", str(value))
-
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for part in raw_parts:
-        normalized = _normalize_text(part)
-        if not normalized:
-            continue
-        key = normalized.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        ordered.append(normalized)
-
-    if not ordered:
-        return None
-    return ", ".join(ordered)
+    return canonicalize_genre(value, default=None)
 
 
 def _normalize_positive_int(value: int, *, default: int) -> int:

@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any
 
+from metadata.genre_policy import canonicalize_genre
 from metadata.types import CanonicalMetadata
 
 _LOG = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ def merge_metadata(spotify: dict, mb: dict, ytdlp: dict) -> CanonicalMetadata:
         track_num=_parse_positive_int(track_num, default=1),
         disc_num=_parse_positive_int(disc_num, default=1),
         date=_normalize_string(date) or "Unknown",
-        genre=_normalize_title(_genre_to_string(genre)) or "Unknown",
+        genre=canonicalize_genre(genre) or "Unknown",
         isrc=_normalize_string(isrc),
         mbid=_normalize_string(mbid),
         artwork=_coerce_artwork_bytes(artwork),
