@@ -42,6 +42,20 @@ def test_featured_artist_moves_into_title() -> None:
     assert normalized.title == "My Track (feat. Guest Artist)"
 
 
+def test_matching_messy_album_artist_collapses_to_primary_artist() -> None:
+    metadata = _metadata(
+        artist="Main Artist ft. Guest Artist",
+        album_artist="Main Artist ft. Guest Artist",
+        title="My Track",
+    )
+
+    normalized = normalize_music_metadata(metadata)
+
+    assert normalized.artist == "Main Artist"
+    assert normalized.album_artist == "Main Artist"
+    assert normalized.title == "My Track (feat. Guest Artist)"
+
+
 def test_featuring_artist_moves_into_title() -> None:
     metadata = _metadata(artist="Main Artist featuring Guest Artist", title="My Track")
 

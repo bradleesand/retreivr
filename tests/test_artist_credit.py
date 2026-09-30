@@ -35,13 +35,23 @@ def test_band_name_with_ampersand_is_preserved_without_album_artist_prefix() -> 
     assert title == "Song"
 
 
-def test_comma_compilation_credit_uses_first_real_artist() -> None:
-    artist, title = normalize_track_artist_credit("HIXTAPE, Ashland Craft & Brothers Osborne", "Song")
+def test_comma_compilation_credit_uses_album_artist_when_present() -> None:
+    artist, title = normalize_track_artist_credit(
+        "HIXTAPE, Ashland Craft & Brothers Osborne",
+        "Song",
+        album_artist="Ashland Craft & Brothers Osborne",
+    )
 
     assert artist == "Ashland Craft & Brothers Osborne"
     assert title == "Song (feat. HIXTAPE)"
 
 
+def test_comma_artist_is_preserved_without_primary_artist_signal() -> None:
+    artist, title = normalize_track_artist_credit("Hank Williams, Jr.", "Song")
+
+    assert artist == "Hank Williams, Jr."
+    assert title == "Song"
+
+
 def test_album_artist_normalizes_various_alias() -> None:
     assert normalize_album_artist_credit("Various", fallback_artist="Artist") == "Various Artists"
-

@@ -48,7 +48,10 @@ def normalize_music_metadata(metadata: CanonicalMetadata) -> CanonicalMetadata:
     album = _normalize_text(metadata.album) or "Unknown Album"
     # Media players group albums by album_artist; blank/variant values fragment one album.
     album_artist = normalize_album_artist_credit(metadata.album_artist, fallback_artist=artist) or artist
+    original_artist = artist
     artist, title = normalize_track_artist_credit(artist, title, album_artist=album_artist)
+    if album_artist.casefold() == original_artist.casefold() and artist.casefold() != original_artist.casefold():
+        album_artist = artist
     genre = _normalize_genre(metadata.genre) or "Unknown"
     normalized_date = _normalize_release_date(metadata.date) or "Unknown"
 

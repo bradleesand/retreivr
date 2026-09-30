@@ -45,6 +45,8 @@ def normalize_track_artist_credit(
         parts = [_normalize_text(part) for part in normalized_artist.split(",") if _normalize_text(part)]
         if len(parts) > 1:
             main = _primary_from_comma_parts(parts, normalized_album_artist)
+            if not main:
+                return normalized_artist, normalized_title
             guests = [part for part in parts if part != main]
             return _with_featured_title(main, normalized_title, " & ".join(guests))
 
@@ -71,14 +73,14 @@ def normalize_album_artist_credit(album_artist: str, *, fallback_artist: str | N
     return normalized
 
 
-def _primary_from_comma_parts(parts: list[str], album_artist: str) -> str:
+def _primary_from_comma_parts(parts: list[str], album_artist: str) -> str | None:
     if album_artist and album_artist.casefold() != "various artists":
         for part in parts:
             if part.casefold() == album_artist.casefold():
                 return part
-    if parts[0].casefold() in {"hixtape", "various artists"} and len(parts) > 1:
+    if parts[0].casefold() in {"hixtape", "various artists"} and len(parts) > 1 and album_artist:
         return parts[1]
-    return parts[0]
+    return None
 
 
 def _with_featured_title(main: str, title: str, guest: str) -> tuple[str, str]:
@@ -96,4 +98,3 @@ def _with_featured_title(main: str, title: str, guest: str) -> tuple[str, str]:
 
 def _normalize_text(value: str) -> str:
     return _WS_RE.sub(" ", unicodedata.normalize("NFC", str(value or "")).strip())
-
