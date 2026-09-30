@@ -31,6 +31,10 @@
   }
   const displayState = (value) => ({resolved: 'High confidence', probable: 'Probable — review required', ambiguous: 'Ambiguous — choose a recording', unresolved: 'Unresolved', existing: 'Existing locally', pending: 'Awaiting resolution'}[value] || value);
   const summaryText = (counts) => Object.entries(counts).map(([name, count]) => `${name.replaceAll('_', ' ')}: ${count}`).join(' · ');
+  const isVisible = () => {
+    const view = $('music-discovery-view');
+    return !!view && !view.classList.contains('hidden');
+  };
   async function openPlaylist(key) {
     const request = ++playlistRequest;
     selected = key; $('discovery-playlists').value = key;
@@ -99,6 +103,7 @@
       secondary_types: [['live', 'Live'], ['compilations', 'Compilation']].filter(([id]) => $('discovery-' + id).checked).map(([, value]) => value), max_releases: 25};
   }
   async function refresh() {
+    if (!isVisible()) return;
     if (refreshing) return;
     refreshing = true;
     try {
@@ -172,7 +177,7 @@
       if (!result.artists.length) host.append(element('p', 'No artists found.', 'meta'));
     });
     // Poll only this visible view; do not rebuild focused review controls in the background.
-    setInterval(() => { if (!document.hidden && !$('music-discovery-view')?.classList.contains('hidden') && !$('discovery-subscriptions')?.querySelector('details[open]')) refresh(); }, 15000);
+    setInterval(() => { if (!document.hidden && isVisible() && !$('discovery-subscriptions')?.querySelector('details[open]')) refresh(); }, 15000);
   });
   window.retreivrDiscovery = {refresh};
 })();

@@ -191,6 +191,8 @@ const state = {
   playerRuntimeRecordedKey: null,
   playerLoading: null,
   playerLoadingSequence: 0,
+  musicPlayerLoadSequence: 0,
+  musicLibraryLoadSequence: 0,
   playerPrefetchInFlightRecordings: new Set(),
   playerYT: null,           // active YT.Player instance, or null when using <audio>
   playerYTReady: false,     // IFrame API script loaded and YT.Player can be instantiated
@@ -1866,12 +1868,8 @@ function setPage(page) {
       setHomeMediaMode(state.lastMusicMode || "music", { persist: false, clearResultsOnDisable: false });
     }
     if (target === "music") {
-      loadMusicLibrarySection().catch(() => {});
       const requestedMusicSection = requested === "music-player" ? "player" : (state.musicSection || "browse");
       setMusicSection(requestedMusicSection);
-      if (requestedMusicSection === "browse") {
-        loadMusicPlayerView().catch(() => {});
-      }
     }
     if (state.homeSearchRequestId) {
       startHomeResultPolling(state.homeSearchRequestId);
@@ -2879,6 +2877,9 @@ function setMusicSection(section) {
   }
   if (effective === "browse") {
     renderMusicLanding();
+  }
+  if (effective === "library") {
+    loadMusicLibrarySection().catch(() => {});
   }
   if (effective === "import") {
     renderMusicImportTab();
@@ -6387,8 +6388,14 @@ function musicDatasetEmptyMessage(name, emptyMessage) {
 }
 
 async function loadMusicPlayerView() {
+  const loadSequence = ++state.musicPlayerLoadSequence;
+  const canRenderPlayer = () => (
+    loadSequence === state.musicPlayerLoadSequence
+    && state.currentPage === "music"
+    && ["favorites", "player", "radio"].includes(String(state.musicSection || "browse"))
+  );
   const messageEl = $("#music-player-message");
-  if (messageEl) {
+  if (messageEl && canRenderPlayer()) {
     setInlineStatus(messageEl, { kind: "info", message: "Loading music player…" });
   }
   const refreshLanding = () => {
@@ -6403,12 +6410,14 @@ async function loadMusicPlayerView() {
       return payload;
     }).catch((error) => {
       failMusicDatasetLoad(name, error);
-      renderMusicPlayerLibrary();
-      renderMusicPlayerHistory();
-      renderMusicPlayerPlaylistsView();
-      renderMusicPlayerStations();
-      renderMusicPlayerCommunityCache();
-      refreshLanding();
+      if (canRenderPlayer()) {
+        renderMusicPlayerLibrary();
+        renderMusicPlayerHistory();
+        renderMusicPlayerPlaylistsView();
+        renderMusicPlayerStations();
+        renderMusicPlayerCommunityCache();
+        refreshLanding();
+      }
       throw error;
     });
   };
@@ -6418,8 +6427,10 @@ async function loadMusicPlayerView() {
       completeMusicDatasetLoad("library", state.playerLibrary.length, {
         stale: String(payload?.index_state?.status || "ready") !== "ready",
       });
-      renderMusicPlayerLibrary();
-      renderMusicPlayerQueue();
+      if (canRenderPlayer()) {
+        renderMusicPlayerLibrary();
+        renderMusicPlayerQueue();
+      }
     }),
     trackedRequest("summary", fetchJson("/api/player/library/summary"), (payload) => {
       state.playerLibrarySummary = (payload?.summary && typeof payload.summary === "object")
@@ -6430,10 +6441,12 @@ async function loadMusicPlayerView() {
       completeMusicDatasetLoad("summary", state.playerLibrarySummary.tracks?.length || 0, {
         stale: indexStatus !== "ready",
       });
-      renderMusicPlayerLibrary();
-      refreshLanding();
+      if (canRenderPlayer()) {
+        renderMusicPlayerLibrary();
+        refreshLanding();
+      }
       if (indexStatus !== "ready" && !state.musicLibraryIndexRefreshTimer) {
-        if (messageEl) {
+        if (messageEl && canRenderPlayer()) {
           setInlineStatus(messageEl, { kind: "info", message: "Indexing music library…" });
         }
         state.musicLibraryIndexRefreshTimer = window.setTimeout(() => {
@@ -6445,7 +6458,9 @@ async function loadMusicPlayerView() {
     trackedRequest("stations", fetchJson("/api/player/stations"), (payload) => {
       state.playerStations = Array.isArray(payload?.stations) ? payload.stations : [];
       completeMusicDatasetLoad("stations", state.playerStations.length);
-      renderMusicPlayerStations();
+      if (canRenderPlayer()) {
+        renderMusicPlayerStations();
+      }
     }),
     trackedRequest("history", fetchJson("/api/player/history"), (payload) => {
       const history = Array.isArray(payload?.history) ? payload.history : [];
@@ -6453,18 +6468,24 @@ async function loadMusicPlayerView() {
       state.playerHistory = history.filter((item) => !item?.is_missing_local);
       invalidateMusicHomeSnapshot();
       completeMusicDatasetLoad("history", state.playerHistory.length);
-      renderMusicPlayerHistory();
-      refreshLanding();
+      if (canRenderPlayer()) {
+        renderMusicPlayerHistory();
+        refreshLanding();
+      }
     }),
     trackedRequest("playlists", fetchJson("/api/player/playlists"), (payload) => {
       state.playerPlaylists = Array.isArray(payload?.playlists) ? payload.playlists : [];
       completeMusicDatasetLoad("playlists", state.playerPlaylists.length);
-      renderMusicPlayerPlaylistsView();
+      if (canRenderPlayer()) {
+        renderMusicPlayerPlaylistsView();
+      }
     }),
     trackedRequest("community", fetchJson("/api/player/community-cache"), (payload) => {
       state.playerCommunityCache = Array.isArray(payload?.items) ? payload.items : [];
       completeMusicDatasetLoad("community", state.playerCommunityCache.length);
-      renderMusicPlayerCommunityCache();
+      if (canRenderPlayer()) {
+        renderMusicPlayerCommunityCache();
+      }
     }),
     trackedRequest("favorites", fetchJson("/api/music/preferences"), (payload) => {
       syncMusicPreferencesFromConfig({ music_preferences: payload || {} });
@@ -6472,9 +6493,11 @@ async function loadMusicPlayerView() {
         "favorites",
         state.musicPreferences.favorite_artists.length + state.musicPreferences.favorite_genres.length
       );
-      renderMusicPlayerLibrary();
-      renderMusicPlayerHistory();
-      refreshLanding();
+      if (canRenderPlayer()) {
+        renderMusicPlayerLibrary();
+        renderMusicPlayerHistory();
+        refreshLanding();
+      }
     }),
   ];
   try {
@@ -6496,6 +6519,9 @@ async function loadMusicPlayerView() {
     } else {
       state.playerSelectedPlaylistItems = [];
     }
+    if (!canRenderPlayer()) {
+      return;
+    }
     renderMusicPlayerLibrary();
     renderMusicPlayerPlaylistsView();
     renderMusicPlayerStations();
@@ -6505,7 +6531,7 @@ async function loadMusicPlayerView() {
     setMusicPlayerView(state.playerView || "library");
     syncBottomPlayerShell();
     syncMusicPlayerVideoShell();
-    if (messageEl) {
+    if (messageEl && canRenderPlayer()) {
       const failedCount = results.filter((result) => result.status === "rejected").length;
       setInlineStatus(messageEl, failedCount
         ? { kind: "warning", message: `Music player loaded with ${failedCount} unavailable section${failedCount === 1 ? "" : "s"}.` }
@@ -6514,7 +6540,7 @@ async function loadMusicPlayerView() {
           : { kind: "info", message: "" }));
     }
   } catch (err) {
-    if (messageEl) {
+    if (messageEl && canRenderPlayer()) {
       setInlineStatus(messageEl, { kind: "error", message: `Music player failed to load: ${toUserErrorMessage(err)}` });
     }
   }
@@ -9361,14 +9387,21 @@ async function hydrateMusicLibraryArtistCovers() {
   renderMusicLibrarySection();
 }
 
-async function loadMusicLibrarySection({ force = false } = {}) {
+async function loadMusicLibrarySection({ force = false, render = true } = {}) {
+  const loadSequence = ++state.musicLibraryLoadSequence;
+  const canRenderLibrary = () => (
+    render
+    && loadSequence === state.musicLibraryLoadSequence
+    && state.currentPage === "music"
+    && state.musicSection === "library"
+  );
   const messageEl = $("#music-library-message");
   if (state.musicLibraryLoaded && !force && Array.isArray(state.playerLibrarySummary?.artists)) {
-    renderMusicLibrarySection();
+    if (canRenderLibrary()) renderMusicLibrarySection();
     return;
   }
   beginMusicDatasetLoad("summary");
-  setMediaLibraryNotice(messageEl, "Loading music library…", false);
+  if (canRenderLibrary()) setMediaLibraryNotice(messageEl, "Loading music library…", false);
   try {
     const data = await fetchJson("/api/player/library/summary?limit=2000");
     state.playerLibrarySummary = (data?.summary && typeof data.summary === "object")
@@ -9379,11 +9412,15 @@ async function loadMusicLibrarySection({ force = false } = {}) {
       stale: String(data?.index_state?.status || "ready") !== "ready",
     });
     state.musicLibraryLoaded = true;
-    renderMusicLibrarySection();
-    setMediaLibraryNotice(messageEl, "", false);
+    if (canRenderLibrary()) {
+      renderMusicLibrarySection();
+      setMediaLibraryNotice(messageEl, "", false);
+    }
   } catch (err) {
     failMusicDatasetLoad("summary", err);
-    setMediaLibraryNotice(messageEl, `Music library failed to load: ${toUserErrorMessage(err)}`, true);
+    if (canRenderLibrary()) {
+      setMediaLibraryNotice(messageEl, `Music library failed to load: ${toUserErrorMessage(err)}`, true);
+    }
   }
 }
 
@@ -14655,7 +14692,7 @@ async function loadMusicHomeSnapshot({ render = true, force = false } = {}) {
       state.spotifyPlaylistCards = state.musicHomeSnapshot.spotify_playlists;
       state.spotifyPlaylistCardsLoaded = true;
     }
-    if (render) {
+    if (render && state.currentPage === "music" && state.musicSection === "browse") {
       renderMusicPlayerHome();
       renderMusicLanding();
     }
@@ -14915,6 +14952,9 @@ function renderMusicLanding() {
     return;
   }
   if (state.currentPage !== "music" && !state.homeMusicMode) {
+    return;
+  }
+  if (state.currentPage === "music" && state.musicSection !== "browse") {
     return;
   }
   const artistInput = String(document.getElementById("search-artist")?.value || "").trim();
