@@ -1191,33 +1191,59 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         self.assertFalse(bool(meta.get("ep_refinement_attempted")))
         self.assertEqual(int(meta.get("ep_refinement_candidates_considered") or 0), 0)
 
-    def test_pass_b_accepts_high_similarity_authority_match_with_expanded_duration(self):
+    def test_fifteen_second_offset_from_authority_channel_is_auto_accepted(self):
         service = self._service(
             {
                 "youtube_music": [
                     _candidate(
                         source="youtube_music",
-                        candidate_id="expanded-ok",
+                        candidate_id="short-offset-ok",
                         title="Artist - Song",
                         uploader="Artist - Topic",
                         artist="Artist",
                         track="Song",
                         album="Album",
-                        duration_sec=230,  # +30s (fails strict pass A; eligible for pass B)
+                        duration_sec=215,
                     )
                 ]
             }
         )
         best = service.search_music_track_best_match("Artist", "Song", album="Album", duration_ms=200000, limit=6)
         self.assertIsNotNone(best)
-        self.assertEqual(best.get("candidate_id"), "expanded-ok")
-        self.assertGreater(int(best.get("duration_delta_ms") or 0), 12000)
-        self.assertLessEqual(int(best.get("duration_delta_ms") or 0), 35000)
+        self.assertEqual(best.get("candidate_id"), "short-offset-ok")
+        self.assertEqual(int(best.get("duration_delta_ms") or 0), 15000)
         self.assertTrue(bool(best.get("authority_channel_match")))
-        self.assertGreaterEqual(float(best.get("score_track") or 0.0), 0.92)
-        self.assertGreaterEqual(float(best.get("score_artist") or 0.0), 0.92)
         search_meta = getattr(service, "last_music_track_search", {}) or {}
-        self.assertEqual(search_meta.get("selected_pass"), "expanded")
+        self.assertEqual(search_meta.get("selected_pass"), "strict")
+
+    def test_thirty_second_offset_from_authority_channel_is_review_only(self):
+        service = self._service(
+            {
+                "youtube_music": [
+                    _candidate(
+                        source="youtube_music",
+                        candidate_id="review-offset",
+                        title="Artist - Song",
+                        uploader="Artist - Topic",
+                        artist="Artist",
+                        track="Song",
+                        album="Album",
+                        duration_sec=230,
+                    )
+                ]
+            }
+        )
+        best = service.search_music_track_best_match("Artist", "Song", album="Album", duration_ms=200000, limit=6)
+        self.assertIsNone(best)
+        search_meta = getattr(service, "last_music_track_search", {}) or {}
+        rejected = (search_meta.get("decision_edge") or {}).get("rejected_candidates") or []
+        self.assertTrue(
+            any(
+                item.get("top_failed_gate") == "review_duration_offset"
+                and item.get("candidate_id") == "review-offset"
+                for item in rejected
+            )
+        )
 
     def test_live_canonical_track_can_pass_when_expected_track_is_live(self):
         service = self._service(

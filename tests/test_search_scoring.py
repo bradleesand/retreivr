@@ -315,6 +315,55 @@ class SearchScoringTests(unittest.TestCase):
         scored = score_candidate(expected, candidate, source_modifier=1.0)
         self.assertNotEqual(scored.get("rejection_reason"), "low_album_similarity")
         self.assertNotIn("album_mismatch_penalty", (scored.get("score_breakdown") or {}).get("penalty_reasons") or [])
+        self.assertTrue(bool((scored.get("score_breakdown") or {}).get("album_unavailable")))
+        self.assertGreaterEqual(float(scored.get("final_score") or 0.0), 0.90)
+
+    def test_music_track_missing_youtube_album_requires_channel_authority_for_auto_acceptance(self):
+        expected = {
+            "artist": "Artist",
+            "track": "Song",
+            "album": "Album",
+            "duration_hint_sec": 200,
+            "media_intent": "music_track",
+            "query": '"Artist" "Song" "Album"',
+        }
+        candidate = {
+            "source": "youtube",
+            "title": "Artist - Song (Official Audio)",
+            "uploader": "Fan Uploads",
+            "artist_detected": "Artist",
+            "track_detected": "Song",
+            "album_detected": "",
+            "duration_sec": 202,
+            "official": False,
+        }
+        scored = score_candidate(expected, candidate, source_modifier=1.0)
+        self.assertEqual(scored.get("rejection_reason"), "untrusted_source_identity")
+        self.assertFalse(bool(scored.get("authority_channel_match")))
+
+    def test_music_track_missing_youtube_album_allows_authoritative_channel(self):
+        expected = {
+            "artist": "Artist",
+            "track": "Song",
+            "album": "Album",
+            "duration_hint_sec": 200,
+            "media_intent": "music_track",
+            "query": '"Artist" "Song" "Album"',
+        }
+        candidate = {
+            "source": "youtube",
+            "title": "Artist - Song (Official Audio)",
+            "uploader": "Artist - Topic",
+            "artist_detected": "Artist",
+            "track_detected": "Song",
+            "album_detected": "",
+            "duration_sec": 202,
+            "official": True,
+        }
+        scored = score_candidate(expected, candidate, source_modifier=1.0)
+        self.assertIsNone(scored.get("rejection_reason"))
+        self.assertTrue(bool(scored.get("authority_channel_match")))
+        self.assertGreaterEqual(float(scored.get("final_score") or 0.0), 0.90)
 
     def test_music_track_bandcamp_still_requires_album_similarity_floor(self):
         expected = {

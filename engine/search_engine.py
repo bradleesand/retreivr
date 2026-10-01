@@ -195,8 +195,8 @@ MUSIC_TRACK_PENALIZE_TOKENS = ("live", "cover", "karaoke", "remix", "reaction", 
 DEFAULT_MATCH_THRESHOLD = 0.92
 MUSIC_TRACK_THRESHOLD = 0.78
 WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
-_MUSIC_DURATION_STRICT_MAX_DELTA_MS = 12000
-_MUSIC_DURATION_EXPANDED_MAX_DELTA_MS = 35000
+_MUSIC_DURATION_STRICT_MAX_DELTA_MS = 15000
+_MUSIC_DURATION_EXPANDED_MAX_DELTA_MS = 30000
 _MUSIC_DURATION_HARD_CAP_MS = 35000
 _MUSIC_PASS_B_MIN_TITLE_SIMILARITY = 0.92
 _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY = 0.92
@@ -2575,7 +2575,7 @@ class SearchResolutionService:
                 "margin_to_pass": 1.0,
                 "direction": "==",
             }
-        elif reason_value == "pass_b_authority":
+        elif reason_value in {"pass_b_authority", "untrusted_source_identity"}:
             gate = "authority_channel_match"
             authority_value = 1.0 if bool(candidate.get("authority_channel_match")) else 0.0
             metric = {
@@ -2584,6 +2584,19 @@ class SearchResolutionService:
                 "threshold": 1.0,
                 "margin_to_pass": 1.0 - authority_value,
                 "direction": "==",
+            }
+        elif reason_value == "review_duration_offset":
+            gate = "review_duration_offset"
+            metric = {
+                "name": "duration_delta_ms",
+                "value": duration_delta_ms,
+                "threshold": _MUSIC_DURATION_STRICT_MAX_DELTA_MS,
+                "margin_to_pass": (
+                    float(duration_delta_ms) - float(_MUSIC_DURATION_STRICT_MAX_DELTA_MS)
+                    if duration_delta_ms is not None
+                    else None
+                ),
+                "direction": "<=",
             }
 
         return {
@@ -2838,6 +2851,19 @@ class SearchResolutionService:
                     self._build_candidate_observation(
                         candidate,
                         reason="pass_b_duration",
+                        expected_base=expected_base,
+                        pass_name="expanded",
+                    )
+                )
+                continue
+            # A video can have a short lead-in or tail, but a 15-30 second
+            # offset is not enough evidence to download automatically.  Keep
+            # strong official candidates visible to the review queue instead.
+            if int(candidate.get("duration_delta_ms") or 0) > _MUSIC_DURATION_STRICT_MAX_DELTA_MS:
+                rejected_candidates.append(
+                    self._build_candidate_observation(
+                        candidate,
+                        reason="review_duration_offset",
                         expected_base=expected_base,
                         pass_name="expanded",
                     )

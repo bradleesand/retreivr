@@ -3308,7 +3308,11 @@ class DownloadWorkerEngine:
         for candidate in ranked:
             candidate_score = float(candidate.get("final_score") or 0.0)
             logger.debug(f"[MUSIC] threshold_used={_MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
-            if candidate_score >= _MUSIC_TRACK_THRESHOLD:
+            # The shared scorer's rejection reason carries hard identity gates
+            # (variant, cover, duration, and source-authority checks).  This
+            # legacy worker path must not turn a later score adjustment into a
+            # bypass for those gates.
+            if not candidate.get("rejection_reason") and candidate_score >= _MUSIC_TRACK_THRESHOLD:
                 return candidate
         logger.warning(f"[MUSIC] top 5 candidates for track={track} scores:")
         for candidate in ranked[:5]:
@@ -3931,6 +3935,13 @@ class DownloadWorkerEngine:
                     title_similarity >= 0.94
                     and artist_similarity >= 0.94
                     and duration_delta_ms <= 8000
+                )
+            if gate == "review_duration_offset":
+                return (
+                    title_similarity >= 0.95
+                    and artist_similarity >= 0.90
+                    and duration_delta_ms <= 30000
+                    and bool(item.get("authority_channel_match"))
                 )
             return False
 

@@ -38,6 +38,17 @@ _MUSIC_SOURCE_MULTIPLIERS = {
 _MUSIC_WEAK_ALBUM_METADATA_SOURCES = {"youtube_music", "youtube", "soundcloud"}
 _MUSIC_ALL_GATES_PASS_BONUS = 0.03
 
+# Album tags from video-first providers are often absent even for the correct
+# recording.  When that is the only unavailable field, score the evidence the
+# provider can actually supply instead of treating missing album data as a
+# negative signal.  A conflicting, present album remains negative evidence.
+_MUSIC_WEAK_ALBUM_MISSING_WEIGHTS = {
+    "track": 38.0,
+    "artist": 30.0,
+    "duration": 20.0,
+    "authority": 12.0,
+}
+
 _MUSIC_REJECT_PATTERNS = (
     (
         "disallowed_variant",
@@ -503,7 +514,12 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
         if duration_reject_reason in {"preview_duration", "duration_out_of_bounds", "duration_over_hard_cap"}:
             rejection_reason = duration_reject_reason
 
-        if expected_album:
+        album_unavailable = bool(expected_album) and weak_album_metadata_source and not candidate_album
+        if album_unavailable:
+            track_pts = _MUSIC_WEAK_ALBUM_MISSING_WEIGHTS["track"] * effective_track_overlap
+            artist_pts = _MUSIC_WEAK_ALBUM_MISSING_WEIGHTS["artist"] * artist_overlap
+            album_pts = 0.0
+        elif expected_album:
             track_pts = 30.0 * effective_track_overlap
             artist_pts = 24.0 * artist_overlap
             album_pts = 18.0 * album_overlap
@@ -550,6 +566,19 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             and candidate_artist_text != expected_artist_text
         ):
             rejection_reason = rejection_reason or "cover_artist_mismatch"
+
+        # Exact metadata embedded in a video title is easy for covers and fan
+        # uploads to copy.  When album data is unavailable, require an
+        # independent channel-authority signal before an otherwise exact match
+        # can auto-download.  It can still be routed to review by the resolver.
+        if (
+            album_unavailable
+            and effective_track_overlap >= 0.95
+            and artist_overlap >= 0.90
+            and not authority_channel_match
+            and not rejection_reason
+        ):
+            rejection_reason = "untrusted_source_identity"
 
         album_floor_required = bool(expected_album) and not weak_album_metadata_source
         floor_failed = (
@@ -603,6 +632,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
                 "track_pts": track_pts,
                 "artist_pts": artist_pts,
                 "album_pts": album_pts,
+                "album_unavailable": album_unavailable,
                 "duration_pts": duration_pts,
                 "source_authority_pts": source_authority_pts,
                 "owned_channel_bonus_pts": owned_channel_bonus_pts,
