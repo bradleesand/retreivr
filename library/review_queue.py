@@ -905,3 +905,55 @@ def reject_review_queue_items(db_path: str, item_ids: list[str]) -> dict[str, An
         return {"rejected": len(rejected_items), "errors": errors, "items": rejected_items}
     finally:
         conn.close()
+
+
+def dismiss_pending_reviews_for_completed_recording(
+    db_path: str,
+    recording_mbid: str,
+) -> dict[str, Any]:
+    """Remove review fallbacks once the same recording has reached the library."""
+    recording_id = str(recording_mbid or "").strip()
+    if not recording_id:
+        return {"rejected": 0, "errors": [], "items": []}
+
+    conn = _connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id
+            FROM review_queue_items
+            WHERE status=?
+              AND recording_mbid=?
+              AND media_intent != ?
+            """,
+            (REVIEW_STATUS_PENDING, recording_id, TAG_REPAIR_REVIEW_INTENT),
+        )
+        item_ids = [str(row["id"] or "").strip() for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+    result = reject_review_queue_items(db_path, item_ids)
+    dismissed_ids = [str(item.get("id") or "").strip() for item in result.get("items", [])]
+    if not dismissed_ids:
+        return result
+
+    now = utc_now_iso()
+    conn = _connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.executemany(
+            """
+            UPDATE review_queue_items
+            SET resolution_note=?, updated_at=?
+            WHERE id=? AND status=?
+            """,
+            [
+                ("superseded_by_completed_recording", now, item_id, REVIEW_STATUS_REJECTED)
+                for item_id in dismissed_ids
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return result

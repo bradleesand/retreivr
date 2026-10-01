@@ -272,6 +272,48 @@ def test_reject_review_queue_item_deletes_quarantine_file(tmp_path: Path) -> Non
     assert replacement.exists() is False
 
 
+def test_completed_recording_dismisses_matching_pending_review(tmp_path: Path) -> None:
+    job_queue, review_queue = _load_review_modules()
+    db_path = str(tmp_path / "db.sqlite")
+    queued_file = tmp_path / "review.m4a"
+    queued_file.write_bytes(b"review")
+    conn = sqlite3.connect(db_path)
+    try:
+        job_queue.ensure_download_jobs_table(conn)
+        review_queue.ensure_review_queue_table(conn)
+        conn.execute(
+            """
+            INSERT INTO review_queue_items (
+                id, job_id, status, media_type, media_intent, recording_mbid,
+                file_path, quarantine_root, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "review:recording:source",
+                "review-job",
+                review_queue.REVIEW_STATUS_PENDING,
+                "music",
+                "music_track_review",
+                "recording-id",
+                str(queued_file),
+                str(tmp_path),
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = review_queue.dismiss_pending_reviews_for_completed_recording(db_path, "recording-id")
+
+    assert result["rejected"] == 1
+    assert not queued_file.exists()
+    item = review_queue.get_review_queue_item(db_path, "review:recording:source")
+    assert item["status"] == review_queue.REVIEW_STATUS_REJECTED
+    assert item["resolution_note"] == "superseded_by_completed_recording"
+
+
 def test_rejected_tag_repair_item_is_not_reopened_by_rescan(tmp_path: Path) -> None:
     _, review_queue = _load_review_modules()
     db_path = str(tmp_path / "db.sqlite")

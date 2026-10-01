@@ -46,7 +46,10 @@ except Exception:  # pragma: no cover - optional in tests with stubbed metadata.
 from metadata.services.musicbrainz_service import get_musicbrainz_service
 from library.provenance import build_file_provenance, get_retreivr_version
 from library.music_index import mark_music_library_index_stale
-from library.review_queue import record_completed_review_item
+from library.review_queue import (
+    dismiss_pending_reviews_for_completed_recording,
+    record_completed_review_item,
+)
 
 try:
     from engine.musicbrainz_binding import _normalize_title_for_mb_lookup, resolve_best_mb_pair
@@ -4843,6 +4846,36 @@ class DownloadWorkerEngine:
                     status=current_status,
                 )
                 return
+            if not is_review_job and str(getattr(job, "media_intent", "") or "").strip().lower() == "music_track":
+                output_template = getattr(job, "output_template", None)
+                canonical = (
+                    output_template.get("canonical_metadata")
+                    if isinstance(output_template, dict)
+                    and isinstance(output_template.get("canonical_metadata"), dict)
+                    else {}
+                )
+                recording_mbid = str(
+                    canonical.get("recording_mbid")
+                    or canonical.get("mb_recording_id")
+                    or (output_template.get("recording_mbid") if isinstance(output_template, dict) else "")
+                    or ""
+                ).strip()
+                if recording_mbid:
+                    try:
+                        dismissed = dismiss_pending_reviews_for_completed_recording(self.db_path, recording_mbid)
+                        if dismissed.get("rejected"):
+                            _log_event(
+                                logging.INFO,
+                                "music_reviews_dismissed_completed_recording",
+                                job_id=job.id,
+                                recording_mbid=recording_mbid,
+                                dismissed=int(dismissed["rejected"]),
+                            )
+                    except Exception:
+                        logger.exception(
+                            "[MUSIC] failed dismissing redundant reviews recording_mbid=%s",
+                            recording_mbid,
+                        )
             output_template = getattr(job, "output_template", None)
             if isinstance(output_template, dict):
                 import_batch_id = str(output_template.get("import_batch_id") or "").strip()
