@@ -2,6 +2,8 @@ import logging
 import os
 import re
 
+from metadata.genre_policy import canonicalize_genre
+
 try:
     from mutagen import File as MutagenFile
 except ImportError:  # pragma: no cover - optional dependency in tests
@@ -19,6 +21,7 @@ _TRACK_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3})(?:\s*/\s*\d{1,3})?\s*[-._)]\s+")
 
 
 def apply_tags(file_path, tags, artwork, *, source_title=None, allow_overwrite=False, dry_run=False):
+    tags = _canonicalize_tag_payload(tags)
     if dry_run:
         logging.info("Music metadata dry-run tags for %s: %s", os.path.basename(file_path), _format_tags(tags))
         return
@@ -40,6 +43,19 @@ def clean_display_title(value):
     text = str(value or "").strip()
     cleaned = _TRACK_PREFIX_RE.sub("", text).strip()
     return cleaned or text
+
+
+def _canonicalize_tag_payload(tags):
+    if not isinstance(tags, dict):
+        return tags
+    normalized = dict(tags)
+    if "genre" in normalized:
+        canonical_genre = canonicalize_genre(normalized.get("genre"), default=None)
+        if canonical_genre:
+            normalized["genre"] = canonical_genre
+        else:
+            normalized.pop("genre", None)
+    return normalized
 
 
 def read_music_tags(file_path):

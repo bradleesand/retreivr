@@ -45,12 +45,18 @@ def test_rock_aliases_from_musicbrainz_artist_tags_collapse_to_rock() -> None:
 def test_christian_aliases_from_musicbrainz_artist_tags_collapse_to_christian() -> None:
     assert canonicalize_genre("contemporary christian") == "Christian"
     assert canonicalize_genre("christian rock") == "Christian"
+    assert canonicalize_genre("christian metal") == "Christian"
 
 
 def test_holiday_aliases_collapse_to_holiday() -> None:
     assert canonicalize_genre("Christmas") == "Holiday"
     assert canonicalize_genre("xmas") == "Holiday"
     assert canonicalize_genre("Music", default=None) is None
+
+
+def test_chart_window_tags_are_not_genres() -> None:
+    assert canonicalize_genre("1-4wochen", default=None) is None
+    assert canonicalize_genre("1-4wochen; country") == "Country"
 
 
 def test_metadata_normalization_uses_top_level_genre_policy() -> None:

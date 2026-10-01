@@ -251,6 +251,70 @@ def test_apply_tags_writes_track_and_disc_totals_for_mp4(monkeypatch, tmp_path: 
     assert audio.tags.get("disk", [(0, 0)])[0] == (1, 2)
 
 
+def test_apply_tags_canonicalizes_mp4_genre(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "track.m4a"
+    path.write_bytes(b"")
+
+    import metadata.tagger as tagging
+
+    shared_tags = {}
+
+    class FakeMP4:
+        def __init__(self, _file_path: str) -> None:
+            self.tags = shared_tags
+
+        def save(self) -> None:
+            pass
+
+    monkeypatch.setattr(tagging, "MP4", FakeMP4)
+
+    tagging.apply_tags(
+        str(path),
+        {
+            "artist": "Test Artist",
+            "album": "Test Album",
+            "title": "Test Title",
+            "genre": "christian metal",
+        },
+        artwork=None,
+        allow_overwrite=True,
+    )
+
+    assert shared_tags["\xa9gen"] == ["Christian"]
+
+
+def test_apply_tags_skips_non_genre_mp4_tags(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "track.m4a"
+    path.write_bytes(b"")
+
+    import metadata.tagger as tagging
+
+    shared_tags = {}
+
+    class FakeMP4:
+        def __init__(self, _file_path: str) -> None:
+            self.tags = shared_tags
+
+        def save(self) -> None:
+            pass
+
+    monkeypatch.setattr(tagging, "MP4", FakeMP4)
+
+    tagging.apply_tags(
+        str(path),
+        {
+            "artist": "Test Artist",
+            "album": "Test Album",
+            "title": "Test Title",
+            "genre": "1-4wochen",
+        },
+        artwork=None,
+        allow_overwrite=True,
+    )
+
+    assert "\xa9gen" not in shared_tags
+
+
 def test_apply_tags_fails_when_title_did_not_embed(monkeypatch, tmp_path: Path) -> None:
     path = tmp_path / "track.mp3"
     path.write_bytes(b"")

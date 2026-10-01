@@ -9,6 +9,7 @@ from typing import Any
 _SPLIT_RE = re.compile(r"[;,/|]+")
 _TOKEN_RE = re.compile(r"[^a-z0-9]+")
 _WS_RE = re.compile(r"\s+")
+_LETTER_RE = re.compile(r"[a-z]", re.IGNORECASE)
 
 TOP_LEVEL_GENRES = (
     "Alternative",
@@ -45,8 +46,10 @@ _ALIASES: dict[str, str] = {
     "blues": "Blues",
     "christian": "Christian",
     "christian contemporary": "Christian",
+    "christian metal": "Christian",
     "christian pop": "Christian",
     "christian rock": "Christian",
+    "christian worship": "Christian",
     "contemporary christian": "Christian",
     "contemporary christian music": "Christian",
     "ccm": "Christian",
@@ -126,6 +129,18 @@ _ALIASES: dict[str, str] = {
     "world music": "World",
 }
 
+_IGNORED_KEYS: set[str] = {
+    "1 4wochen",
+    "4wochen",
+    "charts",
+    "deutsche charts",
+    "music",
+    "new release",
+    "new releases",
+    "single",
+    "various artists",
+}
+
 
 def canonicalize_genre(value: Any, *, default: str | None = "Unknown") -> str | None:
     """Return Retreivr's top-level genre label for one or more source genres.
@@ -148,6 +163,8 @@ def canonicalize_genre_part(value: Any) -> str | None:
     if not text:
         return None
     key = genre_key(text)
+    if _is_ignored_genre_key(key):
+        return None
     return _ALIASES.get(key)
 
 
@@ -157,6 +174,20 @@ def genre_key(value: Any) -> str:
     text = _TOKEN_RE.sub(" ", text)
     text = _WS_RE.sub(" ", text).strip()
     return text
+
+
+def _is_ignored_genre_key(key: str) -> bool:
+    if not key:
+        return True
+    if key in _IGNORED_KEYS:
+        return True
+    if not _LETTER_RE.search(key):
+        return True
+    # MusicBrainz tags occasionally contain feed/chart bucket names such as
+    # "1-4wochen"; these are not genre evidence and should never be written.
+    if re.search(r"\b\d+\s+\d+\s*wochen\b", key) or re.search(r"\b\d+\s*wochen\b", key):
+        return True
+    return False
 
 
 def _genre_parts(value: Any) -> list[str]:

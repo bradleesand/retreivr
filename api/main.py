@@ -109,6 +109,7 @@ from engine.book_services import (
 )
 from metadata.services.musicbrainz_service import get_musicbrainz_service
 from metadata.providers import artwork as artwork_provider
+from metadata.genre_policy import canonicalize_genre
 from metadata.tag_repair import repair_music_library_tags
 
 from engine.core import (
@@ -10159,30 +10160,20 @@ def download_full_album(data: dict):
     def _best_mb_genre(entity):
         if not isinstance(entity, dict):
             return None
-        genres = []
-        genre_list = entity.get("genre-list")
-        if isinstance(genre_list, list):
-            for item in genre_list:
+        canonical_counts = Counter()
+        for list_key in ("genre-list", "tag-list"):
+            values = entity.get(list_key)
+            if not isinstance(values, list):
+                continue
+            for item in values:
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get("name") or "").strip()
-                if name:
-                    genres.append((_safe_int(item.get("count")), name))
-        if genres:
-            genres.sort(key=lambda entry: entry[0], reverse=True)
-            return genres[0][1]
-        tag_list = entity.get("tag-list")
-        tags = []
-        if isinstance(tag_list, list):
-            for item in tag_list:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name") or "").strip()
-                if name:
-                    tags.append((_safe_int(item.get("count")), name))
-        if tags:
-            tags.sort(key=lambda entry: entry[0], reverse=True)
-            return tags[0][1]
+                genre = canonicalize_genre(name, default=None)
+                if genre:
+                    canonical_counts[genre] += max(1, _safe_int(item.get("count")))
+            if canonical_counts:
+                return canonical_counts.most_common(1)[0][0]
         return None
 
     def _credit_name(artist_credit):
