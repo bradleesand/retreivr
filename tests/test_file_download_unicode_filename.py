@@ -30,11 +30,8 @@ def _build_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> tuple[TestClient
     return TestClient(module.app), module, str(downloads_dir)
 
 
-# Facebook video titles carry a "<views> views · <reactions> reactions "
-# prefix plus whatever emoji the original poster used. Neither is filtered by
-# _safe_filename (which only strips quotes/newlines), so this is the exact
-# shape of filename that reached the download endpoint and 500'd.
-EMOJI_FILENAME = "4.8M views · 2.2K reactions Very accurate ☠️\U0001f602 It's FOSS.mkv"
+# Facebook video titles may contain emojis, and _safe_filename doesn't strip them.
+EMOJI_FILENAME = "sample emoji title \U0001f62c.mkv"
 
 
 def test_content_disposition_ascii_filename(monkeypatch, tmp_path):
