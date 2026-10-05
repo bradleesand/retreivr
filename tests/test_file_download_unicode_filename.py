@@ -31,7 +31,7 @@ def _build_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> tuple[TestClient
 
 
 # Facebook video titles may contain emojis, and _safe_filename doesn't strip them.
-EMOJI_FILENAME = "sample emoji title \U0001f62c.mkv"
+EMOJI_FILENAME = "sample emoji title 😬.mkv"
 
 
 def test_content_disposition_ascii_filename(monkeypatch, tmp_path):
@@ -51,7 +51,7 @@ def test_content_disposition_emoji_filename_round_trips_via_rfc5987(monkeypatch,
     from urllib.parse import unquote
 
     client, module, _ = _build_client(monkeypatch, tmp_path)
-    name = "Café \U0001f600.mkv"
+    name = "Café 😀.mkv"
     header = module._content_disposition(name)
     star_param = next(p for p in header.split("; ") if p.startswith("filename*="))
     encoded = star_param[len("filename*=UTF-8''"):]
@@ -60,7 +60,7 @@ def test_content_disposition_emoji_filename_round_trips_via_rfc5987(monkeypatch,
 
 def test_content_disposition_blank_ascii_fallback_uses_download(monkeypatch, tmp_path):
     client, module, _ = _build_client(monkeypatch, tmp_path)
-    assert '"download"' in module._content_disposition("\U0001f600")
+    assert '"download"' in module._content_disposition("😀")
 
 
 def test_download_endpoint_serves_emoji_named_file_without_500(monkeypatch, tmp_path):
