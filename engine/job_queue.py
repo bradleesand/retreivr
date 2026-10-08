@@ -6682,6 +6682,26 @@ def _apply_replace_in_metadata(opts, rules):
 
 
 
+def _metadata_replace_rules(postprocessors):
+    """Yield (field, regex, replacement) for each MetadataParser replace action."""
+    for pp in postprocessors or []:
+        if not isinstance(pp, dict) or pp.get("key") != "MetadataParser":
+            continue
+        for action in pp.get("actions") or []:
+            if len(action) == 4 and action[0] == MetadataParserPP.Actions.REPLACE:
+                yield action[1], action[2], action[3]
+
+
+def _apply_metadata_parser_to_info(info, postprocessors):
+    """Apply MetadataParser replace rules to an already-extracted info dict."""
+    if not isinstance(info, dict):
+        return
+    for field, regex, replacement in _metadata_replace_rules(postprocessors):
+        value = info.get(field)
+        if isinstance(value, str):
+            info[field] = re.sub(regex, replacement, value)
+
+
 def _redact_ytdlp_opts(opts):
     redacted = {}
     for key, value in (opts or {}).items():
@@ -6787,6 +6807,10 @@ def _render_ytdlp_cli_argv(opts, url):
                     argv.extend(["--audio-format", str(pp.get("preferredcodec"))])
                 if pp.get("preferredquality"):
                     argv.extend(["--audio-quality", str(pp.get("preferredquality"))])
+
+    # MetadataParser replace rules (library postprocessor) -> --replace-in-metadata
+    for field, regex, replacement in _metadata_replace_rules(opts.get("postprocessors")):
+        argv.extend(["--replace-in-metadata", str(field), str(regex), str(replacement)])
 
     # Sidecar metadata improves post-download naming/tagging resilience.
     if opts.get("writeinfojson"):
@@ -7370,6 +7394,11 @@ def download_with_ytdlp(
                     unavailable_class=unavailable_class,
                 )
                 info = {"id": extract_video_id(url), "webpage_url": url}
+
+    # The probe runs with download=False and without postprocessors, so the
+    # MetadataParser rewrite never touches `info`; apply it here so the final
+    # filename/metadata match what the download itself produces.
+    _apply_metadata_parser_to_info(info, opts.get("postprocessors"))
 
     def _is_empty_download_error(e: Exception) -> bool:
         msg = str(e) or ""
