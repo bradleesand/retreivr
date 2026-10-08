@@ -10,6 +10,10 @@ All notable changes to this project will be documented here.
 - Prefer fresh trusted local cache evidence before external search, retain scoring/transport gates, and prevent weaker community mappings from replacing local evidence.
 - Benchmark: 41/42 tracks (97.62%), +0.12 percentage points versus configured baseline; zero wrong-variant flags (delta 0). Regression gate passed.
 
+### Fixed
+- Download filenames are now truncated by bytes (`%(title).120B`) instead of characters (`%(title).200s`). Long titles with multibyte characters, such as Facebook captions containing `·` and `｜`, could exceed the 255-byte filename limit, making yt-dlp fail writing the `.info.json`.
+- When the yt-dlp CLI exits non-zero, Retreivr now logs the filtered stderr tail (`ytdlp_cli_failed`); it was captured but never surfaced.
+
 ## v1.1.9 — Music Artwork Cache and Browse Stability
 
 ### Added
