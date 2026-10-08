@@ -46,7 +46,12 @@ if "musicbrainzngs" not in sys.modules:
 
 from yt_dlp.postprocessor import MetadataParserPP
 
-from engine.job_queue import build_ytdlp_opts, _enforce_video_codec_container_rules
+from engine.job_queue import (
+    build_ytdlp_opts,
+    _apply_metadata_parser_to_info,
+    _enforce_video_codec_container_rules,
+    _render_ytdlp_cli_argv,
+)
 
 
 class YtdlpDownloadOptsTests(unittest.TestCase):
@@ -156,6 +161,47 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
             postprocessors[0]["actions"],
             [(MetadataParserPP.Actions.REPLACE, "title", r"\s+$", "")],
         )
+
+    def test_replace_in_metadata_reaches_ytdlp_cli_argv(self):
+        # Downloads run through the yt-dlp CLI, not the library, so the
+        # MetadataParser postprocessor must be rendered as --replace-in-metadata
+        # or the rule is silently dropped on the main download path.
+        rule = ["title", r"^\d+ views\s*", ""]
+        context = {
+            "operation": "download",
+            "audio_mode": False,
+            "final_format": None,
+            "audio_only": False,
+            "config": {},
+            "overrides": {"replace_in_metadata": [rule]},
+        }
+        opts = build_ytdlp_opts(context)
+        argv = _render_ytdlp_cli_argv(opts, "https://example.com/v")
+        idx = argv.index("--replace-in-metadata")
+        self.assertEqual(argv[idx + 1 : idx + 4], rule)
+        self.assertEqual(argv[-1], "https://example.com/v")
+
+    def test_cli_argv_has_no_replace_in_metadata_without_rules(self):
+        argv = _render_ytdlp_cli_argv({"format": "best"}, "https://example.com/v")
+        self.assertNotIn("--replace-in-metadata", argv)
+
+    def test_replace_in_metadata_applies_to_probe_info(self):
+        # The metadata probe runs with download=False and no postprocessors, so
+        # its `info` (used for final filenames) must be rewritten separately.
+        rule = ["title", r"^\d+(?:\.\d+)?[KMB]? views · \d+(?:\.\d+)?[KMB]? reactions\s*", ""]
+        context = {
+            "operation": "download",
+            "audio_mode": False,
+            "final_format": None,
+            "audio_only": False,
+            "config": {},
+            "overrides": {"replace_in_metadata": [rule]},
+        }
+        opts = build_ytdlp_opts(context)
+        info = {"title": "348K views · 308K reactions Some Video", "uploader": "x"}
+        _apply_metadata_parser_to_info(info, opts["postprocessors"])
+        self.assertEqual(info["title"], "Some Video")
+        self.assertEqual(info["uploader"], "x")
 
     def test_video_mp4_target_sets_postprocess_conversion(self):
         context = {
