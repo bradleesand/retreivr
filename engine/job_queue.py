@@ -6455,7 +6455,7 @@ def build_ytdlp_opts(context):
         if isinstance(default_template, str) and default_template.strip():
             output_template = default_template
         else:
-            output_template = "%(title).200s-%(id)s.%(ext)s"
+            output_template = "%(title).180B-%(id)s.%(ext)s"
 
     opts = {
         "quiet": True,
@@ -7096,6 +7096,12 @@ def _run_ytdlp_cli(
     reader.join(timeout=1)
     stderr_output = "".join(stderr_lines).strip()
     if return_code != 0:
+        error_lines = [line for line in stderr_lines if "[RETREIVR_PROGRESS]" not in line]
+        logger.error(
+            "ytdlp_cli_failed return_code=%s stderr_tail=%s",
+            return_code,
+            "".join(error_lines).strip()[-2000:],
+        )
         raise subprocess.CalledProcessError(return_code, cmd_argv, stderr=stderr_output)
     return stderr_output
 
@@ -7127,7 +7133,7 @@ def download_with_ytdlp(
     if audio_mode:
         output_template = os.path.join(temp_dir, "%(id)s.%(ext)s")
     else:
-        output_template = os.path.join(temp_dir, "%(title).200s - %(uploader).120s - %(id)s.%(ext)s")
+        output_template = os.path.join(temp_dir, "%(title).120B - %(uploader).60B - %(id)s.%(ext)s")
     context = {
         "operation": "download",
         "url": url,
@@ -7239,7 +7245,7 @@ def download_with_ytdlp(
         opts["outtmpl"] = (
             default_tmpl
             if isinstance(default_tmpl, str) and default_tmpl.strip()
-            else "%(title).200s-%(id)s.%(ext)s"
+            else "%(title).180B-%(id)s.%(ext)s"
         )
 
     logging.info(
@@ -7382,7 +7388,7 @@ def download_with_ytdlp(
         opts_for_run["outtmpl"] = (
             default_tmpl
             if isinstance(default_tmpl, str) and default_tmpl.strip()
-            else "%(title).200s-%(id)s.%(ext)s"
+            else "%(title).180B-%(id)s.%(ext)s"
         )
     # Remove progress_hooks if present
     if "progress_hooks" in opts_for_run:
