@@ -16,6 +16,8 @@ All notable changes to this project will be documented here.
 - `resolve_source()` now recognizes `facebook.com` and `fb.watch` URLs (including the `/share/r/...` reel-share link shape). Previously any non-YouTube URL fell through to `"unknown"`, which the web UI rendered as "Open in Unknown" / "Source: Unknown" for every Facebook (and Instagram, TikTok, etc.) result.
 - Clicking "download" on a direct-URL/transient search result (e.g. a pasted Facebook share link) no longer shows a spurious `Failed to refresh results: 404 {"detail":"Search request not found"}` toast after the download already queued successfully. The download button's click handler unconditionally refreshed `/api/search/requests/{id}` afterward; for a transient result there's no real search request, so `state.homeSearchRequestId` is empty and the request hit `/api/search/requests/null`. The sibling "preview modal" download handler already guarded this; the main result-card handler now does too.
 - Home page: a finished direct-URL download now shows as completed (or failed) without a manual page refresh. The UI waited for the run state `completed`, but the server returns a finished run to `idle`, so polling stopped with the card still showing an in-progress state.
+- Download filenames are now truncated by bytes (`%(title).120B`) instead of characters (`%(title).200s`). Long titles with multibyte characters, such as Facebook captions containing `·` and `｜`, could exceed the 255-byte filename limit, making yt-dlp fail writing the `.info.json`.
+- When the yt-dlp CLI exits non-zero, Retreivr now logs the filtered stderr tail (`ytdlp_cli_failed`); it was captured but never surfaced.
 
 ## v1.1.9 — Music Artwork Cache and Browse Stability
 
