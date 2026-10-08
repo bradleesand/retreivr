@@ -10,6 +10,9 @@ All notable changes to this project will be documented here.
 - Prefer fresh trusted local cache evidence before external search, retain scoring/transport gates, and prevent weaker community mappings from replacing local evidence.
 - Benchmark: 41/42 tracks (97.62%), +0.12 percentage points versus configured baseline; zero wrong-variant flags (delta 0). Regression gate passed.
 
+### Fixed
+- Home page: a finished direct-URL download now shows as completed (or failed) without a manual page refresh. The UI waited for the run state `completed`, but the server returns a finished run to `idle`, so polling stopped with the card still showing an in-progress state.
+
 ## v1.1.9 — Music Artwork Cache and Browse Stability
 
 ### Added
