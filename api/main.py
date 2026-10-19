@@ -320,6 +320,7 @@ DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
 WATCHER_BATCH_MAX_WAIT_SECONDS = 300
 WATCHER_TELEGRAM_COOLDOWN_SECONDS = 300
+YOUTUBE_OAUTH_ALERT_COOLDOWN_SECONDS = 7 * 24 * 60 * 60
 WATCHER_SUMMARY_WAIT_SECONDS = 900
 WATCHER_SUMMARY_POLL_SECONDS = 2
 COVER_ART_CACHE_TTL_SECONDS = 3600
@@ -7301,8 +7302,143 @@ def _ensure_watch_tables(db_path):
         )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_watch_next ON playlist_watch (next_check)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_watch_next_poll ON playlist_watch (next_poll_at)")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS youtube_oauth_alert_state (
+            singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+            reconnect_required INTEGER NOT NULL DEFAULT 0,
+            accounts_json TEXT NOT NULL DEFAULT '[]',
+            last_error TEXT,
+            last_detected_at TIMESTAMP,
+            last_telegram_attempt_at TIMESTAMP,
+            last_telegram_sent_at TIMESTAMP,
+            telegram_message_id INTEGER
+        )
+        """
+    )
     conn.commit()
     conn.close()
+
+
+def _read_youtube_oauth_alert_state(db_path) -> dict[str, object]:
+    default = {
+        "reconnect_required": False,
+        "accounts": [],
+        "last_error": None,
+        "last_detected_at": None,
+        "last_telegram_attempt_at": None,
+        "last_telegram_sent_at": None,
+        "telegram_message_id": None,
+    }
+    if not db_path:
+        return default
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT reconnect_required, accounts_json, last_error, last_detected_at, "
+                "last_telegram_attempt_at, last_telegram_sent_at, telegram_message_id "
+                "FROM youtube_oauth_alert_state WHERE singleton_id=1"
+            ).fetchone()
+    except sqlite3.Error:
+        logging.exception("Failed to read YouTube OAuth alert state")
+        return default
+    if not row:
+        return default
+    try:
+        accounts = json.loads(row[1] or "[]")
+    except (TypeError, ValueError):
+        accounts = []
+    return {
+        "reconnect_required": bool(row[0]),
+        "accounts": sorted({str(value).strip() for value in accounts if str(value).strip()}),
+        "last_error": row[2],
+        "last_detected_at": row[3],
+        "last_telegram_attempt_at": row[4],
+        "last_telegram_sent_at": row[5],
+        "telegram_message_id": row[6],
+    }
+
+
+def _update_youtube_oauth_alert(config, db_path, missing_accounts, *, now=None) -> dict[str, object]:
+    """Persist OAuth health and send at most one reconnect alert every seven days."""
+    now = now or datetime.now(timezone.utc)
+    now_iso = _format_iso(now)
+    accounts = sorted({str(value).strip() for value in (missing_accounts or []) if str(value).strip()})
+    previous = _read_youtube_oauth_alert_state(db_path)
+    if not accounts:
+        if previous.get("reconnect_required"):
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE youtube_oauth_alert_state SET reconnect_required=0, accounts_json='[]', last_error=NULL "
+                    "WHERE singleton_id=1"
+                )
+        return _read_youtube_oauth_alert_state(db_path)
+
+    last_sent = _parse_iso(previous.get("last_telegram_sent_at"))
+    may_send = last_sent is None or (now - last_sent).total_seconds() >= YOUTUBE_OAUTH_ALERT_COOLDOWN_SECONDS
+    sent = False
+    message_id = previous.get("telegram_message_id")
+    attempted_at = previous.get("last_telegram_attempt_at")
+    if may_send:
+        attempted_at = now_iso
+        account_text = ", ".join(accounts)
+        message = (
+            "Retreivr needs YouTube OAuth reconnected. "
+            f"Affected account{'s' if len(accounts) != 1 else ''}: {account_text}. "
+            "Open Retreivr Settings and complete YouTube OAuth so playlist automation can continue. "
+            "This alert will not repeat for at least 7 days."
+        )
+        try:
+            result = telegram_notify_result(config, message)
+            sent = bool(result.get("ok"))
+        except Exception:
+            logging.exception("YouTube OAuth reconnect Telegram alert failed")
+            result = {"ok": False, "message_id": None}
+            sent = False
+        if sent:
+            message_id = result.get("message_id")
+            _record_telegram_delivery(
+                run_type="youtube_oauth",
+                sent=True,
+                skipped=False,
+                error=None,
+                message_id=message_id,
+            )
+        else:
+            _record_telegram_delivery(
+                run_type="youtube_oauth",
+                sent=False,
+                skipped=False,
+                error=_telegram_preflight_error(config) or "telegram_api_not_ok",
+                message_id=None,
+            )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO youtube_oauth_alert_state (
+                singleton_id, reconnect_required, accounts_json, last_error, last_detected_at,
+                last_telegram_attempt_at, last_telegram_sent_at, telegram_message_id
+            ) VALUES (1, 1, ?, 'oauth_reconnect_required', ?, ?, ?, ?)
+            ON CONFLICT(singleton_id) DO UPDATE SET
+                reconnect_required=1,
+                accounts_json=excluded.accounts_json,
+                last_error=excluded.last_error,
+                last_detected_at=excluded.last_detected_at,
+                last_telegram_attempt_at=excluded.last_telegram_attempt_at,
+                last_telegram_sent_at=excluded.last_telegram_sent_at,
+                telegram_message_id=excluded.telegram_message_id
+            """,
+            (
+                json.dumps(accounts),
+                now_iso,
+                attempted_at,
+                now_iso if sent else previous.get("last_telegram_sent_at"),
+                message_id,
+            ),
+        )
+    if may_send:
+        logging.warning("YouTube OAuth reconnect alert accounts=%s telegram_sent=%s", ",".join(accounts), sent)
+    return _read_youtube_oauth_alert_state(db_path)
 
 
 def _read_watch_state(db_path):
@@ -8218,15 +8354,36 @@ async def _watcher_supervisor():
 
         accounts = config.get("accounts") or {}
         refresh_log_state = set()
+        youtube_auth_failures: dict[str, str] = {}
+        watcher_clients_cache = getattr(app.state, "watcher_clients_cache", {})
         yt_clients = (
             build_youtube_clients(
                 accounts,
                 config,
-                cache=getattr(app.state, "watcher_clients_cache", {}),
+                cache=watcher_clients_cache,
                 refresh_log_state=refresh_log_state,
+                auth_failures=youtube_auth_failures,
             )
             if accounts
             else {}
+        )
+        required_accounts = {
+            str(item.get("account") or "").strip()
+            for item in playlists
+            if isinstance(item, dict) and str(item.get("account") or "").strip()
+        }
+        missing_oauth_accounts = sorted(
+            account
+            for account in required_accounts
+            if account not in accounts or account in youtube_auth_failures
+        )
+        for account in missing_oauth_accounts:
+            watcher_clients_cache.pop(account, None)
+        _update_youtube_oauth_alert(
+            config,
+            app.state.paths.db_path,
+            missing_oauth_accounts,
+            now=datetime.now(timezone.utc),
         )
         pending_before = len(batch_state["pending_playlists"])
         polled_playlist_key = pl.get("playlist_id") or pl.get("id")
@@ -8563,6 +8720,7 @@ def api_status():
     playlist_import = _get_playlist_import_snapshot()
     queue_status = _get_download_queue_snapshot()
     telegram_delivery = _telegram_delivery_stats_snapshot()
+    youtube_oauth = _read_youtube_oauth_alert_state(app.state.paths.db_path)
     return safe_json({
         "schema_version": STATUS_SCHEMA_VERSION,
         "server_time": datetime.now(timezone.utc).isoformat(),
@@ -8599,6 +8757,7 @@ def api_status():
         "acoustid": acoustid_status,
         "playlist_import": playlist_import,
         "watcher_errors": watcher_errors,
+        "youtube_oauth": youtube_oauth,
         "telegram_delivery": telegram_delivery,
         "status": status,
     })
