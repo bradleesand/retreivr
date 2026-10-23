@@ -256,6 +256,7 @@ const oauthState = {
 const notificationState = {
   counter: 0,
   timers: new Map(),
+  youtubeOauthReconnectKey: "",
 };
 const previewState = {
   open: false,
@@ -10285,6 +10286,31 @@ async function refreshStatus() {
     const status = data.status || {};
     const failures = status.run_failures || [];
     const watcherErrors = data.watcher_errors || [];
+    const youtubeOauth = data.youtube_oauth || {};
+    const oauthAccounts = Array.isArray(youtubeOauth.accounts)
+      ? youtubeOauth.accounts.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const oauthReconnectKey = youtubeOauth.reconnect_required
+      ? (oauthAccounts.join(",") || "youtube")
+      : "";
+    if (oauthReconnectKey && notificationState.youtubeOauthReconnectKey !== oauthReconnectKey) {
+      notificationState.youtubeOauthReconnectKey = oauthReconnectKey;
+      notify({
+        kind: "warning",
+        message: `YouTube OAuth needs to be reconnected${oauthAccounts.length ? ` for ${oauthAccounts.join(", ")}` : ""}. Playlist automation may be paused.`,
+        sticky: true,
+        scope: "youtube-oauth-reconnect",
+        actionLabel: "Open settings",
+        actionHandler: () => {
+          setPage("config");
+          showSettingsPage("settings-core", { jump: true, smooth: true });
+          window.location.hash = "settings-core";
+        },
+      });
+    } else if (!oauthReconnectKey && notificationState.youtubeOauthReconnectKey) {
+      notificationState.youtubeOauthReconnectKey = "";
+      clearNotifications("youtube-oauth-reconnect");
+    }
     let errorText = data.error || status.last_error_message || "";
     if (!errorText) {
       if (status.single_download_ok === false) {
@@ -22420,7 +22446,9 @@ function bindEvents() {
       button.textContent = "Queued";
       try {
         await enqueueSearchCandidate(itemId, candidateId, { messageEl: $("#home-search-message") });
-        await refreshHomeResults(state.homeSearchRequestId);
+        if (state.homeSearchRequestId) {
+          await refreshHomeResults(state.homeSearchRequestId);
+        }
       } catch (err) {
         showHomeEnqueueError(actionContainer, err.message || "Failed to enqueue download.");
       } finally {
