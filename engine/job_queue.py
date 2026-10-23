@@ -24,6 +24,7 @@ from uuid import uuid4
 
 import requests
 from yt_dlp import YoutubeDL
+from yt_dlp.postprocessor import MetadataParserPP
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
@@ -170,6 +171,7 @@ _YTDLP_DOWNLOAD_ALLOWLIST = {
     "noproxy",
     "proxy",
     "ratelimit",
+    "replace_in_metadata",
     "retries",
     "sleep_interval",
     "socket_timeout",
@@ -285,6 +287,8 @@ _WORKER_IDLE_MIN_POLL_SECONDS = 2
 _WORKER_IDLE_MAX_POLL_SECONDS = 5
 _SOURCE_DEFAULT_CONCURRENCY = 2
 _SOURCE_MAX_CONCURRENCY = 4
+_MEDIA_LANE_DEFAULT_CONCURRENCY = {"video": 2, "music": 2, "other": 1}
+_MEDIA_LANE_MAX_CONCURRENCY = 8
 _GLOBAL_MAX_CONCURRENT_JOBS = 32
 _MUSIC_PRERESOLVE_POOL_DEFAULT_WORKERS = 3
 _MUSIC_PRERESOLVE_POOL_MAX_WORKERS = 6
@@ -297,6 +301,30 @@ _MUSIC_CANDIDATE_FAILURE_MIN_COUNT = 1
 _IMPORT_DUPLICATE_STALE_QUEUED_SECONDS = 30 * 60
 _IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS = 20 * 60
 _IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS = 60 * 60
+
+
+def media_lane_for_values(media_type: str | None, media_intent: str | None) -> str:
+    """Return the execution lane independently from the provider/source."""
+    media_type_key = str(media_type or "").strip().lower()
+    intent_key = str(media_intent or "").strip().lower()
+    if media_type_key == "music" or intent_key.startswith("music_"):
+        return "music"
+    if media_type_key == "video" or intent_key in {
+        "video",
+        "playlist",
+        "episode",
+        "movie",
+        "short",
+    }:
+        return "video"
+    return "other"
+
+
+def media_lane_for_job(job) -> str:
+    return media_lane_for_values(
+        getattr(job, "media_type", None),
+        getattr(job, "media_intent", None),
+    )
 
 
 @dataclass(frozen=True)
@@ -794,6 +822,25 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def list_media_lanes_with_queued_jobs(self, *, now=None):
+        """List ready execution lanes without coupling scheduling to providers."""
+        now = now or utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT media_type, media_intent FROM download_jobs "
+                "WHERE status=? AND (queued IS NULL OR queued<=?)",
+                (JOB_STATUS_QUEUED, now),
+            )
+            lanes = {
+                media_lane_for_values(row[0], row[1])
+                for row in cur.fetchall()
+            }
+            return [lane for lane in ("video", "music", "other") if lane in lanes]
+        finally:
+            conn.close()
+
     def get_job_status(self, job_id):
         conn = self._connect()
         try:
@@ -976,6 +1023,7 @@ class DownloadJobStore:
         *,
         error_message,
         retry_after_hours,
+        retry_jitter_hours=0,
     ):
         if not job:
             return
@@ -998,7 +1046,17 @@ class DownloadJobStore:
             hours = max(1, int(retry_after_hours))
         except Exception:
             hours = 24
-        next_attempt_at = (now_dt + timedelta(hours=hours)).isoformat()
+        try:
+            jitter_hours = max(0, min(int(retry_jitter_hours or 0), 24 * 7))
+        except Exception:
+            jitter_hours = 0
+        jitter_seconds = 0
+        if jitter_hours:
+            digest = hashlib.sha256(f"{job.id}:{now_iso}".encode("utf-8")).hexdigest()
+            jitter_seconds = int(digest[:8], 16) % (jitter_hours * 3600 + 1)
+        next_attempt_at = (
+            now_dt + timedelta(hours=hours, seconds=jitter_seconds)
+        ).isoformat()
         conn = self._connect()
         try:
             cur = conn.cursor()
@@ -2022,6 +2080,103 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def claim_next_job_for_lane(
+        self,
+        lane,
+        *,
+        now=None,
+        max_active_per_lane=1,
+        max_active_total=None,
+    ):
+        """Claim the oldest ready job in a media lane.
+
+        Provider/source is deliberately not part of lane selection. A music
+        review backed by YouTube therefore cannot consume a video slot.
+        """
+        lane = str(lane or "other").strip().lower()
+        if lane not in {"video", "music", "other"}:
+            lane = "other"
+        now = now or utc_now()
+        try:
+            lane_limit = max(1, int(max_active_per_lane or 1))
+        except (TypeError, ValueError):
+            lane_limit = 1
+        total_limit = None
+        if max_active_total is not None:
+            try:
+                parsed_total = int(max_active_total)
+            except (TypeError, ValueError):
+                parsed_total = None
+            if parsed_total is not None and parsed_total > 0:
+                total_limit = parsed_total
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                "SELECT media_type, media_intent FROM download_jobs WHERE status IN (?, ?)",
+                (JOB_STATUS_CLAIMED, JOB_STATUS_DOWNLOADING),
+            )
+            active_rows = cur.fetchall()
+            if total_limit is not None and len(active_rows) >= total_limit:
+                conn.commit()
+                return None
+            active_in_lane = sum(
+                1
+                for row in active_rows
+                if media_lane_for_values(row[0], row[1]) == lane
+            )
+            if active_in_lane >= lane_limit:
+                conn.commit()
+                return None
+
+            cur.execute(
+                "SELECT * FROM download_jobs "
+                "WHERE status=? AND (queued IS NULL OR queued<=?) "
+                "ORDER BY created_at ASC",
+                (JOB_STATUS_QUEUED, now),
+            )
+            row = None
+            for candidate in cur.fetchall():
+                if media_lane_for_values(candidate["media_type"], candidate["media_intent"]) != lane:
+                    continue
+                batch_id, batch_cap = _import_batch_claim_metadata(candidate)
+                if batch_id and batch_cap:
+                    cur.execute(
+                        "SELECT output_template FROM download_jobs WHERE status IN (?, ?)",
+                        (JOB_STATUS_CLAIMED, JOB_STATUS_DOWNLOADING),
+                    )
+                    active_batch_count = sum(
+                        1
+                        for active_row in cur.fetchall()
+                        if _import_batch_claim_metadata(active_row)[0] == batch_id
+                    )
+                    if active_batch_count >= batch_cap:
+                        continue
+                row = candidate
+                break
+            if not row:
+                conn.commit()
+                return None
+            job_id = row["id"]
+            cur.execute(
+                "UPDATE download_jobs SET status=?, claimed=?, updated_at=? "
+                "WHERE id=? AND status=?",
+                (JOB_STATUS_CLAIMED, now, now, job_id, JOB_STATUS_QUEUED),
+            )
+            if cur.rowcount != 1:
+                conn.commit()
+                return None
+            conn.commit()
+            updated_row = dict(row)
+            updated_row["status"] = JOB_STATUS_CLAIMED
+            updated_row["claimed"] = now
+            updated_row["updated_at"] = now
+            return self._row_to_job(updated_row)
+        finally:
+            conn.close()
+
     def peek_next_queued_job(self, source, *, exclude_job_id=None, now=None):
         """Return the next ready queued job for a source without claiming it."""
         now = now or utc_now()
@@ -2562,11 +2717,15 @@ class DownloadWorkerEngine:
         self._music_resolution_cache = OrderedDict()
         self._source_semaphores = {}
         self._source_concurrency_limits = {}
+        self._lane_semaphores = {}
+        self._lane_concurrency_limits = {}
         self._global_concurrency_limit_cache = "__unset__"
         self._runtime_metrics_lock = threading.Lock()
         self._runtime_metrics = {
             "source_active_slots": {},
             "source_max_active_slots": {},
+            "lane_active_slots": {},
+            "lane_max_active_slots": {},
             "resolve_latency_count": 0,
             "resolve_latency_total_ms": 0.0,
             "resolve_latency_last_ms": None,
@@ -2639,6 +2798,15 @@ class DownloadWorkerEngine:
             value = 10
         return max(1, min(value, 100))
 
+    def _long_term_retry_jitter_hours(self) -> int:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        raw = cfg.get("long_term_retry_jitter_hours")
+        try:
+            value = int(raw) if raw is not None else 24
+        except Exception:
+            value = 24
+        return max(0, min(value, 24 * 7))
+
     def _long_term_retry_max_attempts(self) -> int:
         cfg = self.config if isinstance(self.config, dict) else {}
         raw = cfg.get("long_term_retry_max_attempts")
@@ -2677,6 +2845,7 @@ class DownloadWorkerEngine:
                 job,
                 error_message=error_message,
                 retry_after_hours=self._long_term_retry_interval_hours(),
+                retry_jitter_hours=self._long_term_retry_jitter_hours(),
             )
             _log_event(
                 logging.INFO,
@@ -2742,6 +2911,7 @@ class DownloadWorkerEngine:
                         self.store.get_job(job_id),
                         error_message=f"long_term_retry_requeue_failed:{exc}",
                         retry_after_hours=self._long_term_retry_interval_hours(),
+                        retry_jitter_hours=self._long_term_retry_jitter_hours(),
                     )
                 except Exception:
                     logger.exception("[MUSIC] failed rescheduling long-term retry job_id=%s", job_id)
@@ -4117,17 +4287,17 @@ class DownloadWorkerEngine:
         return bool(created)
 
     def run_once(self, *, stop_event=None) -> bool:
-        sources = self.store.list_sources_with_queued_jobs()
-        had_queued_work = bool(sources)
-        for source in sources:
+        lanes = self.store.list_media_lanes_with_queued_jobs()
+        had_queued_work = bool(lanes)
+        for lane in lanes:
             if stop_event and stop_event.is_set():
                 break
-            lock = self._get_source_lock(source)
+            lock = self._get_source_lock(f"lane:{lane}")
             if not lock.acquire(blocking=False):
                 continue
             thread = threading.Thread(
-                target=self._run_source_once,
-                args=(source, lock, stop_event),
+                target=self._run_lane_once,
+                args=(lane, lock, stop_event),
                 daemon=False,
             )
             thread.start()
@@ -4183,6 +4353,25 @@ class DownloadWorkerEngine:
             self._source_concurrency_limits[source] = limit
         return limit
 
+    def _lane_concurrency(self, lane) -> int:
+        lane = str(lane or "other").strip().lower()
+        with self._locks_lock:
+            existing = self._lane_concurrency_limits.get(lane)
+            if isinstance(existing, int) and existing > 0:
+                return existing
+        cfg = self.config if isinstance(self.config, dict) else {}
+        configured = cfg.get("media_lane_concurrency")
+        configured = configured if isinstance(configured, dict) else {}
+        raw = configured.get(lane, _MEDIA_LANE_DEFAULT_CONCURRENCY.get(lane, 1))
+        try:
+            limit = int(raw)
+        except (TypeError, ValueError):
+            limit = _MEDIA_LANE_DEFAULT_CONCURRENCY.get(lane, 1)
+        limit = max(1, min(limit, _MEDIA_LANE_MAX_CONCURRENCY))
+        with self._locks_lock:
+            self._lane_concurrency_limits[lane] = limit
+        return limit
+
     def _global_concurrency_limit(self) -> int | None:
         with self._locks_lock:
             cached = self._global_concurrency_limit_cache
@@ -4226,6 +4415,16 @@ class DownloadWorkerEngine:
             if updated > peak:
                 self._runtime_metrics["source_max_active_slots"][source_key] = updated
 
+    def _metric_set_lane_active(self, lane, delta: int) -> None:
+        lane_key = str(lane or "other").strip() or "other"
+        with self._runtime_metrics_lock:
+            current = int(self._runtime_metrics["lane_active_slots"].get(lane_key, 0))
+            updated = max(0, current + int(delta))
+            self._runtime_metrics["lane_active_slots"][lane_key] = updated
+            peak = int(self._runtime_metrics["lane_max_active_slots"].get(lane_key, 0))
+            if updated > peak:
+                self._runtime_metrics["lane_max_active_slots"][lane_key] = updated
+
     def _metric_record_resolve_latency(self, elapsed_ms: float) -> None:
         try:
             value = float(elapsed_ms)
@@ -4248,6 +4447,7 @@ class DownloadWorkerEngine:
         summary = {
             "oldest_queued_age_seconds": None,
             "oldest_queued_by_source_seconds": {},
+            "oldest_queued_by_lane_seconds": {},
         }
         conn = None
         try:
@@ -4256,17 +4456,17 @@ class DownloadWorkerEngine:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT source, MIN(created_at) AS oldest_created_at
+                SELECT media_type, media_intent, MIN(created_at) AS oldest_created_at
                 FROM download_jobs
                 WHERE status=?
-                GROUP BY source
+                GROUP BY media_type, media_intent
                 """,
                 (JOB_STATUS_QUEUED,),
             )
             oldest_global = None
             per_source = {}
             for row in cur.fetchall():
-                source = str(row["source"] or "unknown").strip() or "unknown"
+                source = media_lane_for_values(row["media_type"], row["media_intent"])
                 created_at = str(row["oldest_created_at"] or "").strip()
                 if not created_at:
                     continue
@@ -4277,11 +4477,12 @@ class DownloadWorkerEngine:
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
                 age_seconds = max(0.0, (now - ts.astimezone(timezone.utc)).total_seconds())
-                per_source[source] = round(age_seconds, 3)
+                per_source[source] = round(max(age_seconds, per_source.get(source, 0.0)), 3)
                 if oldest_global is None or age_seconds > oldest_global:
                     oldest_global = age_seconds
             summary["oldest_queued_age_seconds"] = round(oldest_global, 3) if oldest_global is not None else None
             summary["oldest_queued_by_source_seconds"] = per_source
+            summary["oldest_queued_by_lane_seconds"] = dict(per_source)
             return summary
         except Exception:
             logger.exception("worker_queue_age_metrics_failed")
@@ -4297,6 +4498,8 @@ class DownloadWorkerEngine:
         with self._runtime_metrics_lock:
             source_active_slots = dict(self._runtime_metrics.get("source_active_slots") or {})
             source_max_active_slots = dict(self._runtime_metrics.get("source_max_active_slots") or {})
+            lane_active_slots = dict(self._runtime_metrics.get("lane_active_slots") or {})
+            lane_max_active_slots = dict(self._runtime_metrics.get("lane_max_active_slots") or {})
             resolve_count = int(self._runtime_metrics.get("resolve_latency_count") or 0)
             resolve_total = float(self._runtime_metrics.get("resolve_latency_total_ms") or 0.0)
             resolve_last = self._runtime_metrics.get("resolve_latency_last_ms")
@@ -4306,6 +4509,8 @@ class DownloadWorkerEngine:
         return {
             "source_active_slots": source_active_slots,
             "source_max_active_slots": source_max_active_slots,
+            "lane_active_slots": lane_active_slots,
+            "lane_max_active_slots": lane_max_active_slots,
             "resolve_latency_ms": {
                 "count": resolve_count,
                 "last": round(float(resolve_last), 3) if resolve_last is not None else None,
@@ -4331,6 +4536,20 @@ class DownloadWorkerEngine:
                 return semaphore
             semaphore = threading.BoundedSemaphore(value=limit)
             self._source_semaphores[source] = semaphore
+            return semaphore
+
+    def _get_lane_semaphore(self, lane):
+        with self._locks_lock:
+            semaphore = self._lane_semaphores.get(lane)
+            if semaphore:
+                return semaphore
+        limit = self._lane_concurrency(lane)
+        with self._locks_lock:
+            semaphore = self._lane_semaphores.get(lane)
+            if semaphore:
+                return semaphore
+            semaphore = threading.BoundedSemaphore(value=limit)
+            self._lane_semaphores[lane] = semaphore
             return semaphore
 
     def cancel_job(self, job_id: str, *, reason: str | None = None) -> bool:
@@ -4559,7 +4778,79 @@ class DownloadWorkerEngine:
                 logger.exception("[MUSIC] pre-resolve submit failed next_job_id=%s", next_job.id)
                 self._release_pre_resolve_slot(next_job.id)
 
+    def _run_lane_once(self, lane, lock, stop_event):
+        try:
+            lane_limit = self._lane_concurrency(lane)
+            lane_semaphore = self._get_lane_semaphore(lane)
+            active_workers = []
+
+            def _spawn(job):
+                self._metric_set_lane_active(lane, +1)
+                self._metric_set_source_active(job.source, +1)
+
+                def _runner():
+                    try:
+                        self._execute_job(job, stop_event=stop_event)
+                    finally:
+                        self._metric_set_source_active(job.source, -1)
+                        self._metric_set_lane_active(lane, -1)
+                        lane_semaphore.release()
+
+                thread = threading.Thread(
+                    target=_runner,
+                    name=f"lane-worker-{lane}-{job.id[:8]}",
+                    daemon=False,
+                )
+                thread.start()
+                active_workers.append(thread)
+
+            while True:
+                if stop_event and stop_event.is_set() and not active_workers:
+                    return
+                active_workers = [thread for thread in active_workers if thread.is_alive()]
+                claimed_any = False
+                while True:
+                    if stop_event and stop_event.is_set():
+                        break
+                    if not lane_semaphore.acquire(blocking=False):
+                        break
+                    job = self.store.claim_next_job_for_lane(
+                        lane,
+                        max_active_per_lane=lane_limit,
+                        # Lane reservations are intentionally independent. A
+                        # saturated music lane must never consume video slots.
+                        max_active_total=None,
+                    )
+                    if not job:
+                        lane_semaphore.release()
+                        break
+                    claimed_any = True
+                    if self._is_job_cancelled(job.id, stop_event):
+                        try:
+                            self.store.mark_canceled(job.id, reason="Cancelled by user")
+                        finally:
+                            lane_semaphore.release()
+                        continue
+                    _log_event(
+                        logging.INFO,
+                        "job_claimed",
+                        job_id=job.id,
+                        trace_id=job.trace_id,
+                        lane=lane,
+                        source=job.source,
+                        origin=job.origin,
+                        media_intent=job.media_intent,
+                    )
+                    _spawn(job)
+                if not active_workers and not claimed_any:
+                    return
+                for thread in list(active_workers):
+                    thread.join(timeout=0.1)
+        finally:
+            lock.release()
+
     def _run_source_once(self, source, lock, stop_event):
+        """Legacy source-drain helper retained for focused compatibility tests."""
         try:
             # Drain all ready jobs for this source while holding the source lock.
             # Dispatch up to per-source concurrency and backfill as workers complete.
@@ -6336,6 +6627,8 @@ def resolve_source(url):
         return "youtube_music"
     if "youtube.com" in host or "youtu.be" in host:
         return "youtube"
+    if "facebook.com" in host or "fb.watch" in host:
+        return "facebook"
     return "unknown"
 
 
@@ -6626,9 +6919,76 @@ def _merge_overrides(opts, overrides, *, operation, lock_format=False):
             continue
         if lock_format and key in {"format", "merge_output_format", "recodevideo"}:
             continue
+        if key == "replace_in_metadata":
+            _apply_replace_in_metadata(opts, value)
+            continue
         opts[key] = value
     return opts
 
+
+def _apply_replace_in_metadata(opts, rules):
+    """Wire a `replace_in_metadata` config override into yt-dlp's actual
+    metadata-rewriting mechanism.
+
+    `replace_in_metadata` has no meaning to `yt_dlp.YoutubeDL()` by itself --
+    it's a CLI-only convenience. `yt_dlp/__init__.py` translates
+    `--replace-in-metadata FIELDS REGEX REPLACE` into a `MetadataParser`
+    postprocessor entry before a params dict is ever built; the library has
+    no code path that reads a bare `replace_in_metadata` key. Setting it
+    directly on `opts` (a plain passthrough) is a silent no-op -- the title
+    (or whichever field) is never actually rewritten.
+
+    `rules` is `[[fields, regex, replacement], ...]`, where `fields` may be a
+    comma-separated list of metadata field names (matching yt-dlp's own
+    `--replace-in-metadata` argument shape).
+    """
+    if not isinstance(rules, list):
+        return
+    actions = []
+    for rule in rules:
+        if not (isinstance(rule, (list, tuple)) and len(rule) == 3):
+            logging.warning("Dropping malformed replace_in_metadata rule: %r", rule)
+            continue
+        fields, regex, replacement = rule
+        for field in str(fields).split(","):
+            field = field.strip()
+            if not field:
+                continue
+            action = (MetadataParserPP.Actions.REPLACE, field, regex, replacement)
+            try:
+                MetadataParserPP.validate_action(*action)
+            except Exception:
+                logging.warning("Dropping invalid replace_in_metadata rule: %r", rule)
+                continue
+            actions.append(action)
+    if not actions:
+        return
+    opts.setdefault("postprocessors", []).append({
+        "key": "MetadataParser",
+        "actions": actions,
+        "when": "pre_process",
+    })
+
+
+
+def _metadata_replace_rules(postprocessors):
+    """Yield (field, regex, replacement) for each MetadataParser replace action."""
+    for pp in postprocessors or []:
+        if not isinstance(pp, dict) or pp.get("key") != "MetadataParser":
+            continue
+        for action in pp.get("actions") or []:
+            if len(action) == 4 and action[0] == MetadataParserPP.Actions.REPLACE:
+                yield action[1], action[2], action[3]
+
+
+def _apply_metadata_parser_to_info(info, postprocessors):
+    """Apply MetadataParser replace rules to an already-extracted info dict."""
+    if not isinstance(info, dict):
+        return
+    for field, regex, replacement in _metadata_replace_rules(postprocessors):
+        value = info.get(field)
+        if isinstance(value, str):
+            info[field] = re.sub(regex, replacement, value)
 
 
 def _redact_ytdlp_opts(opts):
@@ -6736,6 +7096,10 @@ def _render_ytdlp_cli_argv(opts, url):
                     argv.extend(["--audio-format", str(pp.get("preferredcodec"))])
                 if pp.get("preferredquality"):
                     argv.extend(["--audio-quality", str(pp.get("preferredquality"))])
+
+    # MetadataParser replace rules (library postprocessor) -> --replace-in-metadata
+    for field, regex, replacement in _metadata_replace_rules(opts.get("postprocessors")):
+        argv.extend(["--replace-in-metadata", str(field), str(regex), str(replacement)])
 
     # Sidecar metadata improves post-download naming/tagging resilience.
     if opts.get("writeinfojson"):
@@ -7319,6 +7683,11 @@ def download_with_ytdlp(
                     unavailable_class=unavailable_class,
                 )
                 info = {"id": extract_video_id(url), "webpage_url": url}
+
+    # The probe runs with download=False and without postprocessors, so the
+    # MetadataParser rewrite never touches `info`; apply it here so the final
+    # filename/metadata match what the download itself produces.
+    _apply_metadata_parser_to_info(info, opts.get("postprocessors"))
 
     def _is_empty_download_error(e: Exception) -> bool:
         msg = str(e) or ""

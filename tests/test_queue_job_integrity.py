@@ -75,6 +75,7 @@ from engine.job_queue import (
     JOB_STATUS_POSTPROCESSING,
     JOB_STATUS_QUEUED,
     ensure_download_jobs_table,
+    media_lane_for_values,
 )
 
 
@@ -161,3 +162,50 @@ def test_happy_path_transition_chain_reaches_completed(tmp_path: Path) -> None:
     assert store.mark_postprocessing(job_id) is True
     assert store.mark_completed(job_id, file_path="/tmp/final.mp4") is True
     assert store.get_job_status(job_id) == JOB_STATUS_COMPLETED
+
+
+def test_media_lane_is_independent_of_provider() -> None:
+    assert media_lane_for_values("music", "music_track_review") == "music"
+    assert media_lane_for_values("video", "playlist") == "video"
+    assert media_lane_for_values("video", "video") == "video"
+
+
+def test_music_from_youtube_does_not_consume_video_lane(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    music_id, created, _ = store.enqueue_job(
+        origin="music_review",
+        origin_id="review-1",
+        media_type="music",
+        media_intent="music_track_review",
+        source="youtube",
+        url="https://www.youtube.com/watch?v=musiclane01",
+        output_template={"output_dir": "music", "final_format": "m4a"},
+    )
+    assert created is True
+    video_id = _enqueue_job(store, suffix="video-lane")
+
+    claimed_music = store.claim_next_job_for_lane("music", max_active_per_lane=1)
+    claimed_video = store.claim_next_job_for_lane("video", max_active_per_lane=1)
+
+    assert claimed_music is not None and claimed_music.id == music_id
+    assert claimed_video is not None and claimed_video.id == video_id
+
+
+def test_media_lane_limit_isolated_per_lane(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    for suffix in ("a", "b"):
+        store.enqueue_job(
+            origin="music_album",
+            origin_id=f"album-{suffix}",
+            media_type="music",
+            media_intent="music_track",
+            source="youtube",
+            url=f"https://www.youtube.com/watch?v=music-{suffix}",
+            output_template={"output_dir": "music", "final_format": "m4a"},
+        )
+    video_id = _enqueue_job(store, suffix="reserved-video")
+
+    assert store.claim_next_job_for_lane("music", max_active_per_lane=1) is not None
+    assert store.claim_next_job_for_lane("music", max_active_per_lane=1) is None
+    video = store.claim_next_job_for_lane("video", max_active_per_lane=1)
+    assert video is not None and video.id == video_id

@@ -11,8 +11,9 @@ All notable changes to this project will be documented here.
 - Benchmark: 41/42 tracks (97.62%), +0.12 percentage points versus configured baseline; zero wrong-variant flags (delta 0). Regression gate passed.
 
 ### Fixed
-- Download filenames are now truncated by bytes (`%(title).120B`) instead of characters (`%(title).200s`). Long titles with multibyte characters, such as Facebook captions containing `·` and `｜`, could exceed the 255-byte filename limit, making yt-dlp fail writing the `.info.json`.
-- When the yt-dlp CLI exits non-zero, Retreivr now logs the filtered stderr tail (`ytdlp_cli_failed`); it was captured but never surfaced.
+- `replace_in_metadata` in `yt_dlp_opts` now takes effect on real downloads; before, it never did, so metadata (e.g. stripping Facebook's "X views · Y reactions" title prefix) was never rewritten despite being configured. Two causes, both fixed:
+  - It was set verbatim on the `YoutubeDL()` params as a bare key, which yt-dlp ignores outside its own CLI-to-postprocessor translation. It is now translated into a `MetadataParser` postprocessor, matching what `--replace-in-metadata` does internally.
+  - Nothing in the download flow used that postprocessor: downloads run through the yt-dlp CLI, whose argument builder dropped it, and the metadata probe strips postprocessors and runs with `download=False`. The rule is now passed to the CLI as `--replace-in-metadata` and applied to the probe result, so final filenames get the same rewrite.
 
 ## v1.1.9 — Music Artwork Cache and Browse Stability
 
