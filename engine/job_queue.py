@@ -24,6 +24,7 @@ from uuid import uuid4
 
 import requests
 from yt_dlp import YoutubeDL
+from yt_dlp.postprocessor import MetadataParserPP
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
@@ -170,6 +171,7 @@ _YTDLP_DOWNLOAD_ALLOWLIST = {
     "noproxy",
     "proxy",
     "ratelimit",
+    "replace_in_metadata",
     "retries",
     "sleep_interval",
     "socket_timeout",
@@ -6915,9 +6917,76 @@ def _merge_overrides(opts, overrides, *, operation, lock_format=False):
             continue
         if lock_format and key in {"format", "merge_output_format", "recodevideo"}:
             continue
+        if key == "replace_in_metadata":
+            _apply_replace_in_metadata(opts, value)
+            continue
         opts[key] = value
     return opts
 
+
+def _apply_replace_in_metadata(opts, rules):
+    """Wire a `replace_in_metadata` config override into yt-dlp's actual
+    metadata-rewriting mechanism.
+
+    `replace_in_metadata` has no meaning to `yt_dlp.YoutubeDL()` by itself --
+    it's a CLI-only convenience. `yt_dlp/__init__.py` translates
+    `--replace-in-metadata FIELDS REGEX REPLACE` into a `MetadataParser`
+    postprocessor entry before a params dict is ever built; the library has
+    no code path that reads a bare `replace_in_metadata` key. Setting it
+    directly on `opts` (a plain passthrough) is a silent no-op -- the title
+    (or whichever field) is never actually rewritten.
+
+    `rules` is `[[fields, regex, replacement], ...]`, where `fields` may be a
+    comma-separated list of metadata field names (matching yt-dlp's own
+    `--replace-in-metadata` argument shape).
+    """
+    if not isinstance(rules, list):
+        return
+    actions = []
+    for rule in rules:
+        if not (isinstance(rule, (list, tuple)) and len(rule) == 3):
+            logging.warning("Dropping malformed replace_in_metadata rule: %r", rule)
+            continue
+        fields, regex, replacement = rule
+        for field in str(fields).split(","):
+            field = field.strip()
+            if not field:
+                continue
+            action = (MetadataParserPP.Actions.REPLACE, field, regex, replacement)
+            try:
+                MetadataParserPP.validate_action(*action)
+            except Exception:
+                logging.warning("Dropping invalid replace_in_metadata rule: %r", rule)
+                continue
+            actions.append(action)
+    if not actions:
+        return
+    opts.setdefault("postprocessors", []).append({
+        "key": "MetadataParser",
+        "actions": actions,
+        "when": "pre_process",
+    })
+
+
+
+def _metadata_replace_rules(postprocessors):
+    """Yield (field, regex, replacement) for each MetadataParser replace action."""
+    for pp in postprocessors or []:
+        if not isinstance(pp, dict) or pp.get("key") != "MetadataParser":
+            continue
+        for action in pp.get("actions") or []:
+            if len(action) == 4 and action[0] == MetadataParserPP.Actions.REPLACE:
+                yield action[1], action[2], action[3]
+
+
+def _apply_metadata_parser_to_info(info, postprocessors):
+    """Apply MetadataParser replace rules to an already-extracted info dict."""
+    if not isinstance(info, dict):
+        return
+    for field, regex, replacement in _metadata_replace_rules(postprocessors):
+        value = info.get(field)
+        if isinstance(value, str):
+            info[field] = re.sub(regex, replacement, value)
 
 
 def _redact_ytdlp_opts(opts):
@@ -7025,6 +7094,10 @@ def _render_ytdlp_cli_argv(opts, url):
                     argv.extend(["--audio-format", str(pp.get("preferredcodec"))])
                 if pp.get("preferredquality"):
                     argv.extend(["--audio-quality", str(pp.get("preferredquality"))])
+
+    # MetadataParser replace rules (library postprocessor) -> --replace-in-metadata
+    for field, regex, replacement in _metadata_replace_rules(opts.get("postprocessors")):
+        argv.extend(["--replace-in-metadata", str(field), str(regex), str(replacement)])
 
     # Sidecar metadata improves post-download naming/tagging resilience.
     if opts.get("writeinfojson"):
@@ -7602,6 +7675,11 @@ def download_with_ytdlp(
                     unavailable_class=unavailable_class,
                 )
                 info = {"id": extract_video_id(url), "webpage_url": url}
+
+    # The probe runs with download=False and without postprocessors, so the
+    # MetadataParser rewrite never touches `info`; apply it here so the final
+    # filename/metadata match what the download itself produces.
+    _apply_metadata_parser_to_info(info, opts.get("postprocessors"))
 
     def _is_empty_download_error(e: Exception) -> bool:
         msg = str(e) or ""
