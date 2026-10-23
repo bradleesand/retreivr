@@ -22435,7 +22435,9 @@ function bindEvents() {
       button.textContent = "Queued";
       try {
         await enqueueSearchCandidate(itemId, candidateId, { messageEl: $("#home-search-message") });
-        await refreshHomeResults(state.homeSearchRequestId);
+        if (state.homeSearchRequestId) {
+          await refreshHomeResults(state.homeSearchRequestId);
+        }
       } catch (err) {
         showHomeEnqueueError(actionContainer, err.message || "Failed to enqueue download.");
       } finally {
