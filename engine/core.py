@@ -1531,12 +1531,14 @@ def youtube_service(creds):
     return build("youtube", "v3", credentials=creds, cache_discovery=False)
 
 
-def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=None):
+def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=None, auth_failures=None):
     clients = {}
     if not isinstance(accounts, dict):
         return clients
     cache = cache if isinstance(cache, dict) else {}
     refresh_log_state = refresh_log_state if isinstance(refresh_log_state, set) else set()
+    auth_failures = auth_failures if isinstance(auth_failures, dict) else {}
+    auth_failures.clear()
     for cached_name in list(cache.keys()):
         if cached_name not in accounts:
             cache.pop(cached_name, None)
@@ -1544,6 +1546,7 @@ def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=Non
         token_path = acc.get("token")
         if not token_path:
             logging.error("Account %s has no 'token' path configured; skipping", name)
+            auth_failures[name] = "oauth_token_missing"
             continue
         cached = cache.get(name)
         if isinstance(cached, dict) and cached.get("client") and cached.get("creds"):
@@ -1559,6 +1562,7 @@ def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=Non
                     cached["client"] = youtube_service(creds)
                 except RefreshError as exc:
                     logging.error("OAuth refresh failed for account %s: %s", name, exc)
+                    auth_failures[name] = "oauth_refresh_failed"
                     continue
                 except Exception:
                     logging.exception("Failed to refresh OAuth for account %s", name)
@@ -1577,11 +1581,13 @@ def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=Non
                         refresh_log_state.add(name)
                 except RefreshError as exc:
                     logging.error("OAuth refresh failed for account %s: %s", name, exc)
+                    auth_failures[name] = "oauth_refresh_failed"
                     continue
             clients[name] = youtube_service(creds)
             cache[name] = {"client": clients[name], "creds": creds}
         except RefreshError as exc:
             logging.error("OAuth refresh failed for account %s: %s", name, exc)
+            auth_failures[name] = "oauth_refresh_failed"
         except Exception:
             logging.exception("Failed to initialize YouTube client for account %s", name)
     return clients
