@@ -11,7 +11,9 @@ All notable changes to this project will be documented here.
 - Benchmark: 41/42 tracks (97.62%), +0.12 percentage points versus configured baseline; zero wrong-variant flags (delta 0). Regression gate passed.
 
 ### Fixed
-- File downloads (`/api/files/{id}/download`, `/api/deliveries/{id}/download`) and Spotify playlist exports (`/api/music/spotify/playlist/export`) no longer 500 when the filename contains characters outside Latin-1 (emoji, e.g. a Facebook video title or a Spotify playlist name). The `Content-Disposition` header is now built with an RFC 6266 `filename*=UTF-8''...` parameter plus an ASCII `filename=` fallback instead of embedding the raw name directly, which crashed with `UnicodeEncodeError` once the response was sent — after the file had already downloaded successfully.
+- `replace_in_metadata` in `yt_dlp_opts` now takes effect on real downloads; before, it never did, so metadata (e.g. stripping Facebook's "X views · Y reactions" title prefix) was never rewritten despite being configured. Two causes, both fixed:
+  - It was set verbatim on the `YoutubeDL()` params as a bare key, which yt-dlp ignores outside its own CLI-to-postprocessor translation. It is now translated into a `MetadataParser` postprocessor, matching what `--replace-in-metadata` does internally.
+  - Nothing in the download flow used that postprocessor: downloads run through the yt-dlp CLI, whose argument builder dropped it, and the metadata probe strips postprocessors and runs with `download=False`. The rule is now passed to the CLI as `--replace-in-metadata` and applied to the probe result, so final filenames get the same rewrite.
 
 ## v1.1.9 — Music Artwork Cache and Browse Stability
 

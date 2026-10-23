@@ -26,5 +26,17 @@ def test_music_webui_exposes_notification_api_and_player_status_helper() -> None
     for marker in required_markers:
         assert marker in app_js, f"missing notification helper marker: {marker}"
 
+
+def test_webui_surfaces_youtube_oauth_reconnect_as_sticky_toast() -> None:
+    app_js = Path("webUI/app.js").read_text()
+    for marker in (
+        'const youtubeOauth = data.youtube_oauth || {};',
+        'scope: "youtube-oauth-reconnect"',
+        'actionLabel: "Open settings"',
+        'showSettingsPage("settings-core"',
+        'clearNotifications("youtube-oauth-reconnect")',
+    ):
+        assert marker in app_js, f"missing YouTube OAuth toast marker: {marker}"
+
     assert "openMusicPlayerModal" not in app_js
     assert "closeMusicPlayerModal" not in app_js
