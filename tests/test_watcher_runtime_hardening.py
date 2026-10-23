@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -165,6 +165,46 @@ def test_send_watcher_batch_telegram_returns_message_id(monkeypatch) -> None:
     result = module._send_watcher_batch_telegram({}, "test")
     assert result["sent"] is True
     assert result["message_id"] == 777
+
+
+def test_youtube_oauth_reconnect_telegram_is_persistently_throttled(monkeypatch, tmp_path) -> None:
+    module = _load_api_main()
+    db_path = str(tmp_path / "oauth-alert.sqlite")
+    module._ensure_watch_tables(db_path)
+    sent_messages = []
+
+    def _fake_send(_config, message):
+        sent_messages.append(message)
+        return {"ok": True, "message_id": len(sent_messages)}
+
+    monkeypatch.setattr(module, "telegram_notify_result", _fake_send)
+    monkeypatch.setattr(module, "_record_telegram_delivery", lambda **_kwargs: None)
+    start = datetime(2026, 10, 19, tzinfo=timezone.utc)
+
+    first = module._update_youtube_oauth_alert({}, db_path, ["family"], now=start)
+    within_week = module._update_youtube_oauth_alert({}, db_path, ["family"], now=start + timedelta(days=6))
+    after_week = module._update_youtube_oauth_alert({}, db_path, ["family"], now=start + timedelta(days=8))
+
+    assert len(sent_messages) == 2
+    assert "at least 7 days" in sent_messages[0]
+    assert first["reconnect_required"] is True
+    assert within_week["telegram_message_id"] == 1
+    assert after_week["telegram_message_id"] == 2
+
+
+def test_youtube_oauth_reconnect_state_clears_after_recovery(monkeypatch, tmp_path) -> None:
+    module = _load_api_main()
+    db_path = str(tmp_path / "oauth-alert.sqlite")
+    module._ensure_watch_tables(db_path)
+    monkeypatch.setattr(module, "telegram_notify_result", lambda *_args: {"ok": True, "message_id": 17})
+    monkeypatch.setattr(module, "_record_telegram_delivery", lambda **_kwargs: None)
+
+    module._update_youtube_oauth_alert({}, db_path, ["family"])
+    recovered = module._update_youtube_oauth_alert({}, db_path, [])
+
+    assert recovered["reconnect_required"] is False
+    assert recovered["accounts"] == []
+    assert recovered["last_telegram_sent_at"] is not None
 
 
 def test_watcher_failure_notification_dedupes_by_video_id() -> None:
